@@ -2,8 +2,9 @@ name: DailyStockBot
 
 on:
   schedule:
+    # 台北時間週一至週五 14:45 執行 (UTC 06:45)
     - cron: '45 6 * * 1-5'
-  workflow_dispatch:
+  workflow_dispatch: # 允許手動從 Actions 頁面啟動測試
 
 jobs:
   run-bot:
@@ -17,14 +18,20 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 3. 安裝必要套件 (使用 ta 替代 pandas-ta)
+      - name: 3. 安裝必要套件 (解決 tqdm 依賴問題)
         run: |
           python -m pip install --upgrade pip
-          # ta 庫非常輕量且相容性高
-          pip install yfinance pandas requests FinMind ta
+          # yfinance: 抓取股價
+          # pandas: 資料處理
+          # requests: 傳送 LINE 訊息
+          # FinMind: 抓取台股清單
+          # ta: 技術指標計算
+          # tqdm: FinMind 必要的進度條工具
+          pip install yfinance pandas requests FinMind ta tqdm
 
       - name: 4. 執行股票分析並傳送 LINE
         env:
+          # 請確保 GitHub Repository -> Settings -> Secrets 中已設定這兩個變數
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python stock_bot_final.py
