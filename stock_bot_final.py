@@ -35,20 +35,32 @@ def send_line_message(message):
 
 def get_stock_list():
     """使用 FinMind 獲取台股上市股票清單"""
+    # try:
+    #     print("正在從 FinMind 獲取股票清單...")
+    #     dl = DataLoader()
+    #     df = dl.taiwan_stock_info()
+    #     # 過濾出普通股
+    #     df = df[df['type'] == 'stock']
+    #     # 轉換成 yfinance 格式 (例如 2330.TW)
+    #     full_list = [f"{sid}.TW" for sid in df['stock_id'].tolist()]
+    #     # 為了避免 GitHub Actions 執行過久，預設取前 60 檔進行掃描
+    #     # 你可以修改成 full_list[:] 來掃描全部，但建議先小量測試
+    #     return full_list[:60]
+    # except Exception as e:
+    #     print(f"獲取清單失敗: {e}，改用預設清單")
+    #     return ["2330.TW", "2317.TW", "2454.TW", "2308.TW", "2881.TW"]
+
+    """獲取全台股上市清單"""
     try:
-        print("正在從 FinMind 獲取股票清單...")
         dl = DataLoader()
         df = dl.taiwan_stock_info()
-        # 過濾出普通股
         df = df[df['type'] == 'stock']
-        # 轉換成 yfinance 格式 (例如 2330.TW)
         full_list = [f"{sid}.TW" for sid in df['stock_id'].tolist()]
-        # 為了避免 GitHub Actions 執行過久，預設取前 60 檔進行掃描
-        # 你可以修改成 full_list[:] 來掃描全部，但建議先小量測試
-        return full_list[:60]
+        # 移除 [:60] 的限制，掃描全部
+        print(f"成功取得清單，共 {len(full_list)} 檔股票")
+        return full_list 
     except Exception as e:
-        print(f"獲取清單失敗: {e}，改用預設清單")
-        return ["2330.TW", "2317.TW", "2454.TW", "2308.TW", "2881.TW"]
+        return ["2330.TW", "2317.TW", "2454.TW"]
 
 def analyze_stock(ticker_symbol):
     """多重指標選股條件"""
@@ -99,6 +111,10 @@ def analyze_stock(ticker_symbol):
         avg_vol = df['Volume'].iloc[-11:-1].mean()
         if latest['Volume'] > avg_vol * 1.5 and latest['Close'] > prev['Close']:
             signals.append("📊 量大價昂")
+
+        "目前的條件比較嚴格，你可以試著把其中一個改為「寬鬆版」：
+        "RSI 反彈：從 35 改為 40。
+        "量大價昂：從 1.5 倍 改為 1.2 倍。
 
         if signals:
             return f"股票: {ticker_symbol}\n現價: {current_price}\n訊號: {'、'.join(signals)}"
