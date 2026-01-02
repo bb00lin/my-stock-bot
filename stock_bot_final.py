@@ -5,7 +5,7 @@ from FinMind.data import DataLoader
 import requests
 
 # ================= 🔐 安全設定區 =================
-# 請填入你刚才找到的代碼
+import os
 LINE_ACCESS_TOKEN = os.getenv('LINE_ACCESS_TOKEN')
 LINE_USER_ID = os.getenv('LINE_USER_ID')
 
