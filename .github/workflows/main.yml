@@ -1,34 +1,36 @@
 name: DailyStockBot
 
+# 設定觸發條件
 on:
   schedule:
     # 台北時間 14:45 執行 (UTC 06:45)
     - cron: '45 6 * * 1-5'
-  workflow_dispatch:
+  workflow_dispatch: # 允許你隨時點擊按鈕手動測試
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 複製程式碼
+      - name: 1. 複製儲存庫代碼
         uses: actions/checkout@v3
 
-      - name: 2. 設定 Python 3.10
+      - name: 2. 設定 Python 環境 (3.10)
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-- name: 3. 安裝必要套件 (修正版本限制)
+      - name: 3. 安裝必要套件 (解決 pandas-ta 安裝問題)
         run: |
           python -m pip install --upgrade pip
-          # 安裝基礎套件
+          # 先安裝基礎核心套件
           pip install yfinance pandas requests FinMind
-          # 直接從 GitHub 來源安裝 pandas-ta (這是最穩定的解決方法)
+          # 從 GitHub 直接安裝最新版 pandas-ta，這能解決 PyPI 找不到版本的問題
           pip install git+https://github.com/twopirllc/pandas-ta.git
 
-      - name: 4. 執行股票分析
+      - name: 4. 執行股票分析並傳送 LINE
         env:
+          # 這邊是對接你在 GitHub Secrets 設定的金鑰
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        # 如果你有多個 py 檔，請確保這裡指定的是正確的檔名
+        # 請確認你的 Python 檔名與下方一致
         run: python stock_bot_final.py
