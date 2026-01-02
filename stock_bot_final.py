@@ -19,19 +19,31 @@ def send_line_message(message):
     requests.post(url, headers=headers, json=payload)
 
 def get_stock_info_map():
-    """獲取全台股清單並建立 {代碼: 產業} 的對照表"""
+    """強化版：確保一定能抓到股票清單"""
     try:
         dl = DataLoader()
         df = dl.taiwan_stock_info()
-        df = df[df['type'] == 'stock']
-        # 建立代碼與產業的字典對照
-        # 例如: {'2330.TW': '半導體業'}
-        stock_map = {f"{row['stock_id']}.TW": row['industry_category'] for _, row in df.iterrows()}
+        
+        # 嘗試過濾普通股，如果過濾後沒資料，就改用較寬鬆的條件
+        stock_df = df[df['type'] == 'stock']
+        if stock_df.empty:
+            print("⚠️ 無法透過 type 篩選，嘗試自動識別普通股...")
+            # 台灣普通股代號通常是 4 碼或 5 碼(KY股)，排除權證(6碼以上)
+            df['id_len'] = df['stock_id'].str.len()
+            stock_df = df[df['id_len'] <= 5]
+        
+        # 建立字典
+        stock_map = {f"{row['stock_id']}.TW": row['industry_category'] for _, row in stock_df.iterrows()}
+        
+        if not stock_map:
+            print("❌ 依舊無法獲取清單，啟動緊急備用名單")
+            return {"2330.TW": "半導體業", "2317.TW": "其他電子業", "2454.TW": "半導體業"}
+            
         print(f"✅ 成功獲取清單，共 {len(stock_map)} 檔股票")
         return stock_map
     except Exception as e:
-        print(f"❌ 獲取清單失敗: {e}")
-        return {"2330.TW": "半導體業"}
+        print(f"❌ 獲取清單發生異常: {e}")
+        return {"2330.TW": "半導體業", "2317.TW": "其他電子業"}
 
 def analyze_stock(ticker_symbol, industry_name):
     """技術面過濾邏輯 + 加入產業資訊"""
