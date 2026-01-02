@@ -112,9 +112,9 @@ def analyze_stock(ticker_symbol):
         if latest['Volume'] > avg_vol * 1.5 and latest['Close'] > prev['Close']:
             signals.append("📊 量大價昂")
 
-        "目前的條件比較嚴格，你可以試著把其中一個改為「寬鬆版」：
-        "RSI 反彈：從 35 改為 40。
-        "量大價昂：從 1.5 倍 改為 1.2 倍。
+        # 目前的條件比較嚴格，你可以試著把其中一個改為「寬鬆版」：
+        # RSI 反彈：從 35 改為 40。
+        # 量大價昂：從 1.5 倍 改為 1.2 倍。
 
         if signals:
             return f"股票: {ticker_symbol}\n現價: {current_price}\n訊號: {'、'.join(signals)}"
