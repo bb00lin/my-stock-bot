@@ -6,8 +6,8 @@ import requests
 
 # ================= 🔐 安全設定區 =================
 # 請填入你刚才找到的代碼
-LINE_ACCESS_TOKEN = os.getenv('lbS+WSWR7YaVDLq31y0A0qjOxew1GvivctiTfTAmSAVX4ZrbNHxSk1v7r0oRYcs65jV+JzMVen/JyIvJArUB1bsDkq0iXr0BF5hNKdq5o6aM3ktsorarznjHDRWePMLN6Svjd52rrbJD5juWEAS8xQdB04t89/1O/w1cDnyilFU=')
-LINE_USER_ID = os.getenv('2e9b79c2f71cb2a3db62e5d75254270c')
+LINE_ACCESS_TOKEN = os.getenv('LINE_ACCESS_TOKEN')
+LINE_USER_ID = os.getenv('LINE_USER_ID')
 
 # 你想讓機器人每天巡邏的股票清單 (可自由增減)
 WATCH_LIST = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2303.TW", "2603.TW"]
