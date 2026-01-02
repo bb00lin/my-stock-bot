@@ -19,13 +19,13 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 3. 安裝必要套件 (解決 pandas-ta 安裝問題)
+      - name: 3. 安裝必要套件 (最終修復版)
         run: |
           python -m pip install --upgrade pip
-          # 先安裝基礎核心套件
+          # 先安裝基礎套件
           pip install yfinance pandas requests FinMind
-          # 從 GitHub 直接安裝最新版 pandas-ta，這能解決 PyPI 找不到版本的問題
-          pip install git+https://github.com/twopirllc/pandas-ta.git
+          # 改用 zip 下載方式安裝 pandas-ta，避開 git 權限錯誤
+          pip install https://github.com/twopirllc/pandas-ta/archive/master.zip
 
       - name: 4. 執行股票分析並傳送 LINE
         env:
