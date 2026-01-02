@@ -63,22 +63,33 @@ def get_stock_list():
         return ["2330.TW", "2317.TW", "2454.TW"]
 
 def analyze_stock(ticker_symbol):
-    """多重指標選股條件"""
+    """多重指標選股條件 (包含成交量與股價過濾)"""
     try:
         stock = yf.Ticker(ticker_symbol)
-        # 抓取 6 個月資料以計算長週期均線
+        # 抓取 6 個月資料
         df = stock.history(period="6mo")
         
+        # 基礎檢查：資料長度不足則跳過
         if len(df) < 60:
             return None
 
-        # --- 技術指標計算 ---
+        # 取得最新一筆數據
+        latest = df.iloc[-1]
+        
+        # --- 【新增】過濾冷門股與低價股 ---
+        # 條件：股價大於 20 元 且 成交量大於 1000 張 (Yahoo Finance 的 Volume 是以「股」為單位，所以要 * 1000)
+        # 注意：台股 1 張 = 1000 股
+        if latest['Close'] < 20 or latest['Volume'] < 1000000: 
+            return None
+        # -------------------------------
+
+        # --- 如果符合初步門檻，才開始計算技術指標 ---
         close_prices = df['Close']
         
         # 1. RSI (14)
         df['RSI'] = RSIIndicator(close=close_prices, window=14).rsi()
         
-        # 2. 均線 (5日, 20日, 60日)
+        # 2. 均線 (5, 20, 60)
         df['MA5'] = SMAIndicator(close=close_prices, window=5).sma_indicator()
         df['MA20'] = SMAIndicator(close=close_prices, window=20).sma_indicator()
         df['MA60'] = SMAIndicator(close=close_prices, window=60).sma_indicator()
@@ -87,37 +98,23 @@ def analyze_stock(ticker_symbol):
         macd_obj = MACD(close=close_prices)
         df['MACD_Hist'] = macd_obj.macd_diff()
 
-        # 取得最新與前一筆數據
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         current_price = round(latest['Close'], 2)
         
         # --- 選股邏輯判斷 ---
         signals = []
-        
-        # 條件 A: 均線多頭排列 (強勢趨勢)
         if latest['MA5'] > latest['MA20'] > latest['MA60']:
             signals.append("🔥 均線多頭排列")
-            
-        # 條件 B: MACD 黃金交叉
         if prev['MACD_Hist'] < 0 and latest['MACD_Hist'] > 0:
             signals.append("✨ MACD 黃金交叉")
-            
-        # 條件 C: RSI 從低檔反彈
         if prev['RSI'] < 35 and latest['RSI'] > 35:
             signals.append("🚀 RSI 底部反彈")
 
-        # 條件 D: 價揚量增 (成交量是大於 10日平均的 1.5 倍)
-        avg_vol = df['Volume'].iloc[-11:-1].mean()
-        if latest['Volume'] > avg_vol * 1.5 and latest['Close'] > prev['Close']:
-            signals.append("📊 量大價昂")
-
-        # 目前的條件比較嚴格，你可以試著把其中一個改為「寬鬆版」：
-        # RSI 反彈：從 35 改為 40。
-        # 量大價昂：從 1.5 倍 改為 1.2 倍。
-
         if signals:
-            return f"股票: {ticker_symbol}\n現價: {current_price}\n訊號: {'、'.join(signals)}"
+            # 計算成交張數方便在訊息中閱讀 (除以 1000)
+            vol_shares = int(latest['Volume'] / 1000)
+            return f"股票: {ticker_symbol}\n現價: {current_price}\n張數: {vol_shares}張\n訊號: {'、'.join(signals)}"
         
         return None
 
