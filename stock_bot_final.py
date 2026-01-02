@@ -63,7 +63,7 @@ def analyze_stock(ticker, industry):
         if prev['MACD_Hist'] < 0 and latest['MACD_Hist'] > 0: signals.append("✨MACD")
         if prev['RSI'] < 40 and latest['RSI'] > 40: signals.append("🚀RSI反彈")
         
-        if len(signals) >= 2:
+        if len(signals) >= 1
             vol = int(latest['Volume'] / 1000)
             return f"📍{ticker} [{industry}]\n現價: {round(latest['Close'], 2)}\n張數: {vol}張\n訊號: {'/'.join(signals)}"
         return None
