@@ -19,31 +19,44 @@ def send_line_message(message):
     requests.post(url, headers=headers, json=payload)
 
 def get_stock_info_map():
-    """強化版：確保一定能抓到股票清單"""
+    """自動區分上市(.TW)與上櫃(.TWO)"""
     try:
         dl = DataLoader()
         df = dl.taiwan_stock_info()
-        
-        # 嘗試過濾普通股，如果過濾後沒資料，就改用較寬鬆的條件
-        stock_df = df[df['type'] == 'stock']
-        if stock_df.empty:
-            print("⚠️ 無法透過 type 篩選，嘗試自動識別普通股...")
-            # 台灣普通股代號通常是 4 碼或 5 碼(KY股)，排除權證(6碼以上)
-            df['id_len'] = df['stock_id'].str.len()
-            stock_df = df[df['id_len'] <= 5]
-        
-        # 建立字典
-        stock_map = {f"{row['stock_id']}.TW": row['industry_category'] for _, row in stock_df.iterrows()}
-        
-        if not stock_map:
-            print("❌ 依舊無法獲取清單，啟動緊急備用名單")
-            return {"2330.TW": "半導體業", "2317.TW": "其他電子業", "2454.TW": "半導體業"}
-            
+        stock_map = {}
+        for _, row in df.iterrows():
+            sid = row['stock_id']
+            # 只取 4 碼（普通股）或 5 碼（KY股），排除 6 碼（權證）
+            if 4 <= len(sid) <= 5:
+                # 判斷市場類型
+                suffix = ".TWO" if row['market_type'] in ['上櫃', '誠信上櫃'] else ".TW"
+                stock_map[f"{sid}{suffix}"] = row['industry_category']
         print(f"✅ 成功獲取清單，共 {len(stock_map)} 檔股票")
         return stock_map
     except Exception as e:
-        print(f"❌ 獲取清單發生異常: {e}")
-        return {"2330.TW": "半導體業", "2317.TW": "其他電子業"}
+        print(f"❌ 獲取清單失敗: {e}")
+        return {"2330.TW": "半導體業"}
+
+def analyze_stock(ticker_symbol, industry_name):
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        df = stock.history(period="6mo")
+        if len(df) < 60: return None
+
+        latest = df.iloc[-1]
+        # 門檻調整：股價 > 15，成交量 > 500張 (500,000股)
+        if latest['Close'] < 15 or latest['Volume'] < 500000:
+            return None
+
+        # 計算指標... (維持原樣)
+        
+        # 靈敏度調整：只要符合「2項」以上訊號就報出
+        if len(signals) >= 2:
+            vol_shares = int(latest['Volume'] / 1000)
+            return f"📍{ticker_symbol} [{industry_name}]\n現價: {round(latest['Close'], 1)}\n張數: {vol_shares}張\n訊號: {'/'.join(signals)}"
+        return None
+    except:
+        return None
 
 def analyze_stock(ticker_symbol, industry_name):
     """技術面過濾邏輯 + 加入產業資訊"""
