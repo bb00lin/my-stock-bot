@@ -14,139 +14,83 @@ LINE_USER_ID = os.getenv("LINE_USER_ID")
 def send_line_message(message):
     """傳送訊息到 LINE"""
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        print("Error: LINE Secrets 未設定")
+        print("❌ Error: LINE Secrets 未設定")
         return
-    
     url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
-    }
-    payload = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": message}]
-    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+    payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
     try:
         response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        print("LINE 訊息傳送成功！")
+        print(f"📡 LINE 回應狀態: {response.status_code}")
     except Exception as e:
-        print(f"LINE 傳送失敗: {e}")
+        print(f"❌ LINE 傳送異常: {e}")
 
 def get_stock_list():
-    """使用 FinMind 獲取台股上市股票清單"""
-    # try:
-    #     print("正在從 FinMind 獲取股票清單...")
-    #     dl = DataLoader()
-    #     df = dl.taiwan_stock_info()
-    #     # 過濾出普通股
-    #     df = df[df['type'] == 'stock']
-    #     # 轉換成 yfinance 格式 (例如 2330.TW)
-    #     full_list = [f"{sid}.TW" for sid in df['stock_id'].tolist()]
-    #     # 為了避免 GitHub Actions 執行過久，預設取前 60 檔進行掃描
-    #     # 你可以修改成 full_list[:] 來掃描全部，但建議先小量測試
-    #     return full_list[:60]
-    # except Exception as e:
-    #     print(f"獲取清單失敗: {e}，改用預設清單")
-    #     return ["2330.TW", "2317.TW", "2454.TW", "2308.TW", "2881.TW"]
-
-    """獲取全台股上市清單"""
+    """獲取少量清單進行測試"""
     try:
+        print("🔍 正在獲取測試股票清單...")
         dl = DataLoader()
         df = dl.taiwan_stock_info()
         df = df[df['type'] == 'stock']
         full_list = [f"{sid}.TW" for sid in df['stock_id'].tolist()]
-        # 移除 [:60] 的限制，掃描全部
-        print(f"成功取得清單，共 {len(full_list)} 檔股票")
-        return full_list 
+        # 【測試專用】僅取前 10 檔，確保執行速度
+        return full_list[:10]
     except Exception as e:
-        return ["2330.TW", "2317.TW", "2454.TW"]
+        print(f"❌ 獲取清單失敗: {e}")
+        return ["2330.TW", "2317.TW"]
 
-def analyze_stock(ticker_symbol):
-    """多重指標選股條件 (包含成交量與股價過濾)"""
+def analyze_stock_test(ticker_symbol):
+    """測試版選股：極低門檻"""
     try:
         stock = yf.Ticker(ticker_symbol)
-        # 抓取 6 個月資料
-        df = stock.history(period="6mo")
-        
-        # 基礎檢查：資料長度不足則跳過
-        if len(df) < 60:
+        df = stock.history(period="3mo")
+        if len(df) < 20: 
+            print(f"⏩ {ticker_symbol}: 資料不足跳過")
             return None
 
-        # 取得最新一筆數據
-        latest = df.iloc[-1]
-        
-        # --- 【新增】過濾冷門股與低價股 ---
-        # 條件：股價大於 20 元 且 成交量大於 1000 張 (Yahoo Finance 的 Volume 是以「股」為單位，所以要 * 1000)
-        # 注意：台股 1 張 = 1000 股
-        if latest['Close'] < 20 or latest['Volume'] < 1000000: 
-            return None
-        # -------------------------------
-
-        # --- 如果符合初步門檻，才開始計算技術指標 ---
-        close_prices = df['Close']
-        
-        # 1. RSI (14)
-        df['RSI'] = RSIIndicator(close=close_prices, window=14).rsi()
-        
-        # 2. 均線 (5, 20, 60)
-        df['MA5'] = SMAIndicator(close=close_prices, window=5).sma_indicator()
-        df['MA20'] = SMAIndicator(close=close_prices, window=20).sma_indicator()
-        df['MA60'] = SMAIndicator(close=close_prices, window=60).sma_indicator()
-        
-        # 3. MACD
-        macd_obj = MACD(close=close_prices)
-        df['MACD_Hist'] = macd_obj.macd_diff()
+        # --- 計算指標 ---
+        close = df['Close']
+        df['RSI'] = RSIIndicator(close, window=14).rsi()
+        df['MA5'] = SMAIndicator(close, window=5).sma_indicator()
+        df['MA20'] = SMAIndicator(close, window=20).sma_indicator()
 
         latest = df.iloc[-1]
         prev = df.iloc[-2]
-        current_price = round(latest['Close'], 2)
         
-        # --- 選股邏輯判斷 ---
         signals = []
-        if latest['MA5'] > latest['MA20'] > latest['MA60']:
-            signals.append("🔥 均線多頭排列")
-        if prev['MACD_Hist'] < 0 and latest['MACD_Hist'] > 0:
-            signals.append("✨ MACD 黃金交叉")
-        if prev['RSI'] < 35 and latest['RSI'] > 35:
-            signals.append("🚀 RSI 底部反彈")
+        # --- 測試用：只要符合一項即觸發 ---
+        if latest['Close'] > prev['Close']: signals.append("📈 今日上漲")
+        if latest['RSI'] > 50: signals.append("👍 RSI 強勢區")
+        if latest['MA5'] > latest['MA20']: signals.append("✅ 短均在長均上")
 
+        # 只要有任何訊號就回傳
         if signals:
-            # 計算成交張數方便在訊息中閱讀 (除以 1000)
             vol_shares = int(latest['Volume'] / 1000)
-            return f"股票: {ticker_symbol}\n現價: {current_price}\n張數: {vol_shares}張\n訊號: {'、'.join(signals)}"
-        
+            return f"股票: {ticker_symbol}\n現價: {round(latest['Close'], 2)}\n張數: {vol_shares}張\n訊號: {'、'.join(signals)}"
         return None
-
-    except Exception:
+    except Exception as e:
+        print(f"❌ 分析 {ticker_symbol} 發生錯誤: {e}")
         return None
 
 def main():
-    print("🚀 開始台股多重指標掃描...")
+    print("🚀 啟動測試模式...")
     stocks = get_stock_list()
     results = []
     
-    for i, s in enumerate(stocks):
-        if i % 10 == 0:
-            print(f"進度: {i}/{len(stocks)}...")
-        
-        res = analyze_stock(s)
+    for s in stocks:
+        print(f"正在檢查: {s}...")
+        res = analyze_stock_test(s)
         if res:
             results.append(res)
-        
-        # 關鍵：稍微停頓避免被 Yahoo 封鎖 IP
-        time.sleep(0.8)
+        time.sleep(1) # 測試時慢慢跑
     
-    # 組合訊息
     if results:
-        header = f"🔍 【台股強勢股掃描報告】\n掃描時間: {time.strftime('%Y-%m-%d %H:%M')}\n"
-        # 分批發送，避免訊息過長被 LINE 拒絕 (每 5 檔股票一則訊息)
-        for i in range(0, len(results), 5):
-            chunk = results[i:i + 5]
-            body = "\n---\n".join(chunk)
-            send_line_message(header + "\n" + body)
+        header = "🧪 【機器人功能測試 - 成功連線】\n"
+        body = "\n---\n".join(results)
+        send_line_message(header + body)
+        print(f"✅ 測試完成，發送了 {len(results)} 檔標的")
     else:
-        send_line_message("今日掃描完成，未發現符合技術面強勢條件之股票。")
+        send_line_message("🧪 測試完成，但前 10 檔股票均未符合測試訊號。")
 
 if __name__ == "__main__":
     main()
