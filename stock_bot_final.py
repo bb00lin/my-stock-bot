@@ -1,3 +1,43 @@
+import os
+import yfinance as yf
+import pandas as pd
+import requests
+import time
+import datetime
+from FinMind.data import DataLoader
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator, MACD
+
+# 1. 設定 LINE 參數
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+
+def send_line_message(message):
+    if not LINE_ACCESS_TOKEN or not LINE_USER_ID: return
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+    payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
+    try:
+        requests.post(url, headers=headers, json=payload)
+    except: pass
+
+def get_stock_info_map():
+    try:
+        dl = DataLoader()
+        df = dl.taiwan_stock_info()
+        stock_map = {}
+        m_col = 'market_type' if 'market_type' in df.columns else ('category' if 'category' in df.columns else None)
+        for _, row in df.iterrows():
+            sid = str(row['stock_id'])
+            if 4 <= len(sid) <= 5:
+                suffix = ".TWO" if m_col and str(row[m_col]) in ['上櫃', '誠信上櫃', 'OTC'] else ".TW"
+                stock_map[f"{sid}{suffix}"] = row.get('industry_category', '股票')
+        print(f"✅ 成功獲取清單，共 {len(stock_map)} 檔股票")
+        return stock_map
+    except Exception as e:
+        print(f"❌ 獲取清單失敗: {e}")
+        return {"2330.TW": "半導體業"}
+
 def analyze_stock(ticker, industry):
     """回傳 (是否選中標的訊息, 統計標籤清單)"""
     try:
@@ -93,3 +133,6 @@ def main():
     )
     send_line_message(summary_msg)
     print("🏁 任務結束")
+
+if __name__ == "__main__":
+    main()
