@@ -60,14 +60,27 @@ def get_diagnostic_report(sid):
             f_buy = (chip_df[chip_df['name'] == 'Foreign_Investor']['buy'].sum() - chip_df[chip_df['name'] == 'Foreign_Investor']['sell'].sum()) / 1000
             t_buy = (chip_df[chip_df['name'] == 'Investment_Trust']['buy'].sum() - chip_df[chip_df['name'] == 'Investment_Trust']['sell'].sum()) / 1000
 
-        # 3. 基本面：營收 YoY 與 PBR
-        rev_start = (datetime.date.today() - datetime.timedelta(days=70)).strftime('%Y-%m-%d')
+        # 3. 基本面：營收 YoY (加入「自動往前遞補」測試邏輯)
+        rev_start = (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
         rev_df = dl.taiwan_stock_month_revenue(stock_id=stock_id_only, start_date=rev_start)
         yoy_str = "N/A"
+        
         if not rev_df.empty:
-            last_rev = rev_df.iloc[-1]
+            # 優先檢查最後一筆資料
+            target_idx = -1
+            last_rev = rev_df.iloc[target_idx]
+            
+            # 自動偵測欄位
             yoy_col = next((c for c in ['revenue_year_growth', 'revenue_year_growth_percent'] if c in rev_df.columns), None)
             yoy_val = last_rev[yoy_col] if yoy_col else 0
+            
+            # --- 測試邏輯啟動 ---
+            # 如果抓到 0.0，嘗試抓取前一個月 (通常前一個月數據最穩)
+            if yoy_val == 0 and len(rev_df) > 1:
+                target_idx = -2
+                last_rev = rev_df.iloc[target_idx]
+                yoy_val = last_rev[yoy_col] if yoy_col else 0
+            
             yoy_str = f"{int(last_rev['revenue_month'])}月: {yoy_val:.2f}%"
 
         # P/E 與 PBR 判斷
