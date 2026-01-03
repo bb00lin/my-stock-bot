@@ -1,24 +1,25 @@
 name: ManualStockDiagnostic
 
 on:
-  workflow_dispatch: # 只有手動點擊按鈕才會執行
+  workflow_dispatch: 
 
 jobs:
   diagnostic:
     runs-on: ubuntu-latest
     steps:
-      - name: 檢出代碼
+      - name: 1. 檢出代碼
         uses: actions/checkout@v3
 
-      - name: 設定 Python
+      - name: 2. 設定 Python 執行環境
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10' # 這裡改為 3.10 即可解決錯誤
 
-      - name: 安裝套件
-        run: pip install yfinance pandas requests FinMind ta
+      - name: 3. 安裝必要套件
+        run: |
+          pip install yfinance pandas requests FinMind ta
 
-      - name: 執行深度診斷
+      - name: 4. 執行深度診斷
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
