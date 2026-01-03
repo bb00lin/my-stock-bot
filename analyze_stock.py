@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import requests
 import datetime
+import time  # <--- 補上這一行
 from FinMind.data import DataLoader
 from ta.momentum import RSIIndicator
 
