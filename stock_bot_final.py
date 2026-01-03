@@ -82,10 +82,15 @@ def analyze_stock(ticker, industry):
 
         result_msg = None
         # 週末測試稍微放寬門檻：股價>10, 張數>300
-        if latest['Close'] >= 10 and latest['Volume'] >= 300000 and len(signals) >= 1:
-            vol = int(latest['Volume'] / 1000)
-            result_msg = f"📍{ticker} [{industry}]\n現價: {round(latest['Close'], 2)}\n張數: {vol}張\n訊號: {'/'.join(signals)}"
+        # if latest['Close'] >= 10 and latest['Volume'] >= 300000 and len(signals) >= 1:
+        #     vol = int(latest['Volume'] / 1000)
+        #     result_msg = f"📍{ticker} [{industry}]\n現價: {round(latest['Close'], 2)}\n張數: {vol}張\n訊號: {'/'.join(signals)}"
         
+        # 找到 analyze_stock 函式末尾
+        # 暫時將條件改為「只要股價 > 0 就計入多頭」
+        if latest['Close'] > 0: 
+        stat_tags.append("多頭")
+            
         return result_msg, stat_tags
     except:
         return None, []
