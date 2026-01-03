@@ -73,14 +73,29 @@ def get_diagnostic_report(sid):
     except Exception as e:
         return f"❌ {sid} 診斷出錯: {e}"
 
+# ... 前方的 import 與函式保持不變 ...
+
 if __name__ == "__main__":
-    # 讀取從 GitHub Actions 傳進來的參數
-    input_stocks = sys.argv[1] if len(sys.argv) > 1 else "2330.TW"
+    # 1. 讀取輸入 (若無輸入則預設診斷 2330.TW)
+    input_str = sys.argv[1] if len(sys.argv) > 1 else "2330.TW"
     
-    # 將換行、逗號都統合成空格後切分開來
-    targets = input_stocks.replace('\n', ' ').replace(',', ' ').split()
+    # 2. 處理格式：將換行、逗號轉為空格，並過濾掉空字串
+    targets = input_str.replace('\n', ' ').replace(',', ' ').split()
+    
+    print(f"🚀 開始診斷以下標的: {targets}")
     
     for t in targets:
-        report = get_diagnostic_report(t.strip())
+        ticker = t.strip().upper()
+        
+        # 自動修正格式：如果輸入 2330TW 忘記點，幫它加上 (簡單判斷)
+        if "TW" in ticker and "." not in ticker:
+            ticker = ticker.replace("TW", ".TW")
+        
+        report = get_diagnostic_report(ticker)
         send_line_message(report)
+        print(f"✅ 已發送: {ticker}")
+        
+        # 3. 間隔 1 秒，避免 LINE API 或數據源過載
         time.sleep(1)
+
+    print("🏁 所有診斷任務完成")
