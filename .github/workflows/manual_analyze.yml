@@ -17,7 +17,7 @@ jobs:
 
       - name: 3. 安裝必要套件
         run: |
-          pip install yfinance pandas requests FinMind ta
+          pip install yfinance pandas requests FinMind ta tqdm
 
       - name: 4. 執行深度診斷
         env:
