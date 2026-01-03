@@ -73,7 +73,13 @@ def get_diagnostic_report(sid):
         return f"❌ {sid} 診斷出錯: {e}"
 
 if __name__ == "__main__":
-    targets = ["2330.TW", "2317.TW", "2454.TW"] # 在此修改代碼
+    # 讀取從 GitHub Actions 傳進來的參數
+    input_stocks = sys.argv[1] if len(sys.argv) > 1 else "2330.TW"
+    
+    # 將換行、逗號都統合成空格後切分開來
+    targets = input_stocks.replace('\n', ' ').replace(',', ' ').split()
+    
     for t in targets:
-        send_line_message(get_diagnostic_report(t))
-        time.sleep(1) # 避免 LINE API 過載
+        report = get_diagnostic_report(t.strip())
+        send_line_message(report)
+        time.sleep(1)
