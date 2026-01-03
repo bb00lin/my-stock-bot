@@ -2,36 +2,30 @@ name: DailyStockBot
 
 on:
   schedule:
-    # 台北時間週一至週五 14:45 執行 (UTC 06:45)
+    # 這裡的設定代表：每週一至週五，UTC 時間 06:45 (台北時間 14:45) 執行
+    # 格式：分 時 日 月 週
+    # 1-5 代表 Monday 到 Friday
     - cron: '45 6 * * 1-5'
-  workflow_dispatch: # 允許手動從 Actions 頁面啟動測試
+  workflow_dispatch: # 保留手動執行的按鈕
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 複製儲存庫代碼
+      - name: 檢出代碼
         uses: actions/checkout@v3
 
-      - name: 2. 設定 Python 環境 (3.10)
-        uses: actions/setup-python@v4
+      - name: 設定 Python
+        uses: actions/checkout@v3
         with:
-          python-version: '3.10'
+          python-version: '3.9'
 
-      - name: 3. 安裝必要套件 (解決 tqdm 依賴問題)
+      - name: 安裝必要套件
         run: |
-          python -m pip install --upgrade pip
-          # yfinance: 抓取股價
-          # pandas: 資料處理
-          # requests: 傳送 LINE 訊息
-          # FinMind: 抓取台股清單
-          # ta: 技術指標計算
-          # tqdm: FinMind 必要的進度條工具
-          pip install yfinance pandas requests FinMind ta tqdm
+          pip install yfinance pandas requests FinMind ta
 
-      - name: 4. 執行股票分析並傳送 LINE
+      - name: 執行股票分析並傳送 LINE
         env:
-          # 請確保 GitHub Repository -> Settings -> Secrets 中已設定這兩個變數
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python stock_bot_final.py
