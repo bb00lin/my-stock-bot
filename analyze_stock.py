@@ -3,7 +3,8 @@ import yfinance as yf
 import pandas as pd
 import requests
 import datetime
-import time  # <--- 補上這一行
+import time
+import sys  # <--- 務必補上這這一行
 from FinMind.data import DataLoader
 from ta.momentum import RSIIndicator
 
