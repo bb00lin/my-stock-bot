@@ -25,6 +25,7 @@ def get_diagnostic_report(sid):
         suffixes = [".TW", ".TWO"] if "." not in sid else [""]
         stock_data = None
         final_sid = sid
+        df = pd.DataFrame()
 
         for s in suffixes:
             temp_sid = sid + s
@@ -35,15 +36,15 @@ def get_diagnostic_report(sid):
                 final_sid = temp_sid
                 break
         
-        if df is None or df.empty:
-            return f"❌ 找不到 {sid} 的有效交易資料，請確認代碼是否正確。"
+        if df.empty:
+            return f"❌ 找不到 {sid} 的有效交易資料，請確認代碼。"
 
         info = stock_data.info
         name = info.get('shortName', final_sid)
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # 計算指標
+        # 指標計算
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
         vol_ratio = latest['Volume'] / df['Volume'].iloc[-11:-1].mean()
         change_pct = ((latest['Close'] - prev['Close']) / prev['Close']) * 100
@@ -59,21 +60,24 @@ def get_diagnostic_report(sid):
             f_buy = (chip_df[chip_df['name'] == 'Foreign_Investor']['buy'].sum() - chip_df[chip_df['name'] == 'Foreign_Investor']['sell'].sum()) / 1000
             t_buy = (chip_df[chip_df['name'] == 'Investment_Trust']['buy'].sum() - chip_df[chip_df['name'] == 'Investment_Trust']['sell'].sum()) / 1000
 
-        # 3. 基本面：營收 YoY
+        # 3. 基本面：營收 YoY 與 PBR
         rev_start = (datetime.date.today() - datetime.timedelta(days=70)).strftime('%Y-%m-%d')
         rev_df = dl.taiwan_stock_month_revenue(stock_id=stock_id_only, start_date=rev_start)
         yoy_str = "N/A"
         if not rev_df.empty:
             last_rev = rev_df.iloc[-1]
-            # 兼容不同版本的欄位名稱
             yoy_col = next((c for c in ['revenue_year_growth', 'revenue_year_growth_percent'] if c in rev_df.columns), None)
             yoy_val = last_rev[yoy_col] if yoy_col else 0
             yoy_str = f"{int(last_rev['revenue_month'])}月: {yoy_val:.2f}%"
 
-        # 4. 格式化輸出
+        # P/E 與 PBR 判斷
         pe = info.get('trailingPE', 0)
-        pe_status = "合理偏高" if pe > 22 else ("合理" if pe > 12 else "合理偏低")
+        pbr = info.get('priceToBook', 0)
         
+        pe_status = "合理偏高" if pe > 22 else ("合理" if pe > 12 else "合理偏低")
+        pbr_status = "股價高估" if pbr > 3 else ("合理" if pbr > 1.2 else "價值低估")
+        
+        # 4. 格式化輸出
         report = (
             f"=== {final_sid} ({name}) 診斷報告 ===\n\n"
             f"【籌碼面：大戶力道】(近5日)\n"
@@ -81,7 +85,8 @@ def get_diagnostic_report(sid):
             f"● 投信: {int(t_buy)} 張 ({'🔴加碼' if t_buy>0 else '🟢減碼'})\n\n"
             f"【基本面：成長力道】\n"
             f"● 營收 YoY: {yoy_str}\n"
-            f"● 本益比 (P/E): {round(pe, 2) if pe else 'N/A'} ({pe_status})\n\n"
+            f"● 本益比 (P/E): {round(pe, 2) if pe else 'N/A'} ({pe_status})\n"
+            f"● 淨值比 (PBR): {round(pbr, 2) if pbr else 'N/A'} ({pbr_status})\n\n"
             f"【技術面：進場時機】\n"
             f"● 目前股價: {latest['Close']:.2f} ({'+' if change_pct>0 else ''}{change_pct:.2f}%)\n"
             f"● 心理力道: RSI={rsi:.2f}\n"
@@ -97,7 +102,6 @@ if __name__ == "__main__":
     targets = input_str.replace('\n', ' ').replace(',', ' ').split()
     
     for t in targets:
-        # 清理輸入值，轉大寫
         ticker = t.strip().upper()
         report = get_diagnostic_report(ticker)
         send_line_message(report)
