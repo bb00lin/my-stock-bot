@@ -1,7 +1,12 @@
 name: ManualStockDiagnostic
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
+    inputs:
+      stock_list:
+        description: '請輸入股票代碼 (多筆請用換行或空格區隔)'
+        required: true
+        default: '2330.TW 2317.TW'
 
 jobs:
   diagnostic:
