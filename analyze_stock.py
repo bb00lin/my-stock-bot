@@ -76,26 +76,31 @@ def get_diagnostic_report(sid):
             chip_msg = (f"● 外資: {int(f_net):+d} 張 ({f_ratio:+.1f}% 參與)\n"
                         f"● 投信: {int(t_net):+d} 張 ({'🔴加碼' if t_net>0 else '🟢減碼'})")
 
-        # --- E. 基本面：營收 YoY (萬用備援機制) ---
-        rev_start = (datetime.date.today() - datetime.timedelta(days=150)).strftime('%Y-%m-%d')
-        rev_df = dl.taiwan_stock_month_revenue(stock_id=clean_id, start_date=rev_start)
+        # --- E. 基本面：營收 YoY (多來源補丁版) ---
         yoy_str = "N/A"
-        
-        if not rev_df.empty:
-            # 遍歷所有欄位，只要包含 growth 或 percent 就試試看
-            target_cols = [c for c in rev_df.columns if any(x in c.lower() for x in ['growth', 'percent'])]
-            
-            # 從最新的月份往前檢查
-            found = False
-            for i in range(1, len(rev_df) + 1):
-                row = rev_df.iloc[-i]
-                for col in target_cols:
-                    val = row[col]
-                    if val != 0 and pd.notnull(val):
-                        yoy_str = f"{int(row['revenue_month'])}月: {val:.2f}%"
-                        found = True
-                        break
-                if found: break
+        # 來源 1: FinMind
+        try:
+            rev_start = (datetime.date.today() - datetime.timedelta(days=180)).strftime('%Y-%m-%d')
+            rev_df = dl.taiwan_stock_month_revenue(stock_id=clean_id, start_date=rev_start)
+            if not rev_df.empty:
+                target_cols = [c for c in rev_df.columns if any(x in c.lower() for x in ['growth', 'percent'])]
+                found = False
+                for i in range(1, len(rev_df) + 1):
+                    row = rev_df.iloc[-i]
+                    for col in target_cols:
+                        val = row[col]
+                        if val != 0 and pd.notnull(val):
+                            yoy_str = f"{int(row['revenue_month'])}月: {val:.2f}%"
+                            found = True
+                            break
+                    if found: break
+        except: pass
+
+        # 來源 2: 如果 FinMind N/A, 則由 yfinance 補位
+        if yoy_str == "N/A":
+            y_growth = info.get('revenueGrowth') or info.get('earningsQuarterlyGrowth')
+            if y_growth:
+                yoy_str = f"近期: {y_growth*100:.2f}% (YF)"
 
         # --- F. 組合報告 ---
         pe = info.get('trailingPE')
@@ -109,7 +114,7 @@ def get_diagnostic_report(sid):
             f"【籌碼面：法人動態】\n"
             f"{chip_msg}\n\n"
             f"【基本面：成長與估值】\n"
-            f"● 營超 YoY: {yoy_str}\n"
+            f"● 營收 YoY: {yoy_str}\n"
             f"● 本益比 (P/E): {f'{pe:.1f}' if pe else 'N/A'} ({pe_status})\n"
             f"● 現金殖利率: {yield_val:.2f}%\n\n"
             f"【技術面：進場時機】\n"
