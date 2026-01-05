@@ -32,7 +32,7 @@ def send_line_message(message):
 # ==========================================
 def get_diagnostic_report(sid):
     try:
-        # --- A. 雙軌價格邏輯與代碼適應 (網友建議 1) ---
+        # --- A. 雙軌價格邏輯與代碼適應 ---
         suffixes = [".TW", ".TWO"] if "." not in sid else [""]
         stock_obj = None
         final_sid = sid
@@ -41,7 +41,6 @@ def get_diagnostic_report(sid):
         for s in suffixes:
             temp_sid = sid + s
             stock = yf.Ticker(temp_sid)
-            # 嘗試不同期間以增加強健性
             for period in ["1y", "3y"]: 
                 df = stock.history(period=period)
                 if not df.empty: break
@@ -50,33 +49,45 @@ def get_diagnostic_report(sid):
                 final_sid = temp_sid
                 break
         
-        if df.empty: return f"❌ 找不到 {sid} 的有效交易資料。"
+        if df.empty: return f"❌ 找不到 {sid} 的有效資料。"
 
         info = stock_obj.info
         name = info.get('shortName', final_sid)
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # --- B. 技術指標與動能過濾 (網友建議 3) ---
+        # --- B. 技術指標與趨勢判定 ---
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
         vol_ratio = latest['Volume'] / df['Volume'].iloc[-11:-1].mean()
         change_pct = ((latest['Close'] - prev['Close']) / prev['Close']) * 100
         
-        # 計算半年動能 (c6m) 與 20日均線
+        # 計算半年動能 (c6m)
         price_6m_ago = df['Close'].iloc[-126] if len(df) > 126 else df['Close'].iloc[0]
         c6m = (latest['Close'] - price_6m_ago) / price_6m_ago
         ma20 = df['Close'].rolling(20).mean().iloc[-1]
         
-        # 判定是否為「死貓跳」：短線站上均線但半年趨勢向下
-        is_dead_cat_bounce = latest['Close'] > ma20 and c6m < 0
-        trend_label = "⚠️ 弱勢反彈" if is_dead_cat_bounce else ("🔥 強勢多頭" if c6m > 0 else "☁️ 盤整區間")
+        # 趨勢標籤
+        is_dead_cat = latest['Close'] > ma20 and c6m < 0
+        trend_label = "⚠️ 弱勢反彈" if is_dead_cat else ("🔥 強勢多頭" if c6m > 0 else "☁️ 盤整區間")
 
-        # --- C. 獲利品質監控 (網友建議 4) ---
+        # --- C. 獲利品質與估值 ---
         profit_margin = info.get('profitMargins')
         margin_str = f"{profit_margin * 100:.2f}%" if profit_margin is not None else "N/A"
-        quality_tag = "🔴 獲利虧損" if (profit_margin and profit_margin < 0) else "🟢 獲利穩健"
+        quality_tag = "🟢 獲利穩健" if (profit_margin and profit_margin > 0) else "🔴 獲利虧損"
 
-        # --- D. 籌碼面 (FinMind) ---
+        pe = info.get('trailingPE', 0)
+        pbr = info.get('priceToBook', 0)
+        yield_rate = info.get('dividendYield')
+        if yield_rate and yield_rate > 0.5: yield_rate = yield_rate / latest['Close']
+        yield_val = (yield_rate * 100) if yield_rate else 0
+            
+        # --- D. 💎 藍鑽石「存股亮點」判定邏輯 ---
+        is_dividend_gem = False
+        if profit_margin and profit_margin > 0 and yield_val >= 5.0 and not is_dead_cat:
+            is_dividend_gem = True
+        gem_header = "💎 存股首選 (優質高息股)\n" if is_dividend_gem else ""
+
+        # --- E. 籌碼面 (FinMind) ---
         dl = DataLoader()
         stock_id_only = final_sid.split('.')[0]
         start_date = (datetime.date.today() - datetime.timedelta(days=12)).strftime('%Y-%m-%d')
@@ -86,7 +97,7 @@ def get_diagnostic_report(sid):
             f_buy = (chip_df[chip_df['name'] == 'Foreign_Investor']['buy'].sum() - chip_df[chip_df['name'] == 'Foreign_Investor']['sell'].sum()) / 1000
             t_buy = (chip_df[chip_df['name'] == 'Investment_Trust']['buy'].sum() - chip_df[chip_df['name'] == 'Investment_Trust']['sell'].sum()) / 1000
 
-        # --- E. 基本面：營收 YoY ---
+        # --- F. 基本面：營收 YoY ---
         rev_start = (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
         rev_df = dl.taiwan_stock_month_revenue(stock_id=stock_id_only, start_date=rev_start)
         yoy_str = "N/A"
@@ -99,18 +110,12 @@ def get_diagnostic_report(sid):
                 yoy_val = last_rev[yoy_col] if yoy_col else 0
             yoy_str = f"{int(last_rev['revenue_month'])}月: {yoy_val:.2f}%"
 
-        # --- F. 估值分析 ---
-        pe = info.get('trailingPE', 0)
-        pbr = info.get('priceToBook', 0)
-        yield_rate = info.get('dividendYield')
-        if yield_rate and yield_rate > 0.5: yield_rate = yield_rate / latest['Close']
-            
         pe_status = "合理偏高" if pe > 22 else ("合理" if pe > 12 else "合理偏低")
         pbr_status = "股價高估" if pbr > 3 else ("合理" if pbr > 1.2 else "價值低估")
-        yield_str = f"{yield_rate * 100:.2f}%" if yield_rate else "N/A"
 
         # --- G. 組合報告訊息 ---
         report = (
+            f"{gem_header}"
             f"=== {final_sid} ({name}) 診斷報告 ===\n"
             f"趨勢：{trend_label}\n"
             f"品質：{quality_tag} (淨利率: {margin_str})\n\n"
@@ -121,7 +126,7 @@ def get_diagnostic_report(sid):
             f"● 營收 YoY: {yoy_str}\n"
             f"● 本益比 (P/E): {round(pe, 2) if pe else 'N/A'} ({pe_status})\n"
             f"● 淨值比 (PBR): {round(pbr, 2) if pbr else 'N/A'} ({pbr_status})\n"
-            f"● 現金殖利率: {yield_str}\n\n"
+            f"● 現金殖利率: {yield_val:.2f}% {'(高股息)' if yield_val >= 5 else ''}\n\n"
             f"【技術面：進場時機】\n"
             f"● 目前股價: {latest['Close']:.2f} ({'+' if change_pct>0 else ''}{change_pct:.2f}%)\n"
             f"● 心理力道: RSI={rsi:.2f}\n"
