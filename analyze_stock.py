@@ -29,11 +29,7 @@ def send_line_message(message):
 def get_diagnostic_report(sid):
     try:
         # --- A. 代碼偵測強化邏輯 ---
-        # 移除可能存在的後綴
         clean_id = str(sid).split('.')[0].strip()
-        
-        # 嘗試找出正確的後綴 (.TW 為上市, .TWO 為上櫃)
-        # 邏輯：先試 .TW，若無數據則試 .TWO
         stock_obj = None
         df = pd.DataFrame()
         final_sid = clean_id
@@ -41,16 +37,15 @@ def get_diagnostic_report(sid):
         for suffix in [".TW", ".TWO"]:
             target = f"{clean_id}{suffix}"
             temp_stock = yf.Ticker(target)
-            # 抓取極短時間測試是否存在
             df_test = temp_stock.history(period="5d")
             if not df_test.empty:
                 stock_obj = temp_stock
-                df = temp_stock.history(period="1y") # 確定存在後抓取一年數據
+                df = temp_stock.history(period="1y") 
                 final_sid = target
                 break
         
         if df.empty or stock_obj is None:
-            return f"❌ 找不到 {clean_id} 的有效資料。請確認代碼是否正確。"
+            return f"❌ 找不到 {clean_id} 的有效資料。"
 
         info = stock_obj.info
         name = info.get('shortName', final_sid)
@@ -81,17 +76,23 @@ def get_diagnostic_report(sid):
             chip_msg = (f"● 外資: {int(f_net):+d} 張 ({f_ratio:+.1f}% 參與)\n"
                         f"● 投信: {int(t_net):+d} 張 ({'🔴加碼' if t_net>0 else '🟢減碼'})")
 
-        # --- E. 基本面：營收 YoY ---
-        rev_start = (datetime.date.today() - datetime.timedelta(days=100)).strftime('%Y-%m-%d')
+        # --- E. 基本面：營收 YoY (加入回溯備援機制) ---
+        # 抓取 150 天確保包含足夠的月份
+        rev_start = (datetime.date.today() - datetime.timedelta(days=150)).strftime('%Y-%m-%d')
         rev_df = dl.taiwan_stock_month_revenue(stock_id=clean_id, start_date=rev_start)
         yoy_str = "N/A"
+        
         if not rev_df.empty:
             yoy_col = next((c for c in rev_df.columns if 'growth' in c.lower()), None)
             if yoy_col:
-                target_rev = rev_df.iloc[-1]
-                if target_rev[yoy_col] == 0 and len(rev_df) > 1:
-                    target_rev = rev_df.iloc[-2]
-                yoy_str = f"{int(target_rev['revenue_month'])}月: {target_rev[yoy_col]:.2f}%"
+                # 從最後一列往前找，直到找到非 0 的數據
+                for i in range(1, min(len(rev_df) + 1, 6)):
+                    target_rev = rev_df.iloc[-i]
+                    if target_rev[yoy_col] != 0:
+                        yoy_str = f"{int(target_rev['revenue_month'])}月: {target_rev[yoy_col]:.2f}%"
+                        break
+            else:
+                yoy_str = "欄位異常"
 
         # --- F. 組合報告 ---
         pe = info.get('trailingPE')
