@@ -16,34 +16,27 @@ LINE_USER_ID = os.getenv("LINE_USER_ID")
 
 def send_line_message(message):
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        print("Error: LINE_ACCESS_TOKEN or LINE_USER_ID not found.")
+        print("Error: Token or ID missing.")
         return
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-    except Exception as e:
-        print(f"LINE 發送失敗: {e}")
+    requests.post(url, headers=headers, json=payload)
 
 # ==========================================
-# 2. 核心診斷邏輯
+# 2. 核心診斷邏輯 (優化版)
 # ==========================================
 def get_diagnostic_report(sid):
     try:
-        # --- A. 雙軌價格邏輯與代碼適應 ---
+        # --- A. 代碼適應與數據抓取 ---
         suffixes = [".TW", ".TWO"] if "." not in sid else [""]
         stock_obj = None
-        final_sid = sid
         df = pd.DataFrame()
 
         for s in suffixes:
             temp_sid = sid + s
             stock = yf.Ticker(temp_sid)
-            for period in ["1y", "3y"]: 
-                df = stock.history(period=period)
-                if not df.empty: break
+            df = stock.history(period="1y") # 抓一年以計算 60MA
             if not df.empty:
                 stock_obj = stock
                 final_sid = temp_sid
@@ -54,83 +47,74 @@ def get_diagnostic_report(sid):
         info = stock_obj.info
         name = info.get('shortName', final_sid)
         latest = df.iloc[-1]
-        prev = df.iloc[-2]
         
-        # --- B. 技術指標與趨勢判定 ---
+        # --- B. 技術面進階：季線乖離率與趨勢 ---
+        ma60 = df['Close'].rolling(60).mean().iloc[-1]
+        bias_60 = ((latest['Close'] - ma60) / ma60) * 100
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
-        vol_ratio = latest['Volume'] / df['Volume'].iloc[-11:-1].mean()
-        change_pct = ((latest['Close'] - prev['Close']) / prev['Close']) * 100
         
-        # 計算半年動能 (c6m)
-        price_6m_ago = df['Close'].iloc[-126] if len(df) > 126 else df['Close'].iloc[0]
-        c6m = (latest['Close'] - price_6m_ago) / price_6m_ago
-        ma20 = df['Close'].rolling(20).mean().iloc[-1]
-        
-        # 趨勢標籤
-        is_dead_cat = latest['Close'] > ma20 and c6m < 0
-        trend_label = "⚠️ 弱勢反彈" if is_dead_cat else ("🔥 強勢多頭" if c6m > 0 else "☁️ 盤整區間")
+        # 乖離率註解
+        bias_note = "⚠️ 噴發過熱" if bias_60 > 15 else ("🟢 支撐區" if -3 < bias_60 < 5 else "正常")
+        trend_label = "🔥 強勢多頭" if latest['Close'] > ma60 else "☁️ 弱勢整理"
 
-        # --- C. 獲利品質與估值 ---
-        profit_margin = info.get('profitMargins')
-        margin_str = f"{profit_margin * 100:.2f}%" if profit_margin is not None else "N/A"
-        quality_tag = "🟢 獲利穩健" if (profit_margin and profit_margin > 0) else "🔴 獲利虧損"
+        # --- C. 殖利率修正邏輯 ---
+        # 判斷 yfinance 的 dividendYield 格式
+        raw_yield = info.get('dividendYield')
+        if raw_yield is None:
+            yield_val = 0.0
+        else:
+            # 強制校正：如果 > 0.5 通常代表它是百分比格式 (2.5)，否則乘 100
+            yield_val = raw_yield if raw_yield > 0.5 else raw_yield * 100
 
-        pe = info.get('trailingPE', 0)
-        pbr = info.get('priceToBook', 0)
-        yield_rate = info.get('dividendYield')
-        if yield_rate and yield_rate > 0.5: yield_rate = yield_rate / latest['Close']
-        yield_val = (yield_rate * 100) if yield_rate else 0
-            
-        # --- D. 💎 藍鑽石「存股亮點」判定邏輯 ---
-        is_dividend_gem = False
-        if profit_margin and profit_margin > 0 and yield_val >= 5.0 and not is_dead_cat:
-            is_dividend_gem = True
-        gem_header = "💎 存股首選 (優質高息股)\n" if is_dividend_gem else ""
-
-        # --- E. 籌碼面 (FinMind) ---
+        # --- D. 籌碼面：法人參與度 (FinMind) ---
         dl = DataLoader()
         stock_id_only = final_sid.split('.')[0]
         start_date = (datetime.date.today() - datetime.timedelta(days=12)).strftime('%Y-%m-%d')
         chip_df = dl.taiwan_stock_institutional_investors(stock_id=stock_id_only, start_date=start_date)
-        f_buy, t_buy = 0, 0
+        
+        chip_msg = "無資料"
         if not chip_df.empty:
-            f_buy = (chip_df[chip_df['name'] == 'Foreign_Investor']['buy'].sum() - chip_df[chip_df['name'] == 'Foreign_Investor']['sell'].sum()) / 1000
-            t_buy = (chip_df[chip_df['name'] == 'Investment_Trust']['buy'].sum() - chip_df[chip_df['name'] == 'Investment_Trust']['sell'].sum()) / 1000
+            # 計算近 5 日合計買賣超
+            f_net = (chip_df[chip_df['name'] == 'Foreign_Investor']['buy'].sum() - chip_df[chip_df['name'] == 'Foreign_Investor']['sell'].sum()) / 1000
+            t_net = (chip_df[chip_df['name'] == 'Investment_Trust']['buy'].sum() - chip_df[chip_df['name'] == 'Investment_Trust']['sell'].sum()) / 1000
+            
+            # 計算殺盤/拉抬參與率 (佔今日成交量比例)
+            vol_today = latest['Volume'] / 1000
+            f_ratio = (f_net / vol_today) * 100 if vol_today > 0 else 0
+            chip_msg = (f"● 外資: {int(f_net):+d} 張 ({f_ratio:+.1f}% 參與)\n"
+                        f"● 投信: {int(t_net):+d} 張 ({'🔴加碼' if t_net>0 else '🟢減碼'})")
 
-        # --- F. 基本面：營收 YoY ---
-        rev_start = (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
+        # --- E. 基本面：營收 YoY (修正 0% 問題) ---
+        rev_start = (datetime.date.today() - datetime.timedelta(days=100)).strftime('%Y-%m-%d')
         rev_df = dl.taiwan_stock_month_revenue(stock_id=stock_id_only, start_date=rev_start)
         yoy_str = "N/A"
         if not rev_df.empty:
-            yoy_col = next((c for c in ['revenue_year_growth', 'revenue_year_growth_percent'] if c in rev_df.columns), None)
-            last_rev = rev_df.iloc[-1]
-            yoy_val = last_rev[yoy_col] if yoy_col else 0
-            if yoy_val == 0 and len(rev_df) > 1:
-                last_rev = rev_df.iloc[-2]
-                yoy_val = last_rev[yoy_col] if yoy_col else 0
-            yoy_str = f"{int(last_rev['revenue_month'])}月: {yoy_val:.2f}%"
+            # 優先取最新月份，若為 0 則取前一月
+            target_rev = rev_df.iloc[-1]
+            if target_rev['revenue_year_growth'] == 0 and len(rev_df) > 1:
+                target_rev = rev_df.iloc[-2]
+            yoy_str = f"{int(target_rev['revenue_month'])}月: {target_rev['revenue_year_growth']:.2f}%"
 
-        pe_status = "合理偏高" if pe > 22 else ("合理" if pe > 12 else "合理偏低")
-        pbr_status = "股價高估" if pbr > 3 else ("合理" if pbr > 1.2 else "價值低估")
+        # --- F. 組合報告 ---
+        pe = info.get('trailingPE', 0)
+        pbr = info.get('priceToBook', 0)
+        pe_status = "偏高" if pe > 25 else ("便宜" if 0 < pe < 12 else "合理")
 
-        # --- G. 組合報告訊息 ---
         report = (
-            f"{gem_header}"
             f"=== {final_sid} ({name}) 診斷報告 ===\n"
             f"趨勢：{trend_label}\n"
-            f"品質：{quality_tag} (淨利率: {margin_str})\n\n"
-            f"【籌碼面：大戶力道】(近5日)\n"
-            f"● 外資: {int(f_buy)} 張 ({'🔴加碼' if f_buy>0 else '🟢減碼'})\n"
-            f"● 投信: {int(t_buy)} 張 ({'🔴加碼' if t_buy>0 else '🟢減碼'})\n\n"
+            f"位階：60MA乖離 {bias_60:+.1f}% ({bias_note})\n"
+            f"品質：{('🟢 獲利穩健' if (info.get('profitMargins',0) or 0) > 0.1 else '🔴 獲利待強')}\n\n"
+            f"【籌碼面：法人動態】\n"
+            f"{chip_msg}\n\n"
             f"【基本面：成長與估值】\n"
             f"● 營收 YoY: {yoy_str}\n"
-            f"● 本益比 (P/E): {round(pe, 2) if pe else 'N/A'} ({pe_status})\n"
-            f"● 淨值比 (PBR): {round(pbr, 2) if pbr else 'N/A'} ({pbr_status})\n"
-            f"● 現金殖利率: {yield_val:.2f}% {'(高股息)' if yield_val >= 5 else ''}\n\n"
+            f"● 本益比 (P/E): {pe:.1f} ({pe_status})\n"
+            f"● 現金殖利率: {yield_val:.2f}%\n\n"
             f"【技術面：進場時機】\n"
-            f"● 目前股價: {latest['Close']:.2f} ({'+' if change_pct>0 else ''}{change_pct:.2f}%)\n"
+            f"● 目前股價: {latest['Close']:.2f} ({((latest['Close']/df['Close'].iloc[-2])-1)*100:+.2f}%)\n"
             f"● 心理力道: RSI={rsi:.2f}\n"
-            f"● 量能倍率: {vol_ratio:.2f} 倍\n"
+            f"● 量能倍率: {latest['Volume']/df['Volume'].iloc[-11:-1].mean():.2f} 倍\n"
             f"======================================="
         )
         return report
@@ -139,7 +123,7 @@ def get_diagnostic_report(sid):
         return f"❌ {sid} 診斷發生錯誤: {str(e)}"
 
 if __name__ == "__main__":
-    input_str = sys.argv[1] if len(sys.argv) > 1 else "2330"
+    input_str = sys.argv[1] if len(sys.argv) > 1 else "6223"
     targets = input_str.replace('\n', ' ').replace(',', ' ').split()
     for t in targets:
         report_msg = get_diagnostic_report(t.strip().upper())
