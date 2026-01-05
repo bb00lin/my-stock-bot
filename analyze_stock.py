@@ -50,37 +50,34 @@ def get_diagnostic_report(sid):
         info = stock_obj.info
         name = info.get('shortName', final_sid)
         latest = df.iloc[-1]
+        curr_p = latest['Close']
         
         # --- B. 技術面指標 ---
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
-        bias_60 = ((latest['Close'] - ma60) / ma60) * 100
+        bias_60 = ((curr_p - ma60) / ma60) * 100
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
-        bias_note = "⚠️ 噴發過熱" if bias_60 > 15 else ("🟢 支撐區" if -3 < bias_60 < 5 else "正常")
-        trend_label = "🔥 強勢多頭" if latest['Close'] > ma60 else "☁️ 弱勢整理"
+        
+        # --- C. 策略建議邏輯 ---
+        high_1y = df['High'].max() # 壓力位 (一年最高)
+        stop_loss = ma60 * 0.97    # 停損位 (季線下破3%)
+        
+        if bias_60 > 15:
+            action = "❌ 過熱不追 (等待回檔)"
+        elif -2 < bias_60 < 5 and rsi < 50:
+            action = "🟡 支撐區試單 (分批佈局)"
+        elif rsi > 60:
+            action = "🔥 強勢持有 (注意乖離)"
+        else:
+            action = "☁️ 觀望盤整 (等待轉強)"
 
-        # --- C. 殖利率修正 ---
+        # --- D. 殖利率與營收 (略，保留之前成功邏輯) ---
         raw_yield = info.get('dividendYield')
         yield_val = (raw_yield if raw_yield and raw_yield > 0.5 else (raw_yield*100 if raw_yield else 0))
 
-        # --- D. 籌碼面：法人參與度 ---
-        dl = DataLoader()
-        start_date = (datetime.date.today() - datetime.timedelta(days=12)).strftime('%Y-%m-%d')
-        chip_df = dl.taiwan_stock_institutional_investors(stock_id=clean_id, start_date=start_date)
-        
-        chip_msg = "無資料"
-        if not chip_df.empty:
-            f_net = (chip_df[chip_df['name'] == 'Foreign_Investor']['buy'].sum() - chip_df[chip_df['name'] == 'Foreign_Investor']['sell'].sum()) / 1000
-            t_net = (chip_df[chip_df['name'] == 'Investment_Trust']['buy'].sum() - chip_df[chip_df['name'] == 'Investment_Trust']['sell'].sum()) / 1000
-            vol_today = latest['Volume'] / 1000
-            f_ratio = (f_net / vol_today) * 100 if vol_today > 0 else 0
-            chip_msg = (f"● 外資: {int(f_net):+d} 張 ({f_ratio:+.1f}% 參與)\n"
-                        f"● 投信: {int(t_net):+d} 張 ({'🔴加碼' if t_net>0 else '🟢減碼'})")
-
-        # --- E. 基本面：營收 YoY (多來源補丁版) ---
         yoy_str = "N/A"
-        # 來源 1: FinMind
         try:
-            rev_start = (datetime.date.today() - datetime.timedelta(days=180)).strftime('%Y-%m-%d')
+            dl = DataLoader()
+            rev_start = (datetime.date.today() - datetime.timedelta(days=150)).strftime('%Y-%m-%d')
             rev_df = dl.taiwan_stock_month_revenue(stock_id=clean_id, start_date=rev_start)
             if not rev_df.empty:
                 target_cols = [c for c in rev_df.columns if any(x in c.lower() for x in ['growth', 'percent'])]
@@ -88,39 +85,47 @@ def get_diagnostic_report(sid):
                 for i in range(1, len(rev_df) + 1):
                     row = rev_df.iloc[-i]
                     for col in target_cols:
-                        val = row[col]
-                        if val != 0 and pd.notnull(val):
-                            yoy_str = f"{int(row['revenue_month'])}月: {val:.2f}%"
-                            found = True
-                            break
+                        if row[col] != 0:
+                            yoy_str = f"{int(row['revenue_month'])}月: {row[col]:.2f}%"
+                            found = True; break
                     if found: break
         except: pass
-
-        # 來源 2: 如果 FinMind N/A, 則由 yfinance 補位
         if yoy_str == "N/A":
-            y_growth = info.get('revenueGrowth') or info.get('earningsQuarterlyGrowth')
-            if y_growth:
-                yoy_str = f"近期: {y_growth*100:.2f}% (YF)"
+            y_growth = info.get('revenueGrowth')
+            if y_growth: yoy_str = f"近期: {y_growth*100:.2f}% (YF)"
 
-        # --- F. 組合報告 ---
-        pe = info.get('trailingPE')
-        pe_status = "偏高" if (pe and pe > 25) else ("便宜" if (pe and 0 < pe < 12) else "合理")
+        # --- E. 籌碼面 ---
+        chip_msg = "無資料"
+        try:
+            start_date = (datetime.date.today() - datetime.timedelta(days=12)).strftime('%Y-%m-%d')
+            chip_df = dl.taiwan_stock_institutional_investors(stock_id=clean_id, start_date=start_date)
+            if not chip_df.empty:
+                f_net = (chip_df[chip_df['name'] == 'Foreign_Investor']['buy'].sum() - chip_df[chip_df['name'] == 'Foreign_Investor']['sell'].sum()) / 1000
+                t_net = (chip_df[chip_df['name'] == 'Investment_Trust']['buy'].sum() - chip_df[chip_df['name'] == 'Investment_Trust']['sell'].sum()) / 1000
+                chip_msg = f"● 外資: {int(f_net):+d} 張 / 投信: {int(t_net):+d} 張"
+        except: pass
 
+        # --- F. 格式化報告 ---
+        pe = info.get('trailingPE', 0)
         report = (
             f"=== {final_sid} ({name}) 診斷報告 ===\n"
-            f"趨勢：{trend_label}\n"
-            f"位階：60MA乖離 {bias_60:+.1f}% ({bias_note})\n"
-            f"品質：{('🟢 獲利穩健' if (info.get('profitMargins',0) or 0) > 0.1 else '🔴 獲利待強')}\n\n"
-            f"【籌碼面：法人動態】\n"
-            f"{chip_msg}\n\n"
-            f"【基本面：成長與估值】\n"
+            f"趨勢：{'🔥 多頭' if curr_p > ma60 else '☁️ 弱勢'}\n"
+            f"位階：60MA乖離 {bias_60:+.1f}%\n"
+            f"品質：{'🟢 獲利穩健' if (info.get('profitMargins',0) or 0) > 0.1 else '🔴 待觀察'}\n\n"
+            f"【關鍵數據】\n"
             f"● 營收 YoY: {yoy_str}\n"
-            f"● 本益比 (P/E): {f'{pe:.1f}' if pe else 'N/A'} ({pe_status})\n"
-            f"● 現金殖利率: {yield_val:.2f}%\n\n"
-            f"【技術面：進場時機】\n"
-            f"● 目前股價: {latest['Close']:.2f} ({((latest['Close']/df['Close'].iloc[-2])-1)*100:+.1f}%)\n"
+            f"● 本益比: {f'{pe:.1f}' if pe else 'N/A'}\n"
+            f"● 殖利率: {yield_val:.2f}%\n"
+            f"{chip_msg}\n\n"
+            f"【技術面指標】\n"
+            f"● 目前股價: {curr_p:.2f} ({(curr_p/df['Close'].iloc[-2]-1)*100:+.2f}%)\n"
             f"● 心理力道: RSI={rsi:.2f}\n"
-            f"● 量能倍率: {latest['Volume']/df['Volume'].iloc[-11:-1].mean():.2f} 倍\n"
+            f"● 量能倍率: {latest['Volume']/df['Volume'].iloc[-11:-1].mean():.2f} 倍\n\n"
+            f"【🚀 實戰戰略指引】\n"
+            f"● 建議行動：{action}\n"
+            f"● 壓力參考：{high_1y:.1f}\n"
+            f"● 支撐防線：{ma60:.1f}\n"
+            f"● 停損保護：{stop_loss:.1f}\n"
             f"======================================="
         )
         return report
