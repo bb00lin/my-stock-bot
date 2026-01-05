@@ -28,7 +28,7 @@ def send_line_message(message):
 # ==========================================
 def get_diagnostic_report(sid):
     try:
-        # --- A. 代碼偵測強化邏輯 ---
+        # --- A. 代碼偵測強化 ---
         clean_id = str(sid).split('.')[0].strip()
         stock_obj = None
         df = pd.DataFrame()
@@ -45,7 +45,7 @@ def get_diagnostic_report(sid):
                 break
         
         if df.empty or stock_obj is None:
-            return f"❌ 找不到 {clean_id} 的有效資料。"
+            return f"❌ 找不到 {clean_id} 的資料。"
 
         info = stock_obj.info
         name = info.get('shortName', final_sid)
@@ -62,7 +62,7 @@ def get_diagnostic_report(sid):
         raw_yield = info.get('dividendYield')
         yield_val = (raw_yield if raw_yield and raw_yield > 0.5 else (raw_yield*100 if raw_yield else 0))
 
-        # --- D. 籌碼面：法人參與度 (FinMind) ---
+        # --- D. 籌碼面：法人參與度 ---
         dl = DataLoader()
         start_date = (datetime.date.today() - datetime.timedelta(days=12)).strftime('%Y-%m-%d')
         chip_df = dl.taiwan_stock_institutional_investors(stock_id=clean_id, start_date=start_date)
@@ -76,23 +76,26 @@ def get_diagnostic_report(sid):
             chip_msg = (f"● 外資: {int(f_net):+d} 張 ({f_ratio:+.1f}% 參與)\n"
                         f"● 投信: {int(t_net):+d} 張 ({'🔴加碼' if t_net>0 else '🟢減碼'})")
 
-        # --- E. 基本面：營收 YoY (加入回溯備援機制) ---
-        # 抓取 150 天確保包含足夠的月份
+        # --- E. 基本面：營收 YoY (萬用備援機制) ---
         rev_start = (datetime.date.today() - datetime.timedelta(days=150)).strftime('%Y-%m-%d')
         rev_df = dl.taiwan_stock_month_revenue(stock_id=clean_id, start_date=rev_start)
         yoy_str = "N/A"
         
         if not rev_df.empty:
-            yoy_col = next((c for c in rev_df.columns if 'growth' in c.lower()), None)
-            if yoy_col:
-                # 從最後一列往前找，直到找到非 0 的數據
-                for i in range(1, min(len(rev_df) + 1, 6)):
-                    target_rev = rev_df.iloc[-i]
-                    if target_rev[yoy_col] != 0:
-                        yoy_str = f"{int(target_rev['revenue_month'])}月: {target_rev[yoy_col]:.2f}%"
+            # 遍歷所有欄位，只要包含 growth 或 percent 就試試看
+            target_cols = [c for c in rev_df.columns if any(x in c.lower() for x in ['growth', 'percent'])]
+            
+            # 從最新的月份往前檢查
+            found = False
+            for i in range(1, len(rev_df) + 1):
+                row = rev_df.iloc[-i]
+                for col in target_cols:
+                    val = row[col]
+                    if val != 0 and pd.notnull(val):
+                        yoy_str = f"{int(row['revenue_month'])}月: {val:.2f}%"
+                        found = True
                         break
-            else:
-                yoy_str = "欄位異常"
+                if found: break
 
         # --- F. 組合報告 ---
         pe = info.get('trailingPE')
@@ -106,7 +109,7 @@ def get_diagnostic_report(sid):
             f"【籌碼面：法人動態】\n"
             f"{chip_msg}\n\n"
             f"【基本面：成長與估值】\n"
-            f"● 營收 YoY: {yoy_str}\n"
+            f"● 營超 YoY: {yoy_str}\n"
             f"● 本益比 (P/E): {f'{pe:.1f}' if pe else 'N/A'} ({pe_status})\n"
             f"● 現金殖利率: {yield_val:.2f}%\n\n"
             f"【技術面：進場時機】\n"
@@ -118,7 +121,7 @@ def get_diagnostic_report(sid):
         return report
 
     except Exception as e:
-        return f"❌ {sid} 診斷發生錯誤: {str(e)}"
+        return f"❌ {sid} 診斷錯誤: {str(e)}"
 
 if __name__ == "__main__":
     input_str = sys.argv[1] if len(sys.argv) > 1 else "6223"
