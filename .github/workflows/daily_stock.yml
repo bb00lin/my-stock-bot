@@ -1,4 +1,4 @@
-name: Daily Stock Push
+name: DailyStockPush
 
 on:
   schedule:
