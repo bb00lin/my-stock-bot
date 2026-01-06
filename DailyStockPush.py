@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 import datetime
 import time
+from FinMind.data import DataLoader
 
 # ==========================================
 # 1. 配置區域
@@ -12,6 +13,19 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 WATCH_LIST = ["6770", "6706", "6684", "6271", "6269", "3105", "2538", "2014", "2010", "2002", "00992A", "00946"]
 MIN_AMOUNT_HUNDRED_MILLION = 1.0 
+
+# --- 新增：全局對照表 ---
+def get_global_stock_info():
+    """獲取台股全市場對應表"""
+    try:
+        dl = DataLoader()
+        df = dl.taiwan_stock_info()
+        # 建立 { '股票代碼': ('中文名稱', '產業別') } 的字典
+        return {str(row['stock_id']): (row['stock_name'], row['industry_category']) for _, row in df.iterrows()}
+    except:
+        return {}
+
+STOCK_INFO_MAP = get_global_stock_info()
 
 def get_tw_stock(sid):
     clean_id = str(sid).strip().upper()
@@ -32,7 +46,7 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 # ==========================================
-# 2. 進階指標抓取與評分 (含殖利率邏輯修正)
+# 2. 進階指標抓取與評分
 # ==========================================
 def fetch_pro_metrics(sid):
     stock, full_id = get_tw_stock(sid)
@@ -63,45 +77,32 @@ def fetch_pro_metrics(sid):
         except:
             this_q_m, last_q_m, m_trend = (info.get('profitMargins', 0) or 0) * 100, 0, "N/A"
         
-        # --- 【終極修正】殖利率邏輯 ---
+        # D. 殖利率邏輯
         raw_yield = info.get('dividendYield', 0)
-        if raw_yield is None:
-            dividend_yield = 0.0
-        else:
-            # yfinance 有時給 0.025 (2.5%)，有時給 2.5 (2.5%)
-            # 我們強制判定：如果數值大於 0.5 (即 50%)，通常是給錯了格式，我們除以 100
-            val = float(raw_yield)
-            if val > 0.5: 
-                dividend_yield = val # 假設它已經是百分比格式
-            else:
-                dividend_yield = val * 100 # 假設它是小數格式
-        # -----------------------------
+        dividend_yield = (float(raw_yield) if raw_yield and raw_yield > 0.5 else (float(raw_yield)*100 if raw_yield else 0))
 
-        # D. 籌碼動向
+        # E. 籌碼動向
         inst_own = (info.get('heldPercentInstitutions', 0) or 0) * 100
         d1 = ((curr_p / df_hist['Close'].iloc[-2]) - 1) * 100
         chip_status = "🔴法人加碼" if d1 > 0 and inst_own > 30 else "🟢法人觀望"
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
 
-        # E. 評分邏輯 (12分制)
+        # F. 評分邏輯 (12分制)
         score = 0
         if this_q_m > 0: score += 2
         if ((curr_p / df_hist['Close'].iloc[0]) - 1) * 100 > 0: score += 3 # 6M 趨勢
         if "📈" in m_trend: score += 2
-        if 3.0 < dividend_yield < 15.0: score += 2 # 修正評分區間，排除異常高值
+        if 3.0 < dividend_yield < 15.0: score += 2
         if 40 < curr_rsi < 70: score += 1
         if today_amount > 10: score += 1
         if vol_ratio > 2.0: score += 1
 
-        # 名稱處理
-        name_map = {"TAIW": "台積電", "HON HAI": "鴻海", "CATHAY": "國泰金", "MEGA": "兆豐金", "TCC": "台泥", "POWERCHIP": "力積電", "MPI": "旺矽", "E INK": "元太"}
-        raw_name = info.get('shortName', sid).upper()
-        c_name = sid
-        for k, v in name_map.items():
-            if k in raw_name: c_name = v; break
+        # --- 新增：中文名稱與產業獲取 ---
+        stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/未知"))
 
         return {
-            "score": score, "name": c_name, "id": f"{sid}{'市' if '.TW' in full_id else '櫃'}",
+            "score": score, "name": stock_name, "industry": industry,
+            "id": f"{sid}{'市' if '.TW' in full_id else '櫃'}",
             "rsi": f"{curr_rsi:.1f} ({rsi_status})", "yield": f"{dividend_yield:.2f}%",
             "chip": chip_status, "vol_r": f"{vol_ratio:.1f}",
             "amt_t": f"{today_amount:.1f} 億", "amt_5d": f"{avg_amount_5d:.1f} 億",
@@ -128,14 +129,15 @@ def main():
         gem = "💎 " if r['score'] >= 9 else ""
         msg += f"━━━━━━━━━━━━━━\n"
         msg += f"{gem}Total Score: {r['score']} | RSI: {r['rsi']}\n"
-        msg += f"籌碼動向: {r['chip']} | 量比: {r['vol_r']}\n"
         msg += f"股票代碼: {r['id']} | 名稱: {r['name']}\n"
+        msg += f"產業類別: {r['industry']}\n"
+        msg += f"籌碼動向: {r['chip']} | 量比: {r['vol_r']}\n"
         msg += f"收盤價: {r['p']} | 殖利率: {r['yield']}\n"
         msg += f"今日金流: {r['amt_t']} | 5日均金: {r['amt_5d']}\n"
         msg += f"本季淨利: {r['m_q']} | 淨利上升: {r['m_up']}\n"
         msg += f"漲幅: 1D:{r['d1']} | 1M:{r['m1']} | 6M:{r['m6']}\n"
     
-    msg += "━━━━━━━━━━━━━━\n註：RSI > 75 為過熱；Score 已修正殖利率邏輯。"
+    msg += "━━━━━━━━━━━━━━\n註：RSI > 75 為過熱；產業與名稱已自動校正。"
     
     requests.post("https://api.line.me/v2/bot/message/push", 
                   headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"},
