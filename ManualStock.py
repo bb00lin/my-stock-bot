@@ -24,12 +24,34 @@ def send_line_message(message):
     requests.post(url, headers=headers, json=payload)
 
 # ==========================================
-# 2. 核心診斷邏輯
+# 2. 產業與名稱獲取 (FinMind 強化版)
+# ==========================================
+def get_stock_details(sid_clean):
+    """
+    獲取台灣股票的中文名稱與產業類別
+    """
+    try:
+        dl = DataLoader()
+        df_info = dl.taiwan_stock_info()
+        # 比對股票代碼
+        target = df_info[df_info['stock_id'] == sid_clean]
+        if not target.empty:
+            c_name = target.iloc[0]['stock_name']
+            industry = target.iloc[0]['industry_category']
+            return f"{c_name}", f"{industry}"
+    except:
+        pass
+    return "未知名稱", "其他產業"
+
+# ==========================================
+# 3. 核心診斷邏輯
 # ==========================================
 def get_diagnostic_report(sid):
     try:
-        # --- A. 代碼偵測強化 ---
+        # --- A. 代碼偵測與中文名稱強化 ---
         clean_id = str(sid).split('.')[0].strip()
+        stock_name, industry = get_stock_details(clean_id) # 獲取中文名與產業
+        
         stock_obj = None
         df = pd.DataFrame()
         final_sid = clean_id
@@ -48,7 +70,6 @@ def get_diagnostic_report(sid):
             return f"❌ 找不到 {clean_id} 的資料。"
 
         info = stock_obj.info
-        name = info.get('shortName', final_sid)
         latest = df.iloc[-1]
         curr_p = latest['Close']
         
@@ -70,7 +91,7 @@ def get_diagnostic_report(sid):
         else:
             action = "☁️ 觀望盤整 (等待轉強)"
 
-        # --- D. 殖利率與營收 (略，保留之前成功邏輯) ---
+        # --- D. 殖利率與營收 ---
         raw_yield = info.get('dividendYield')
         yield_val = (raw_yield if raw_yield and raw_yield > 0.5 else (raw_yield*100 if raw_yield else 0))
 
@@ -90,6 +111,7 @@ def get_diagnostic_report(sid):
                             found = True; break
                     if found: break
         except: pass
+        
         if yoy_str == "N/A":
             y_growth = info.get('revenueGrowth')
             if y_growth: yoy_str = f"近期: {y_growth*100:.2f}% (YF)"
@@ -108,7 +130,8 @@ def get_diagnostic_report(sid):
         # --- F. 格式化報告 ---
         pe = info.get('trailingPE', 0)
         report = (
-            f"=== {final_sid} ({name}) 診斷報告 ===\n"
+            f"=== {clean_id} {stock_name} 診斷報告 ===\n"
+            f"產業：[{industry}]\n"
             f"趨勢：{'🔥 多頭' if curr_p > ma60 else '☁️ 弱勢'}\n"
             f"位階：60MA乖離 {bias_60:+.1f}%\n"
             f"品質：{'🟢 獲利穩健' if (info.get('profitMargins',0) or 0) > 0.1 else '🔴 待觀察'}\n\n"
