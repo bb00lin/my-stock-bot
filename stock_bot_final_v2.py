@@ -24,9 +24,9 @@ def send_line_message(message):
     requests.post(url, headers=headers, json=payload)
 
 # ==========================================
-# 2. 核心分析引擎 (新增避險模式)
+# 2. 核心分析引擎 (V3.1 靈敏度調整)
 # ==========================================
-def analyze_stock_smart_v3(ticker, industry, mode="NORMAL"):
+def analyze_stock_smart_v3_1(ticker, industry, mode="NORMAL"):
     try:
         stock = yf.Ticker(ticker)
         df = stock.history(period="1y", progress=False)
@@ -45,44 +45,46 @@ def analyze_stock_smart_v3(ticker, industry, mode="NORMAL"):
         is_potential = False
         tag = ""
 
-        # --- A. 強勢模式 ---
+        # --- A. 強勢模式 (放寬門檻) ---
         if mode == "NORMAL":
-            if vol_ratio > 1.2 and latest['Volume'] >= 500000 and curr_p > prev['Close'] and rsi > 50:
-                tag = "🔥 強勢模式"
-                is_potential = (curr_p > ma20) and (curr_p - ma60)/ma60 < 0.20
+            # 降低至 500 張, 1.2 倍量
+            if vol_ratio > 1.2 and latest['Volume'] >= 500000 and curr_p > prev['Close']:
+                tag = "🔥 強勢攻擊"
+                # 放寬乖離率至 30%
+                is_potential = (curr_p > ma20) and (curr_p - ma60)/ma60 < 0.30
 
-        # --- B. 弱勢抗跌模式 ---
+        # --- B. 弱勢抗跌模式 (維持穩定) ---
         elif mode == "WEAK":
-            if abs(curr_p - ma20)/ma20 < 0.02 and curr_p >= prev['Close'] and latest['Volume'] >= 400000:
-                tag = "🛡️ 弱勢抗跌"
+            if abs(curr_p - ma20)/ma20 < 0.025 and curr_p >= prev['Close'] and latest['Volume'] >= 300000:
+                tag = "🛡️ 逆勢支撐"
                 is_potential = True
 
-        # --- C. 避險/放空偵測模式 (偵測破位) ---
+        # --- C. 避險/破位模式 (偵測破位) ---
         elif mode == "RISK":
-            # 條件：跌破季線(60MA) + RSI < 40 + 有量下殺
             if curr_p < ma60 and prev['Close'] >= ma60:
-                tag = "⚠️ 趨勢破線 (逃命/避險)"
+                tag = "⚠️ 趨勢破線"
                 is_potential = True
-            elif rsi < 30 and vol_ratio > 1.2:
-                tag = "📉 弱勢趕底 (不宜接刀)"
+            elif rsi < 35 and vol_ratio > 1.1:
+                tag = "📉 弱勢盤整"
                 is_potential = True
 
         if is_potential:
+            bias = ((curr_p-ma60)/ma60)*100
             msg = (
                 f"📍{ticker} [{industry}] ({tag})\n"
                 f"現價: {curr_p:.2f} ({((curr_p/prev['Close'])-1)*100:+.1f}%)\n"
-                f"RSI: {rsi:.1f} / 60MA乖離: {((curr_p-ma60)/ma60)*100:+.1f}%\n"
-                f"【風險警示】若持股請注意停損，空方參考壓力：{ma20:.1f}" if mode=="RISK" else f"【實戰指引】支撐位：{ma60:.1f}"
+                f"RSI: {rsi:.1f} / 60MA乖離: {bias:+.1f}%\n"
+                f"{'【警示】高檔乖離大，謹慎追高' if bias > 20 else '【指引】趨勢架構尚穩'}"
             )
             return msg
         return None
     except: return None
 
 # ==========================================
-# 3. 主程序邏輯 (自動切換)
+# 3. 主程序邏輯
 # ==========================================
 def main():
-    print("🚀 啟動 V3 全天候感知掃描...")
+    print("🚀 啟動 V3.1 靈敏度優化版掃描...")
     dl = DataLoader()
     stock_df = dl.taiwan_stock_info()
     stock_map = {f"{row['stock_id']}{'.TWO' if '上櫃' in str(row.get('market_type','')) else '.TW'}": row.get('industry_category','股票') 
@@ -93,16 +95,22 @@ def main():
         print(f"正在執行：{mode_name}...")
         results = []
         for ticker, industry in stock_map.items():
-            res = analyze_stock_smart_v3(ticker, industry, mode=mode_key)
+            res = analyze_stock_smart_v3_1(ticker, industry, mode=mode_key)
             if res: results.append(res)
             time.sleep(0.01)
         
         if results:
-            send_line_message(f"🔍 【V3 掃描報告 - {mode_name}】\n\n" + "\n---\n".join(results[:10])) # 限制前10檔避免訊息過長
-            if mode_key != "RISK": return # 如果前兩個模式有找到標的，就結束。
+            msg_header = f"🔍 【V3.1 掃描報告 - {mode_name}】"
+            # 每次發送最多 5 檔，避免 LINE 訊息過長
+            for i in range(0, len(results), 5):
+                chunk = results[i:i+5]
+                send_line_message(f"{msg_header}\n\n" + "\n---\n".join(chunk))
+            
+            # 如果強勢模式有東西，就不用跑後面了
+            if mode_key != "RISK": return 
         
     if not results:
-        send_line_message("📊 市場處於極度混沌狀態，連破位股與抗跌股都無法有效偵測，請完全空手。")
+        send_line_message("📊 市場極度枯竭，V3.1 仍未發現適合標的。")
 
 if __name__ == "__main__":
     main()
