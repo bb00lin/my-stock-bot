@@ -27,13 +27,9 @@ def send_line_message(message):
 # 2. 產業與名稱獲取 (FinMind 強化版)
 # ==========================================
 def get_stock_details(sid_clean):
-    """
-    獲取台灣股票的中文名稱與產業類別
-    """
     try:
         dl = DataLoader()
         df_info = dl.taiwan_stock_info()
-        # 比對股票代碼
         target = df_info[df_info['stock_id'] == sid_clean]
         if not target.empty:
             c_name = target.iloc[0]['stock_name']
@@ -50,7 +46,7 @@ def get_diagnostic_report(sid):
     try:
         # --- A. 代碼偵測與中文名稱強化 ---
         clean_id = str(sid).split('.')[0].strip()
-        stock_name, industry = get_stock_details(clean_id) # 獲取中文名與產業
+        stock_name, industry = get_stock_details(clean_id)
         
         stock_obj = None
         df = pd.DataFrame()
@@ -79,7 +75,7 @@ def get_diagnostic_report(sid):
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
         
         # --- C. 策略建議邏輯 ---
-        high_1y = df['High'].max() # 壓力位 (一年最高)
+        high_1y = df['High'].max() # 壓力位
         stop_loss = ma60 * 0.97    # 停損位 (季線下破3%)
         
         if bias_60 > 15:
@@ -127,7 +123,11 @@ def get_diagnostic_report(sid):
                 chip_msg = f"● 外資: {int(f_net):+d} 張 / 投信: {int(t_net):+d} 張"
         except: pass
 
-        # --- F. 格式化報告 ---
+        # --- F. APP 警示數據計算 (群益 APP 專用) ---
+        avg_vol_5d = df['Volume'].rolling(5).mean().iloc[-1]
+        moment_vol_trigger = int(avg_vol_5d * 0.02) # 對應「盤中瞬間巨量」單量 >= 5日均量 2%
+
+        # --- G. 格式化報告 ---
         pe = info.get('trailingPE', 0)
         report = (
             f"=== {clean_id} {stock_name} 診斷報告 ===\n"
@@ -148,7 +148,14 @@ def get_diagnostic_report(sid):
             f"● 建議行動：{action}\n"
             f"● 壓力參考：{high_1y:.1f}\n"
             f"● 支撐防線：{ma60:.1f}\n"
-            f"● 停損保護：{stop_loss:.1f}\n"
+            f"● 停損保護：{stop_loss:.1f}\n\n"
+            f"--- Alarm_Setting_Context ---\n"
+            f"🔔 群益APP提示條件設定：\n"
+            f"1. [上漲超過]：{high_1y:.1f}\n"
+            f"2. [下跌超過]：{ma60:.1f}\n"
+            f"3. [下跌超過(停損)]：{stop_loss:.1f}\n"
+            f"4. [盤中瞬間巨量] 單量 >= {moment_vol_trigger} 張\n"
+            f"-----------------------------\n"
             f"======================================="
         )
         return report
