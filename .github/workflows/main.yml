@@ -34,4 +34,4 @@ jobs:
           # 請確保 GitHub Repository -> Settings -> Secrets 中已設定這兩個變數
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        run: python stock_bot_final_v2.py
+        run: python DailyStockBot.py
