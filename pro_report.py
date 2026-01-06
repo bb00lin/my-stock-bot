@@ -10,7 +10,7 @@ import time
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
-WATCH_LIST = ["2330", "2317", "2882", "2886", "6223", "8069", "6770", "1101"]
+WATCH_LIST = ["6770", "6706", "6684", "6271", "6269", "3105", "2538", "2014", "2010", "2002", "00992A", "00946"]
 MIN_AMOUNT_HUNDRED_MILLION = 1.0 
 
 def get_tw_stock(sid):
