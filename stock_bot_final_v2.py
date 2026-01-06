@@ -47,7 +47,7 @@ def analyze_stock_smart_v3(ticker, industry, mode="NORMAL"):
 
         # --- A. 強勢模式 ---
         if mode == "NORMAL":
-            if vol_ratio > 1.5 and latest['Volume'] >= 1000000 and curr_p > prev['Close'] and rsi > 50:
+            if vol_ratio > 1.2 and latest['Volume'] >= 500000 and curr_p > prev['Close'] and rsi > 50:
                 tag = "🔥 強勢模式"
                 is_potential = (curr_p > ma20) and (curr_p - ma60)/ma60 < 0.20
 
