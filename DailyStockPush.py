@@ -1,4 +1,3 @@
-以下是你之前提供給我的每日特定個股分析之全能法人金流診斷DailyStockPush.py代碼，請幫我加入股票中文名稱與產業類別，例如 PCB銅箔基板製造商，晶圓封測，IC設計 等....
 import os
 import yfinance as yf
 import pandas as pd
