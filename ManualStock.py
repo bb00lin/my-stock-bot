@@ -133,9 +133,11 @@ def get_diagnostic_report(sid):
                 chip_msg = f"● 外資: {int(f_net):+d} / 投信: {int(t_net):+d}"
         except: pass
 
-        # --- G. APP 數據 ---
-        avg_vol_5d = df['Volume'].rolling(5).mean().iloc[-1]
-        vol_2_percent = int(avg_vol_5d * 0.02) if pd.notnull(avg_vol_5d) else 0
+        # --- G. APP 數據量能校正 (5日均量2% 並轉換為張數) ---
+        avg_vol_5d_shares = df['Volume'].rolling(5).mean().iloc[-1]
+        # 修正：yfinance 抓到的是股數，除以 1000 轉換為台股習慣的「張」
+        vol_2_percent = int((avg_vol_5d_shares / 1000) * 0.02)
+        if vol_2_percent < 1: vol_2_percent = 1
 
         # --- H. 格式化報告 ---
         pe = info.get('trailingPE', 0)
@@ -157,7 +159,7 @@ def get_diagnostic_report(sid):
             f"🔔 群益APP提示：\n"
             f"1. 上漲超過：{high_1y:.1f}\n"
             f"2. 下跌超過：{support_line:.1f}\n"
-            f"💡 盤中巨量單筆 > {vol_2_percent} 張\n"
+            f"💡 [盤中瞬間巨量] 已固定為5日均量2%，響起時代表單筆成交 > {vol_2_percent} 張\n"
             f"======================================="
         )
         return report
