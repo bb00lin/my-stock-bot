@@ -9,34 +9,19 @@ from FinMind.data import DataLoader
 from ta.momentum import RSIIndicator
 
 # ==========================================
-# 1. 環境設定 (已填入您的 LINE USER ID)
+# 1. 環境設定
 # ==========================================
-# 請在這裡填入您的 LINE Channel Access Token
-LINE_ACCESS_TOKEN = "你的_LINE_ACCESS_TOKEN_貼在這裡"
-LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c" 
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
 def send_line_message(message):
-    if not LINE_ACCESS_TOKEN or "你的" in LINE_ACCESS_TOKEN:
-        print("\n⚠️ 錯誤：尚未設定 LINE_ACCESS_TOKEN，僅在本地顯示：")
+    if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
         print(message)
         return
-        
     url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json", 
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
-    }
-    payload = {
-        "to": LINE_USER_ID, 
-        "messages": [{"type": "text", "text": message}]
-    }
-    
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code != 200:
-        print(f"❌ LINE 發送失敗，狀態碼：{response.status_code}")
-        print(f"錯誤訊息：{response.text}")
-    else:
-        print(f"✅ 診斷報告已成功推送到 LINE")
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+    payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
+    requests.post(url, headers=headers, json=payload)
 
 # ==========================================
 # 2. 產業與名稱獲取 (FinMind 強化版)
@@ -65,7 +50,6 @@ def get_diagnostic_report(sid):
         stock_obj = None
         df = pd.DataFrame()
 
-        # 嘗試 TW (上市) 與 TWO (上櫃)
         for suffix in [".TW", ".TWO"]:
             target = f"{clean_id}{suffix}"
             temp_stock = yf.Ticker(target)
@@ -87,12 +71,15 @@ def get_diagnostic_report(sid):
         bias_60 = ((curr_p - ma60) / ma60) * 100
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
         
-        # --- C. 壓力/支撐校正機制 (自動人工校正) ---
+        # --- C. 壓力/支撐校正機制 (防止數據失真) ---
+        # 如果乖離率絕對值 > 30%，代表數據可能因減資/拆分失真
         is_data_distorted = abs(bias_60) > 30
         
         if is_data_distorted:
+            # 數據失真時，改用近 20 日的高低點來推算合理的壓力支撐
             recent_df = df.iloc[-20:]
             high_1y = recent_df['High'].max()
+            # 支撐設為近20日低點，若太近則設為現價的 95%
             support_line = max(recent_df['Low'].min(), curr_p * 0.95)
             stop_loss = support_line * 0.97
             warning_msg = "⚠️ 偵測到數據異常，已啟動人工智慧自動校正值。\n"
@@ -121,7 +108,7 @@ def get_diagnostic_report(sid):
         y_growth = info.get('revenueGrowth')
         if y_growth: yoy_str = f"近期: {y_growth*100:.2f}% (YF)"
 
-        # --- F. 籌碼面 (NaN 防呆) ---
+        # --- F. 籌碼面 (加入 NaN 防呆) ---
         chip_msg = "● 外資: +0 張 / 投信: +0 張"
         try:
             dl = DataLoader()
@@ -177,7 +164,6 @@ def get_diagnostic_report(sid):
         return f"❌ {sid} 診斷錯誤: {str(e)}"
 
 if __name__ == "__main__":
-    # 預設執行華邦電測試，或接收外部參數
     input_str = sys.argv[1] if len(sys.argv) > 1 else "2344"
     targets = input_str.replace('\n', ' ').replace(',', ' ').split()
     for t in targets:
