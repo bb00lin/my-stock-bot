@@ -44,22 +44,19 @@ def get_stock_details(sid_clean):
 # ==========================================
 def get_diagnostic_report(sid):
     try:
-        # --- A. 代碼偵測與中文名稱強化 ---
         clean_id = str(sid).split('.')[0].strip()
         stock_name, industry = get_stock_details(clean_id)
         
         stock_obj = None
         df = pd.DataFrame()
-        final_sid = clean_id
 
         for suffix in [".TW", ".TWO"]:
             target = f"{clean_id}{suffix}"
             temp_stock = yf.Ticker(target)
-            df_test = temp_stock.history(period="5d")
+            df_test = temp_stock.history(period="10d")
             if not df_test.empty:
                 stock_obj = temp_stock
                 df = temp_stock.history(period="1y") 
-                final_sid = target
                 break
         
         if df.empty or stock_obj is None:
@@ -74,66 +71,69 @@ def get_diagnostic_report(sid):
         bias_60 = ((curr_p - ma60) / ma60) * 100
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
         
-        # --- C. 策略建議邏輯 ---
-        high_1y = df['High'].max() # 壓力位
-        stop_loss = ma60 * 0.97    # 停損位 (季線下破3%)
+        # --- C. 壓力/支撐校正機制 (防止數據失真) ---
+        # 如果乖離率絕對值 > 30%，代表數據可能因減資/拆分失真
+        is_data_distorted = abs(bias_60) > 30
         
-        if bias_60 > 15:
+        if is_data_distorted:
+            # 數據失真時，改用近 20 日的高低點來推算合理的壓力支撐
+            recent_df = df.iloc[-20:]
+            high_1y = recent_df['High'].max()
+            # 支撐設為近20日低點，若太近則設為現價的 95%
+            support_line = max(recent_df['Low'].min(), curr_p * 0.95)
+            stop_loss = support_line * 0.97
+            warning_msg = "⚠️ 偵測到數據異常，已啟動人工智慧自動校正值。\n"
+        else:
+            high_1y = df['High'].max()
+            support_line = ma60
+            stop_loss = ma60 * 0.97
+            warning_msg = ""
+        
+        # --- D. 策略建議邏輯 ---
+        if bias_60 > 15 and not is_data_distorted:
             action = "❌ 過熱不追 (等待回檔)"
         elif -2 < bias_60 < 5 and rsi < 50:
             action = "🟡 支撐區試單 (分批佈局)"
         elif rsi > 60:
             action = "🔥 強勢持有 (注意乖離)"
+        elif rsi < 30:
+            action = "📉 超跌區 (等待反彈)"
         else:
             action = "☁️ 觀望盤整 (等待轉強)"
 
-        # --- D. 殖利率與營收 ---
+        # --- E. 殖利率與營收 ---
         raw_yield = info.get('dividendYield')
         yield_val = (raw_yield if raw_yield and raw_yield > 0.5 else (raw_yield*100 if raw_yield else 0))
-
         yoy_str = "N/A"
+        y_growth = info.get('revenueGrowth')
+        if y_growth: yoy_str = f"近期: {y_growth*100:.2f}% (YF)"
+
+        # --- F. 籌碼面 (加入 NaN 防呆) ---
+        chip_msg = "● 外資: +0 張 / 投信: +0 張"
         try:
             dl = DataLoader()
-            rev_start = (datetime.date.today() - datetime.timedelta(days=150)).strftime('%Y-%m-%d')
-            rev_df = dl.taiwan_stock_month_revenue(stock_id=clean_id, start_date=rev_start)
-            if not rev_df.empty:
-                target_cols = [c for c in rev_df.columns if any(x in c.lower() for x in ['growth', 'percent'])]
-                found = False
-                for i in range(1, len(rev_df) + 1):
-                    row = rev_df.iloc[-i]
-                    for col in target_cols:
-                        if row[col] != 0:
-                            yoy_str = f"{int(row['revenue_month'])}月: {row[col]:.2f}%"
-                            found = True; break
-                    if found: break
-        except: pass
-        
-        if yoy_str == "N/A":
-            y_growth = info.get('revenueGrowth')
-            if y_growth: yoy_str = f"近期: {y_growth*100:.2f}% (YF)"
-
-        # --- E. 籌碼面 ---
-        chip_msg = "無資料"
-        try:
             start_date = (datetime.date.today() - datetime.timedelta(days=12)).strftime('%Y-%m-%d')
             chip_df = dl.taiwan_stock_institutional_investors(stock_id=clean_id, start_date=start_date)
             if not chip_df.empty:
                 f_net = (chip_df[chip_df['name'] == 'Foreign_Investor']['buy'].sum() - chip_df[chip_df['name'] == 'Foreign_Investor']['sell'].sum()) / 1000
                 t_net = (chip_df[chip_df['name'] == 'Investment_Trust']['buy'].sum() - chip_df[chip_df['name'] == 'Investment_Trust']['sell'].sum()) / 1000
-                chip_msg = f"● 外資: {int(f_net):+d} 張 / 投信: {int(t_net):+d} 張"
+                f_net = int(f_net) if pd.notnull(f_net) else 0
+                t_net = int(t_net) if pd.notnull(t_net) else 0
+                chip_msg = f"● 外資: {f_net:+d} 張 / 投信: {t_net:+d} 張"
         except: pass
 
-       # --- F. APP 警示數據參考 (群益 APP 固定邏輯) ---
+        # --- G. APP 警示數據參考 ---
         avg_vol_5d = df['Volume'].rolling(5).mean().iloc[-1]
-        vol_2_percent = int(avg_vol_5d * 0.02)
+        vol_2_percent = int(avg_vol_5d * 0.02) if pd.notnull(avg_vol_5d) else 0
 
-        # --- G. 格式化報告 ---
+        # --- H. 格式化報告 ---
         pe = info.get('trailingPE', 0)
         report = (
             f"=== {clean_id} {stock_name} 診斷報告 ===\n"
+            f"{warning_msg}"
             f"產業：[{industry}]\n"
-            f"趨勢：{'🔥 多頭' if curr_p > ma60 else '☁️ 弱勢'}\n"
-            f"位階：60MA乖離 {bias_60:+.1f}%\n"
+            f"趨勢：{'🔥 多頭' if curr_p > ma60 or is_data_distorted else '☁️ 弱勢'}\n"
+            f"位階：60MA乖離 {bias_60:+.1f}% {'(數據斷層)' if is_data_distorted else ''}\n"
             f"品質：{'🟢 獲利穩健' if (info.get('profitMargins',0) or 0) > 0.1 else '🔴 待觀察'}\n\n"
             f"【關鍵數據】\n"
             f"● 營收 YoY: {yoy_str}\n"
@@ -147,14 +147,14 @@ def get_diagnostic_report(sid):
             f"【🚀 實戰戰略指引】\n"
             f"● 建議行動：{action}\n"
             f"● 壓力參考：{high_1y:.1f}\n"
-            f"● 支撐防線：{ma60:.1f}\n"
+            f"● 支撐防線：{support_line:.1f}\n"
             f"● 停損保護：{stop_loss:.1f}\n\n"
             f"--- Alarm_Setting_Context ---\n"
-            f"🔔 群益APP提示條件建議：\n"
-            f"1. [上漲超過]：設定 {high_1y:.1f} (觀察壓力)\n"
-            f"2. [下跌超過]：設定 {ma60:.1f} (觀察支撐)\n"
-            f"3. [下跌超過]：設定 {stop_loss:.1f} (保命停損)\n"
-            f"💡 [盤中瞬間巨量] 已固定為5日均量2%，響起時代表單筆成交 > {vol_2_percent} 張\n"
+            f"🔔 群益APP提示條件設定：\n"
+            f"1. [上漲超過]：{high_1y:.1f}\n"
+            f"2. [下跌超過]：{support_line:.1f}\n"
+            f"3. [下跌超過]：{stop_loss:.1f}\n"
+            f"💡 [盤中瞬間巨量] 已固定為5日均量2%，響起時單筆成交 > {vol_2_percent} 張\n"
             f"-----------------------------\n"
             f"======================================="
         )
@@ -164,7 +164,7 @@ def get_diagnostic_report(sid):
         return f"❌ {sid} 診斷錯誤: {str(e)}"
 
 if __name__ == "__main__":
-    input_str = sys.argv[1] if len(sys.argv) > 1 else "6223"
+    input_str = sys.argv[1] if len(sys.argv) > 1 else "2344"
     targets = input_str.replace('\n', ' ').replace(',', ' ').split()
     for t in targets:
         report_msg = get_diagnostic_report(t.strip().upper())
