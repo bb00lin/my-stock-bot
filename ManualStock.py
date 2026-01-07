@@ -34,7 +34,7 @@ def send_line_message(message):
 
 def save_and_open_report(content):
     """儲存至 D 槽並自動開啟資料夾"""
-    target_dir = r"D:\Mega\下載\個股"
+    target_dir = r"C:\Stock_Reports"
     
     # 確保資料夾存在
     if not os.path.exists(target_dir):
