@@ -12,78 +12,67 @@ from ta.momentum import RSIIndicator
 # ==========================================
 # 1. 環境設定
 # ==========================================
-# 請確保環境變數中有 LINE_ACCESS_TOKEN 與 LINE_USER_ID
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 
 def send_line_message(message):
-    """推播報告至 LINE (若額度滿會印出提示)"""
-    if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        return
+    if not LINE_ACCESS_TOKEN or not LINE_USER_ID: return
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
     try:
         res = requests.post(url, headers=headers, json=payload)
-        if res.status_code == 200:
-            print("✅ 報告已推送到 LINE")
-        else:
-            # 針對額度已滿的狀況優化提示
-            print(f"ℹ️ LINE 額度已滿 (Limit Reached)，請查看產出的文字檔。")
-    except:
-        pass
+        if res.status_code != 200:
+            print(f"ℹ️ LINE 額度已滿 (Limit Reached)，請查看 D 槽文字檔報告。")
+    except: pass
 
 def save_and_verify_report(content):
     """
     強制存檔至 D:\Mega\下載\個股
-    並修正自動開啟資料夾的 Windows 指令錯誤
+    並使用最強效的 Windows 開啟指令
     """
-    # 1. 定義路徑 (使用原始字串避開轉義字元)
+    # 修正路徑格式，確保完全符合 Windows 規範
     base_dir = r"D:\Mega\下載\個股"
     
-    # 2. 建立資料夾
     if not os.path.exists(base_dir):
         try:
             os.makedirs(base_dir)
-            print(f"📂 已建立新資料夾: {base_dir}")
         except:
-            print(f"⚠️ 無法在 D 槽建立，改用桌面...")
             base_dir = os.path.join(os.path.expanduser("~"), "Desktop")
 
-    # 3. 檔名與路徑標準化 (核心修正點：確保全為反斜線 \)
     date_str = datetime.date.today().strftime('%Y-%m-%d')
     filename = f"Stock_Report_{date_str}.txt"
+    # 使用 normpath 確保斜線方向正確 (\)
     full_path = os.path.normpath(os.path.join(base_dir, filename))
     
     try:
-        # 4. 強制寫入檔案
+        # 1. 寫入檔案
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
         
-        # 5. 二次確認
+        # 2. 驗證
         if os.path.exists(full_path):
             print("-" * 35)
             print(f"✅ 報告存檔成功！")
-            print(f"📍 位置: {full_path}")
-            print(f"📏 大小: {os.path.getsize(full_path)} bytes")
+            print(f"📍 實際位置: {full_path}")
+            print(f"📏 檔案大小: {os.path.getsize(full_path)} bytes")
             print("-" * 35)
             
-            # 6. 自動彈出資料夾 (修正 Errno 2)
+            # 3. 自動開啟資料夾 (使用 shell=True 解決找不到 explorer 的問題)
             try:
-                # 方法一：Windows 標準開啟
-                os.startfile(base_dir)
-                print(f"📂 已為您彈出資料夾視窗。")
-            except:
-                # 方法二：備援 explorer 指令 (使用串列格式避開引號解析問題)
-                subprocess.run(['explorer', base_dir])
+                # 這是最暴力但對 Windows 最有效的方法
+                subprocess.run(f'explorer.exe "{base_dir}"', shell=True)
+                print(f"📂 已嘗試開啟資料夾視窗。")
+            except Exception as e:
+                print(f"💡 請手動開啟此路徑查看報告: {base_dir}")
         else:
-            print("❌ 存檔後找不到檔案，請檢查權限。")
+            print("❌ 存檔失敗。")
             
     except Exception as e:
-        print(f"❌ 發生存檔異常：{e}")
+        print(f"❌ 發生異常：{e}")
 
 # ==========================================
-# 2. 核心診斷邏輯 (包含 00992A 等 ETF 保護)
+# 2. 核心診斷邏輯
 # ==========================================
 def get_stock_details(sid_clean):
     try:
@@ -100,21 +89,18 @@ def get_diagnostic_report(sid):
         clean_id = str(sid).split('.')[0].strip()
         stock_name, industry = get_stock_details(clean_id)
         
-        # 抓取資料
         df = pd.DataFrame()
         for suffix in [".TW", ".TWO"]:
             df = yf.Ticker(f"{clean_id}{suffix}").history(period="1y")
             if not df.empty: break
         
-        if df.empty: return f"❌ {clean_id}: 找不到歷史資料"
+        if df.empty: return f"❌ {clean_id}: 找不到資料"
 
-        latest = df.iloc[-1]
-        curr_p = latest['Close']
+        curr_p = df.iloc[-1]['Close']
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         bias_60 = ((curr_p - ma60) / ma60) * 100
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
         
-        # 數據自動校正
         is_data_distorted = abs(bias_60) > 30
         if is_data_distorted:
             recent = df.iloc[-20:]
@@ -123,13 +109,10 @@ def get_diagnostic_report(sid):
             stop = supp * 0.97
             warn = "⚠️(數據校正)\n"
         else:
-            high_v = df['High'].max()
-            supp = ma60
-            stop = ma60 * 0.97
+            high_v, supp, stop = df['High'].max(), ma60, ma60 * 0.97
             warn = ""
         
-        # 籌碼面 (處理 00992A 債券 ETF 邏輯)
-        chip_info = "外/投:讀取失敗"
+        chip_info = "外/投:無數據"
         try:
             dl = DataLoader()
             start = (datetime.date.today() - datetime.timedelta(days=10)).strftime('%Y-%m-%d')
@@ -143,28 +126,15 @@ def get_diagnostic_report(sid):
         return (f"【{clean_id} {stock_name}】{warn}"
                 f" 現價:{curr_p:.2f} | RSI:{rsi:.1f} | 乖離:{bias_60:+.1f}%\n"
                 f" {chip_info}\n"
-                f" 🔔APP警示: 壓:{high_v:.1f} / 支:{supp:.1f} / 損:{stop:.1f}\n"
+                f" 🔔APP提示: 壓:{high_v:.1f} / 支:{supp:.1f} / 損:{stop:.1f}\n"
                 f" ------------------------------------")
-    except Exception as e:
-        return f"❌ {sid} 錯誤: {e}"
+    except Exception as e: return f"❌ {sid} 錯誤: {e}"
 
-# ==========================================
-# 3. 執行入口
-# ==========================================
 if __name__ == "__main__":
-    # 用法：python ManualStock.py "2344 0052 00992A"
-    input_str = sys.argv[1] if len(sys.argv) > 1 else "2344"
-    targets = input_str.replace(',', ' ').split()
-    
-    print(f"🚀 啟動個股掃描...")
-    
+    targets = (sys.argv[1] if len(sys.argv) > 1 else "2344").replace(',', ' ').split()
+    print(f"🚀 啟動診斷程式...")
     reports = [get_diagnostic_report(t.strip().upper()) for t in targets]
+    final_output = f"📊 個股診斷報告 ({datetime.date.today()})\n" + "=" * 35 + "\n" + "\n".join(reports)
     
-    final_output = f"📊 個股診斷集體報告 ({datetime.date.today()})\n"
-    final_output += "=" * 35 + "\n" + "\n".join(reports)
-    
-    # 執行儲存、驗證與彈出視窗
     save_and_verify_report(final_output)
-    
-    # 嘗試發送 LINE
     send_line_message(final_output)
