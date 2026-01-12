@@ -4,7 +4,11 @@ on:
   schedule:
     - cron: '30 6 * * 1-5' # 台北 14:30
     - cron: '10 8 * * 1-5' # 台北 16:10
-  workflow_dispatch: # 允許手動點擊執行測試
+  workflow_dispatch: 
+
+# 賦予寫入權限以便自動 Commit 報告
+permissions:
+  contents: write
 
 jobs:
   run_job:
@@ -21,7 +25,6 @@ jobs:
       - name: Install System Dependencies
         run: |
           python -m pip install --upgrade pip
-          # 一次性安裝所有可能缺失的底層套件
           pip install tqdm requests pandas yfinance FinMind ta scikit-learn
 
       - name: Run DailyStockPush
@@ -29,3 +32,23 @@ jobs:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python DailyStockPush.py
+
+      - name: 歷史回溯 - 自動 Commit 報告回 Repo
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add report_*.txt latest_report.txt
+          if git diff --staged --quiet; then
+            echo "今日報告無變動，跳過提交。"
+          else
+            git commit -m "📝 更新每日診斷報告: $(date +'%Y-%m-%d')"
+            git push
+          fi
+
+      - name: 雲端存檔備份 - Upload Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Daily-Stock-Report-${{ github.run_id }}
+          path: report_*.txt
+          retention-days: 7
