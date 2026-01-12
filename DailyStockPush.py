@@ -12,7 +12,7 @@ from FinMind.data import DataLoader
 # 請確保 GitHub Secrets 中已設定以下變數
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
-WATCH_LIST = ["6770", "6706", "6684", "6271", "6269", "3105", "2538", "2014", "2010", "2002", "00992A", "00946"]
+WATCH_LIST = ["6770", "6706", "6684", "6271", "6269", "3105", "2538", "2014", "2010", "2002", "00992A", "00946", "2317", "2347", "2356", "4510", "4540", "9907"]
 MIN_AMOUNT_HUNDRED_MILLION = 1.0 
 
 def get_global_stock_info():
