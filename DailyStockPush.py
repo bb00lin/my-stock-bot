@@ -9,6 +9,7 @@ from FinMind.data import DataLoader
 # ==========================================
 # 1. 配置與對照表初始化
 # ==========================================
+# 請確保 GitHub Secrets 中已設定以下變數
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 WATCH_LIST = ["6770", "6706", "6684", "6271", "6269", "3105", "2538", "2014", "2010", "2002", "00992A", "00946"]
@@ -21,7 +22,7 @@ def get_global_stock_info():
         df = dl.taiwan_stock_info()
         return {str(row['stock_id']): (row['stock_name'], row['industry_category']) for _, row in df.iterrows()}
     except Exception as e:
-        print(f"對照表獲取失敗: {e}")
+        print(f"對照表獲取失敗: {e}", flush=True)
         return {}
 
 STOCK_INFO_MAP = get_global_stock_info()
@@ -38,6 +39,7 @@ def calculate_rsi(series, period=14):
 
 def get_tw_stock(sid):
     clean_id = str(sid).strip().upper()
+    # 優先嘗試上市 (.TW) 再嘗試上櫃 (.TWO)
     for suffix in [".TW", ".TWO"]:
         target = f"{clean_id}{suffix}"
         stock = yf.Ticker(target)
@@ -98,7 +100,6 @@ def fetch_pro_metrics(sid):
         if today_amount > 10: score += 1
         if vol_ratio > 1.5: score += 1
 
-        # 名稱與產業獲取
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
 
         return {
@@ -111,22 +112,27 @@ def fetch_pro_metrics(sid):
             "d1": f"{d1:+.1f}%", "m1": f"{(((curr_p/df_hist['Close'].iloc[-22])-1)*100):+.1f}%", 
             "m6": f"{(((curr_p/df_hist['Close'].iloc[0])-1)*100):+.1f}%"
         }
-    except:
+    except Exception as e:
+        print(f"標的 {sid} 診斷失敗: {e}", flush=True)
         return None
 
 # ==========================================
-# 4. 主程序
+# 4. 主程序 (含 GitHub Log 輸出)
 # ==========================================
 def main():
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        print("缺少 LINE API 設定，終止運行。")
-        return
+        print("❌ 缺少 LINE API 設定，僅在 GitHub Log 輸出診斷。")
 
     results = []
+    print(f"🚀 開始診斷清單: {WATCH_LIST}", flush=True)
     for sid in WATCH_LIST:
         res = fetch_pro_metrics(sid)
-        if res: results.append(res)
-        time.sleep(1) # 避免 API 頻率過快
+        if res:
+            results.append(res)
+            print(f"✅ 已完成 {sid} {res['name']} 的診斷 (得分: {res['score']})", flush=True)
+        else:
+            print(f"⏩ 跳過 {sid} (金流低於門檻或無數據)", flush=True)
+        time.sleep(0.5) 
     
     results.sort(key=lambda x: x['score'], reverse=True)
     
@@ -135,7 +141,7 @@ def main():
     
     for r in results:
         gem = "💎 " if r['score'] >= 9 else ""
-        msg += (
+        section = (
             f"━━━━━━━━━━━━━━\n"
             f"{gem}Total Score: {r['score']} | RSI: {r['rsi']}\n"
             f"標的: {r['id']} {r['name']}\n"
@@ -145,10 +151,24 @@ def main():
             f"今日金流: {r['amt_t']} (5日均:{r['amt_5d']})\n"
             f"漲幅: 1D:{r['d1']} | 1M:{r['m1']} | 6M:{r['m6']}\n"
         )
-    
-    requests.post("https://api.line.me/v2/bot/message/push", 
-                  headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"},
-                  json={"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg}]})
+        msg += section
+
+    # 同時在 GitHub Action 的 Log 輸出最終結果
+    print("\n--- 📯 最終診斷報告輸出 ---", flush=True)
+    print(msg, flush=True)
+
+    # 發送到 LINE
+    if LINE_ACCESS_TOKEN and LINE_USER_ID:
+        try:
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+            payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg}]}
+            response = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
+            if response.status_code == 200:
+                print("📤 已成功推送至 LINE。", flush=True)
+            else:
+                print(f"❌ LINE 推送失敗，狀態碼: {response.status_code}", flush=True)
+        except Exception as e:
+            print(f"❌ LINE 推送過程中出錯: {e}", flush=True)
 
 if __name__ == "__main__":
     main()
