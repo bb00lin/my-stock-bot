@@ -9,45 +9,55 @@ from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
 
 # ==========================================
-# 1. 環境設定
+# 1. 環境設定與參數
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-# 已根據您的紀錄設定 LINE USER ID
-LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c" 
+# 根據您的紀錄預設 LINE USER ID
+LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c"
+OUTPUT_FILENAME = "scan_results.txt"
 
 def send_line_message(message):
-    # 同步輸出到 GitHub Log (控制台)
+    """同步輸出到 Log 並發送 LINE 訊息"""
     print(f"\n--- 📤 發送 LINE 訊息 ---\n{message}\n", flush=True)
     
     if not LINE_ACCESS_TOKEN:
-        print("⚠️ 找不到 LINE_ACCESS_TOKEN，取消發送訊息。", flush=True)
+        print("⚠️ 提醒：找不到 LINE_ACCESS_TOKEN，僅在控制台輸出結果。", flush=True)
         return
     
     url = "https://api.line.me/v2/bot/message/push"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+    headers = {
+        "Content-Type": "application/json", 
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
+    }
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
+    
     try:
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code != 200:
             print(f"❌ LINE 發送失敗，狀態碼: {response.status_code}", flush=True)
     except Exception as e:
-        print(f"❌ LINE 請求出錯: {e}", flush=True)
+        print(f"❌ LINE 請求過程出錯: {e}", flush=True)
 
 # ==========================================
 # 2. 核心分析引擎
 # ==========================================
 def analyze_stock_smart_v3_1(ticker, stock_info, mode="NORMAL"):
+    """
+    執行單檔股票診斷
+    """
     try:
         stock = yf.Ticker(ticker)
-        # 為了效能，GitHub Actions 建議只抓取必要的資料長度
+        # 抓取一年資料以計算 60MA
         df = stock.history(period="1y", progress=False)
         if len(df) < 60: return None
+        # 排除當日尚未開盤或無成交量數據
         if df.iloc[-1]['Volume'] == 0: df = df.iloc[:-1]
         
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         curr_p = latest['Close']
         
+        # 計算技術指標
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
         ma20 = SMAIndicator(df['Close'], 20).sma_indicator().iloc[-1]
         ma60 = SMAIndicator(df['Close'], 60).sma_indicator().iloc[-1]
@@ -56,16 +66,19 @@ def analyze_stock_smart_v3_1(ticker, stock_info, mode="NORMAL"):
         is_potential = False
         tag = ""
 
+        # A. 強勢模式
         if mode == "NORMAL":
             if vol_ratio > 1.2 and latest['Volume'] >= 500000 and curr_p > prev['Close']:
                 tag = "🔥 強勢攻擊"
                 is_potential = (curr_p > ma20) and (curr_p - ma60)/ma60 < 0.30
 
+        # B. 弱勢抗跌模式
         elif mode == "WEAK":
             if abs(curr_p - ma20)/ma20 < 0.025 and curr_p >= prev['Close'] and latest['Volume'] >= 300000:
                 tag = "🛡️ 逆勢支撐"
                 is_potential = True
 
+        # C. 避險/破位模式
         elif mode == "RISK":
             if curr_p < ma60 and prev['Close'] >= ma60:
                 tag = "⚠️ 趨勢破線"
@@ -75,7 +88,7 @@ def analyze_stock_smart_v3_1(ticker, stock_info, mode="NORMAL"):
                 is_potential = True
 
         if is_potential:
-            bias = ((curr_p-ma60)/ma60)*100
+            bias = ((curr_p - ma60) / ma60) * 100
             msg = (
                 f"📍{ticker} {stock_info['name']}\n"
                 f"產業：[{stock_info['industry']}]\n"
@@ -86,24 +99,30 @@ def analyze_stock_smart_v3_1(ticker, stock_info, mode="NORMAL"):
             )
             return msg
         return None
-    except: return None
+    except:
+        return None
 
 # ==========================================
 # 3. 主程序邏輯
 # ==========================================
 def main():
-    print(f"🚀 啟動掃描時間：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    start_time = datetime.datetime.now()
+    print(f"🚀 啟動 DailyStockBot 智能全市場掃描...", flush=True)
+    print(f"⏰ 當前時間：{start_time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+
+    # 獲取台股清單
     dl = DataLoader()
     try:
         stock_df = dl.taiwan_stock_info()
     except Exception as e:
-        print(f"❌ 無法獲取台股清單: {e}", flush=True)
+        print(f"❌ 獲取 FinMind 數據失敗: {e}", flush=True)
         return
 
+    # 預處理股票清單
     stock_map = {}
     for _, row in stock_df.iterrows():
         sid = str(row['stock_id'])
-        if len(sid) == 4:
+        if len(sid) == 4:  # 只掃描普通股
             suffix = '.TWO' if '上櫃' in str(row.get('market_type', '')) else '.TW'
             ticker = f"{sid}{suffix}"
             stock_map[ticker] = {
@@ -111,38 +130,55 @@ def main():
                 'industry': row.get('industry_category', '股票')
             }
 
-    print(f"📦 已載入 {len(stock_map)} 檔標的，開始掃描...", flush=True)
+    print(f"📦 已載入 {len(stock_map)} 檔標的，開始掃描各模式...", flush=True)
 
+    all_report_sections = []
+    final_results_found = False
+
+    # 依次執行模式掃描
     for mode_name, mode_key in [("強勢模式", "NORMAL"), ("弱勢抗跌模式", "WEAK"), ("避險/破位模式", "RISK")]:
-        print(f"🔍 正在執行：{mode_name}...", flush=True)
+        print(f"🔍 正在搜尋：{mode_name}...", flush=True)
         results = []
-        count = 0
+        
+        # 遍歷所有股票
         for ticker, info in stock_map.items():
             res = analyze_stock_smart_v3_1(ticker, info, mode=mode_key)
-            if res: 
+            if res:
                 results.append(res)
-                print(f"   ✅ 發現標的：{ticker} {info['name']}", flush=True)
-            
-            count += 1
-            if count % 100 == 0:
-                print(f"   已處理 {count} 檔...", flush=True)
-            
-            time.sleep(0.01)
+                print(f"   ✅ 發現符合：{ticker} {info['name']}", flush=True)
+            time.sleep(0.01) # API 保護微延遲
         
         if results:
+            final_results_found = True
             msg_header = f"🔍 【市場結構掃描 - {mode_name}】"
+            report_section = f"{msg_header}\n" + "\n---\n".join(results)
+            all_report_sections.append(report_section)
+            
+            # 發送 LINE 訊息 (每 5 檔一封，避免過長)
             for i in range(0, len(results), 5):
                 chunk = results[i:i+5]
                 send_line_message(f"{msg_header}\n\n" + "\n---\n".join(chunk))
             
-            # 若 NORMAL 或 WEAK 有結果，依原邏輯中斷 (RISK 則掃到底)
-            if mode_key != "RISK": 
-                print(f"✨ {mode_name} 已有產出，完成掃描任務。", flush=True)
-                return 
-        
-    if not results:
-        print("📊 掃描完成：市場無符合條件標的。", flush=True)
-        send_line_message("📊 掃描完成：市場目前處於低迷狀態，無符合條件標的，建議空手。")
+            # 策略：如果強勢模式或抗跌模式有結果，通常代表市場有主線，不再掃描 RISK 避險模式
+            if mode_key != "RISK":
+                print(f"✨ {mode_name} 掃描完成且有產出，終止後續模式掃描。", flush=True)
+                break
+    
+    # --- 輸出 .txt 檔案 ---
+    print(f"📝 正在整理診斷結果並生成 {OUTPUT_FILENAME}...", flush=True)
+    with open(OUTPUT_FILENAME, "w", encoding="utf-8") as f:
+        f.write(f"DailyStockBot 診斷報告\n")
+        f.write(f"生成時間: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("="*30 + "\n")
+        if all_report_sections:
+            f.write("\n\n".join(all_report_sections))
+        else:
+            no_res_msg = "📊 掃描完成：目前市場無符合條件標的，建議保守觀望。"
+            f.write(no_res_msg)
+            if not final_results_found:
+                send_line_message(no_res_msg)
+
+    print(f"✅ 任務圓滿完成，報告已存檔。", flush=True)
 
 if __name__ == "__main__":
     main()
