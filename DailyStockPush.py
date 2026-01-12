@@ -9,7 +9,6 @@ from FinMind.data import DataLoader
 # ==========================================
 # 1. 配置與對照表初始化
 # ==========================================
-# 請確保 GitHub Secrets 中已設定以下變數
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 WATCH_LIST = ["6770", "6706", "6684", "6271", "6269", "3105", "2538", "2014", "2010", "2002", "00992A", "00946", "2317", "2347", "2356", "4510", "4540", "9907"]
@@ -39,7 +38,6 @@ def calculate_rsi(series, period=14):
 
 def get_tw_stock(sid):
     clean_id = str(sid).strip().upper()
-    # 優先嘗試上市 (.TW) 再嘗試上櫃 (.TWO)
     for suffix in [".TW", ".TWO"]:
         target = f"{clean_id}{suffix}"
         stock = yf.Ticker(target)
@@ -62,17 +60,14 @@ def fetch_pro_metrics(sid):
         curr_p = df_hist['Close'].iloc[-1]
         curr_vol = df_hist['Volume'].iloc[-1]
         
-        # A. 金流與量比
         today_amount = (curr_vol * curr_p) / 100_000_000
         avg_amount_5d = ((df_hist['Volume'].iloc[-5:] * df_hist['Close'].iloc[-5:]).mean()) / 100_000_000
         if today_amount < MIN_AMOUNT_HUNDRED_MILLION: return None
 
-        # B. 技術面 RSI
         rsi_series = calculate_rsi(df_hist['Close'])
         curr_rsi = rsi_series.iloc[-1]
         rsi_status = "⚠️過熱" if curr_rsi > 75 else ("🟢穩健" if curr_rsi < 35 else "中性")
 
-        # C. 淨利趨勢
         try:
             income_stmt = stock.quarterly_financials
             margins = (income_stmt.loc['Net Income'] / income_stmt.loc['Total Revenue']).iloc[:2].tolist()
@@ -80,17 +75,14 @@ def fetch_pro_metrics(sid):
         except:
             this_q_m, m_trend = (info.get('profitMargins', 0) or 0) * 100, "N/A"
         
-        # D. 殖利率
         raw_yield = info.get('dividendYield', 0)
         dividend_yield = (float(raw_yield) if raw_yield and raw_yield > 0.5 else (float(raw_yield)*100 if raw_yield else 0))
 
-        # E. 籌碼動向
         inst_own = (info.get('heldPercentInstitutions', 0) or 0) * 100
         d1 = ((curr_p / df_hist['Close'].iloc[-2]) - 1) * 100
         chip_status = "🔴法人加碼" if d1 > 0 and inst_own > 30 else "🟢法人觀望"
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
 
-        # F. 評分 (12分制)
         score = 0
         if this_q_m > 0: score += 2
         if curr_p > df_hist['Close'].iloc[0]: score += 3
@@ -117,11 +109,12 @@ def fetch_pro_metrics(sid):
         return None
 
 # ==========================================
-# 4. 主程序 (含 GitHub Log 輸出)
+# 4. 主程序 (存檔與推送)
 # ==========================================
 def main():
-    if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        print("❌ 缺少 LINE API 設定，僅在 GitHub Log 輸出診斷。")
+    start_time = datetime.datetime.now()
+    current_date = start_time.strftime('%Y-%m-%d')
+    dynamic_filename = f"report_{current_date}.txt"
 
     results = []
     print(f"🚀 開始診斷清單: {WATCH_LIST}", flush=True)
@@ -136,8 +129,7 @@ def main():
     
     results.sort(key=lambda x: x['score'], reverse=True)
     
-    now = datetime.datetime.now().strftime("%Y/%m/%d")
-    msg = f"🏆 【{now} 全能法人金流診斷】\n已過濾成交額 < {MIN_AMOUNT_HUNDRED_MILLION} 億標的\n"
+    msg = f"🏆 【{current_date} 全能法人金流診斷】\n已過濾成交額 < {MIN_AMOUNT_HUNDRED_MILLION} 億標的\n"
     
     for r in results:
         gem = "💎 " if r['score'] >= 9 else ""
@@ -153,11 +145,17 @@ def main():
         )
         msg += section
 
-    # 同時在 GitHub Action 的 Log 輸出最終結果
+    # 1. GitHub Log 輸出
     print("\n--- 📯 最終診斷報告輸出 ---", flush=True)
     print(msg, flush=True)
 
-    # 發送到 LINE
+    # 2. 雲端存檔 (.txt)
+    with open(dynamic_filename, "w", encoding="utf-8") as f:
+        f.write(msg)
+    with open("latest_report.txt", "w", encoding="utf-8") as f:
+        f.write(f"最新掃描日期: {current_date}\n請參閱 {dynamic_filename}")
+
+    # 3. LINE 通知
     if LINE_ACCESS_TOKEN and LINE_USER_ID:
         try:
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
@@ -166,9 +164,9 @@ def main():
             if response.status_code == 200:
                 print("📤 已成功推送至 LINE。", flush=True)
             else:
-                print(f"❌ LINE 推送失敗，狀態碼: {response.status_code}", flush=True)
+                print(f"❌ LINE 推送失敗: {response.status_code}", flush=True)
         except Exception as e:
-            print(f"❌ LINE 推送過程中出錯: {e}", flush=True)
+            print(f"❌ LINE 推送錯誤: {e}", flush=True)
 
 if __name__ == "__main__":
     main()
