@@ -35,3 +35,12 @@ jobs:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python DailyStockBot.py
+
+      - name: 5. 上傳診斷報告 (Artifact)
+        if: always() # 確保即使前面的步驟出錯，只要有檔案產出就嘗試上傳
+        uses: actions/upload-artifact@v4
+        with:
+          # 檔案名稱會加上日期，方便區分
+          name: Stock-Report-${{ github.run_id }}
+          path: scan_results.txt
+          retention-days: 7 # 報告在 GitHub 上保留 7 天
