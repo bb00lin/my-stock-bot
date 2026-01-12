@@ -25,7 +25,7 @@ def send_line_message(message):
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
     try:
-        res = requests.post(url, headers=headers, json=payload)
+        requests.post(url, headers=headers, json=payload)
     except: pass
 
 # ==========================================
@@ -67,7 +67,6 @@ def get_diagnostic_report(sid):
         latest = df.iloc[-1]
         curr_p = latest['Close']
         
-        # --- B. 技術面指標 (處理新股 NaN) ---
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         if pd.isna(ma60): ma60 = df['Close'].mean()
         
@@ -75,7 +74,6 @@ def get_diagnostic_report(sid):
         rsi_series = RSIIndicator(df['Close']).rsi()
         rsi = rsi_series.iloc[-1] if not pd.isna(rsi_series.iloc[-1]) else 50.0
         
-        # --- C. 壓力/支撐校正 ---
         is_data_distorted = abs(bias_60) > 30
         if is_data_distorted:
             recent_df = df.iloc[-20:]
@@ -89,7 +87,6 @@ def get_diagnostic_report(sid):
             stop_loss = ma60 * 0.97
             warning_msg = ""
         
-        # --- D. 策略建議 ---
         if bias_60 > 15 and not is_data_distorted:
             action = "❌ 過熱不追 (等待回檔)"
         elif -2 < bias_60 < 5 and rsi < 50:
@@ -101,13 +98,11 @@ def get_diagnostic_report(sid):
         else:
             action = "☁️ 觀望盤整 (等待轉強)"
 
-        # --- E. 營收與殖利率 ---
         raw_yield = info.get('dividendYield', 0)
         yield_val = (raw_yield if raw_yield and raw_yield > 0.5 else (raw_yield*100 if raw_yield else 0))
         y_growth = info.get('revenueGrowth')
         yoy_str = f"{y_growth*100:.2f}%" if y_growth else "N/A"
 
-        # --- F. 籌碼面 (關鍵修正點：增加 NaN 檢查) ---
         f_net_val, t_net_val = 0, 0
         try:
             dl = DataLoader()
@@ -118,8 +113,6 @@ def get_diagnostic_report(sid):
                 f_sell = chip_df[chip_df['name'] == 'Foreign_Investor']['sell'].sum()
                 t_buy = chip_df[chip_df['name'] == 'Investment_Trust']['buy'].sum()
                 t_sell = chip_df[chip_df['name'] == 'Investment_Trust']['sell'].sum()
-                
-                # 計算淨買超(張)，若為空值則預設為 0
                 f_net = (f_buy - f_sell) / 1000
                 t_net = (t_buy - t_sell) / 1000
                 f_net_val = int(f_net) if pd.notnull(f_net) else 0
@@ -127,7 +120,6 @@ def get_diagnostic_report(sid):
         except: pass
         chip_msg = f"● 外資: {f_net_val:+d} / 投信: {t_net_val:+d}"
 
-        # --- G. 量能校正 (轉為張) ---
         avg_vol_5d = df['Volume'].rolling(5).mean().iloc[-1]
         vol_2_percent = int((avg_vol_5d / 1000) * 0.02) if pd.notnull(avg_vol_5d) else 0
         if vol_2_percent < 1: vol_2_percent = 1
@@ -150,7 +142,7 @@ def get_diagnostic_report(sid):
             f"🔔 群益APP提示：\n"
             f"1. 上漲超過：{high_1y:.1f}\n"
             f"2. 下跌超過：{support_line:.1f}\n"
-            f"💡 [盤中瞬間巨量] 已固定為5日均量2%，響起時代表單筆成交 > {vol_2_percent} 張\n"
+            f"💡 [盤中瞬間巨量] 代表單筆成交 > {vol_2_percent} 張\n"
             f"======================================="
         )
         return report
@@ -161,6 +153,24 @@ def get_diagnostic_report(sid):
 if __name__ == "__main__":
     input_str = sys.argv[1] if len(sys.argv) > 1 else "2344"
     targets = input_str.replace('\n', ' ').replace(',', ' ').split()
+    
+    all_reports = []
+    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
     for t in targets:
-        send_line_message(get_diagnostic_report(t.strip().upper()))
+        report = get_diagnostic_report(t.strip().upper())
+        send_line_message(report)
+        all_reports.append(report)
         time.sleep(1)
+    
+    # --- 雲端存檔功能 ---
+    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    filename = f"manual_report_{today_str}.txt"
+    full_content = f"手動診斷時間: {current_time}\n" + "\n\n".join(all_reports)
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(full_content)
+    
+    # 更新最新檔案標記
+    with open("latest_manual_report.txt", "w", encoding="utf-8") as f:
+        f.write(f"最新手動診斷日期: {today_str}\n請查看 {filename}")
