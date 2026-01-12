@@ -16,24 +16,30 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c" 
 
 def send_line_message(message):
+    # 同步輸出到 GitHub Log (控制台)
+    print(f"\n--- 📤 發送 LINE 訊息 ---\n{message}\n", flush=True)
+    
     if not LINE_ACCESS_TOKEN:
-        print(message)
+        print("⚠️ 找不到 LINE_ACCESS_TOKEN，取消發送訊息。", flush=True)
         return
+    
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
-    requests.post(url, headers=headers, json=payload)
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code != 200:
+            print(f"❌ LINE 發送失敗，狀態碼: {response.status_code}", flush=True)
+    except Exception as e:
+        print(f"❌ LINE 請求出錯: {e}", flush=True)
 
 # ==========================================
-# 2. 核心分析引擎 (加入中文名與產業整合)
+# 2. 核心分析引擎
 # ==========================================
 def analyze_stock_smart_v3_1(ticker, stock_info, mode="NORMAL"):
-    """
-    ticker: 股票代碼 (e.g., 2330.TW)
-    stock_info: 包含 {'name': '台積電', 'industry': '半導體'} 的字典
-    """
     try:
         stock = yf.Ticker(ticker)
+        # 為了效能，GitHub Actions 建議只抓取必要的資料長度
         df = stock.history(period="1y", progress=False)
         if len(df) < 60: return None
         if df.iloc[-1]['Volume'] == 0: df = df.iloc[:-1]
@@ -50,19 +56,16 @@ def analyze_stock_smart_v3_1(ticker, stock_info, mode="NORMAL"):
         is_potential = False
         tag = ""
 
-        # --- A. 強勢模式 (靈敏版) ---
         if mode == "NORMAL":
             if vol_ratio > 1.2 and latest['Volume'] >= 500000 and curr_p > prev['Close']:
                 tag = "🔥 強勢攻擊"
                 is_potential = (curr_p > ma20) and (curr_p - ma60)/ma60 < 0.30
 
-        # --- B. 弱勢抗跌模式 ---
         elif mode == "WEAK":
             if abs(curr_p - ma20)/ma20 < 0.025 and curr_p >= prev['Close'] and latest['Volume'] >= 300000:
                 tag = "🛡️ 逆勢支撐"
                 is_potential = True
 
-        # --- C. 避險/破位模式 ---
         elif mode == "RISK":
             if curr_p < ma60 and prev['Close'] >= ma60:
                 tag = "⚠️ 趨勢破線"
@@ -73,7 +76,6 @@ def analyze_stock_smart_v3_1(ticker, stock_info, mode="NORMAL"):
 
         if is_potential:
             bias = ((curr_p-ma60)/ma60)*100
-            # 格式化輸出：顯示 中文名稱 與 產業
             msg = (
                 f"📍{ticker} {stock_info['name']}\n"
                 f"產業：[{stock_info['industry']}]\n"
@@ -90,16 +92,18 @@ def analyze_stock_smart_v3_1(ticker, stock_info, mode="NORMAL"):
 # 3. 主程序邏輯
 # ==========================================
 def main():
-    print("🚀 啟動 DailyStockBot 智能全市場掃描...")
+    print(f"🚀 啟動掃描時間：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
     dl = DataLoader()
-    stock_df = dl.taiwan_stock_info()
-    
-    # 建立強大的 stock_map，預存名稱與產業別
-    # 結構: { '2330.TW': {'name': '台積電', 'industry': '半導體'} }
+    try:
+        stock_df = dl.taiwan_stock_info()
+    except Exception as e:
+        print(f"❌ 無法獲取台股清單: {e}", flush=True)
+        return
+
     stock_map = {}
     for _, row in stock_df.iterrows():
         sid = str(row['stock_id'])
-        if len(sid) == 4: # 只掃描 4 碼普通股
+        if len(sid) == 4:
             suffix = '.TWO' if '上櫃' in str(row.get('market_type', '')) else '.TW'
             ticker = f"{sid}{suffix}"
             stock_map[ticker] = {
@@ -107,26 +111,37 @@ def main():
                 'industry': row.get('industry_category', '股票')
             }
 
-    # 依次執行模式
+    print(f"📦 已載入 {len(stock_map)} 檔標的，開始掃描...", flush=True)
+
     for mode_name, mode_key in [("強勢模式", "NORMAL"), ("弱勢抗跌模式", "WEAK"), ("避險/破位模式", "RISK")]:
-        print(f"正在執行：{mode_name}...")
+        print(f"🔍 正在執行：{mode_name}...", flush=True)
         results = []
+        count = 0
         for ticker, info in stock_map.items():
             res = analyze_stock_smart_v3_1(ticker, info, mode=mode_key)
-            if res: results.append(res)
-            time.sleep(0.01) # 微小延遲保護 API
+            if res: 
+                results.append(res)
+                print(f"   ✅ 發現標的：{ticker} {info['name']}", flush=True)
+            
+            count += 1
+            if count % 100 == 0:
+                print(f"   已處理 {count} 檔...", flush=True)
+            
+            time.sleep(0.01)
         
         if results:
             msg_header = f"🔍 【市場結構掃描 - {mode_name}】"
-            # 每次發送最多 5 檔，避免 LINE 訊息過長
             for i in range(0, len(results), 5):
                 chunk = results[i:i+5]
                 send_line_message(f"{msg_header}\n\n" + "\n---\n".join(chunk))
             
-            # 若強勢或抗跌有結果就停止，否則繼續掃描 RISK
-            if mode_key != "RISK": return 
+            # 若 NORMAL 或 WEAK 有結果，依原邏輯中斷 (RISK 則掃到底)
+            if mode_key != "RISK": 
+                print(f"✨ {mode_name} 已有產出，完成掃描任務。", flush=True)
+                return 
         
     if not results:
+        print("📊 掃描完成：市場無符合條件標的。", flush=True)
         send_line_message("📊 掃描完成：市場目前處於低迷狀態，無符合條件標的，建議空手。")
 
 if __name__ == "__main__":
