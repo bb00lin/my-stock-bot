@@ -2,13 +2,15 @@ name: DailyStockBot
 
 on:
   schedule:
-    # 台北時間週一至週五 14:45 執行 (UTC 06:45)
     - cron: '45 6 * * 1-5'
-  workflow_dispatch: # 允許手動從 Actions 頁面啟動測試
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
     steps:
       - name: 1. 複製儲存庫代碼
         uses: actions/checkout@v3
@@ -18,29 +20,35 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 3. 安裝必要套件 (解決 tqdm 依賴問題)
+      - name: 3. 安裝必要套件
         run: |
           python -m pip install --upgrade pip
-          # yfinance: 抓取股價
-          # pandas: 資料處理
-          # requests: 傳送 LINE 訊息
-          # FinMind: 抓取台股清單
-          # ta: 技術指標計算
-          # tqdm: FinMind 必要的進度條工具
           pip install yfinance pandas requests FinMind ta tqdm
 
       - name: 4. 執行股票分析並傳送 LINE
         env:
-          # 請確保 GitHub Repository -> Settings -> Secrets 中已設定這兩個變數
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python DailyStockBot.py
 
-      - name: 5. 上傳診斷報告 (Artifact)
-        if: always() # 確保即使前面的步驟出錯，只要有檔案產出就嘗試上傳
+      - name: 5. 將所有日期報告 Commit 並 Push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          # 使用萬用字元抓取所有 report_ 開頭的 txt
+          git add report_*.txt latest_report.txt
+          if git diff --staged --quiet; then
+            echo "今日報告已存在且無變動，跳過提交。"
+          else
+            git commit -m "📝 存檔每日診斷報告: $(date +'%Y-%m-%d')"
+            git push
+          fi
+
+      - name: 6. 同步備份至 Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          # 檔案名稱會加上日期，方便區分
-          name: Stock-Report-${{ github.run_id }}
-          path: scan_results.txt
-          retention-days: 7 # 報告在 GitHub 上保留 7 天
+          name: Stock-Reports-All
+          # 上傳所有 report 檔案
+          path: report_*.txt
+          retention-days: 7
