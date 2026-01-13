@@ -163,14 +163,26 @@ if __name__ == "__main__":
         all_reports.append(report)
         time.sleep(1)
     
-    # --- 雲端存檔功能 ---
+    # --- 雲端與本地同步存檔功能 ---
     today_str = datetime.datetime.now().strftime('%Y-%m-%d')
     filename = f"manual_report_{today_str}.txt"
     full_content = f"手動診斷時間: {current_time}\n" + "\n\n".join(all_reports)
-    
+
+    # A. 儲存於當前目錄 (這是為了讓 GitHub Actions 能夠抓到檔案並 Commit)
     with open(filename, "w", encoding="utf-8") as f:
         f.write(full_content)
     
+    # B. 偵測是否有 D 槽特定路徑 (當您在自己電腦執行時會觸發)
+    local_mega_path = r"D:\MEGA\下載\股票"
+    if os.path.exists(local_mega_path):
+        try:
+            target_path = os.path.join(local_mega_path, filename)
+            with open(target_path, "w", encoding="utf-8") as f:
+                f.write(full_content)
+            print(f"✅ 已同步儲存至本地路徑: {target_path}")
+        except Exception as e:
+            print(f"⚠️ 本地路徑寫入失敗: {e}")
+
     # 更新最新檔案標記
     with open("latest_manual_report.txt", "w", encoding="utf-8") as f:
         f.write(f"最新手動診斷日期: {today_str}\n請查看 {filename}")
