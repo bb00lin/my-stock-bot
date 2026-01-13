@@ -37,12 +37,13 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+          # 抓取所有每日報告
           git add report_*.txt latest_report.txt
           if git diff --staged --quiet; then
             echo "今日報告無變動，跳過提交。"
           else
             git commit -m "📝 更新每日診斷報告: $(date +'%Y-%m-%d')"
-            git push
+            git push origin main
           fi
 
       - name: 雲端存檔備份 - Upload Artifact
