@@ -8,7 +8,6 @@ on:
         required: true
         default: '2330 2317'
 
-# 授予寫入權限以便提交檔案回 Repo
 permissions:
   contents: write
 
@@ -34,16 +33,23 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python ManualStock.py "${{ github.event.inputs.stock_list }}"
 
-      - name: 5. 歷史回溯 - 自動 Commit 報告回 Repo
+      - name: 5. 自動清理舊報告並 Commit 回 Repo
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # 抓取所有手動產出的報告
-          git add manual_report_*.txt latest_manual_report.txt
+          
+          # --- 自動清理邏輯 ---
+          # 刪除 30 天前產出的 manual_report_*.txt 檔案
+          # -mtime +30 代表修改時間超過 30 天
+          find . -name "manual_report_*.txt" -mtime +30 -exec git rm {} \; || echo "沒有可清理的舊檔案"
+          
+          # --- 加入新檔案 ---
+          git add manual_report_*.txt latest_manual.txt || true
+          
           if git diff --staged --quiet; then
-            echo "無新報告產生，跳過提交。"
+            echo "無變動（無新報告且無舊檔需清理），跳過提交。"
           else
-            git commit -m "📝 手動診斷存檔: ${{ github.event.inputs.stock_list }}"
+            git commit -m "📝 診斷存檔與舊檔清理: ${{ github.event.inputs.stock_list }}"
             git push
           fi
 
@@ -52,5 +58,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Manual-Diagnostic-Report-${{ github.run_id }}
-          path: manual_report_*.txt
+          path: |
+            manual_report_*.txt
+            latest_manual.txt
           retention-days: 7
