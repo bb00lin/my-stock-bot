@@ -2,42 +2,42 @@ name: DailyStockBot
 
 on:
   schedule:
-    - cron: '45 6 * * 1-5' # 台北 14:45
+    - cron: '30 08 * * 1-5' # 台灣時間 16:30 執行
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  run-bot:
+  analyze:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 複製儲存庫代碼
+      - name: 1. 檢出代碼
         uses: actions/checkout@v3
 
-      - name: 2. 設定 Python 環境
+      - name: 2. 設定 Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: 3. 安裝必要套件
+      - name: 3. 安裝必要套件 (包含 tqdm)
         run: |
-          pip install yfinance pandas requests FinMind ta
+          pip install yfinance pandas requests FinMind tqdm
 
-      - name: 4. 執行股票分析並傳送 LINE
+      - name: 4. 執行股票分析
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python DailyStockBot.py
 
-      - name: 5. 自動 Commit 報告回 Repo
+      - name: 5. 自動 Commit 報告
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add scan_report_*.txt latest_scan_report.txt
+          git add scan_report_*.txt latest_scan.txt || true
           if git diff --staged --quiet; then
-            echo "無變動，跳過提交。"
+            echo "今日無變動"
           else
             git commit -m "📝 每日掃描存檔: $(date +'%Y-%m-%d')"
-            git push origin main
+            git push
           fi
