@@ -66,24 +66,45 @@ def main():
     dl = DataLoader()
     # 獲取上市櫃股票清單
     stock_df = dl.taiwan_stock_info()
-    # 優先掃描市值較大的前 200 檔以節省 GitHub 執行時間
+    
+    # --- 修正: 處理 market_type 欄位不存在的問題 ---
+    # 先列印出欄位名稱，方便 debug (GitHub Log 可見)
+    print(f"FinMind Columns: {stock_df.columns.tolist()}")
+    
+    # 判斷使用哪個欄位來區分上市/上櫃
+    m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
+    if m_col not in stock_df.columns:
+        # 如果還是找不到，就預設全部用 .TW 測試 (yfinance 會自動修正部分錯誤)
+        m_col = None
+
+    # 優先掃描市值較大的前 200 檔
     targets = stock_df[stock_df['stock_id'].str.len() == 4].head(200) 
     
     results = []
     for _, row in targets.iterrows():
-        t = f"{row['stock_id']}{'.TWO' if '上櫃' in str(row['market_type']) else '.TW'}"
+        sid = row['stock_id']
+        # 根據找到的欄位判斷字尾
+        if m_col and m_col in row:
+            suffix = ".TWO" if '上櫃' in str(row[m_col]) or 'OTC' in str(row[m_col]) else ".TW"
+        else:
+            # 暴力法判斷：若代碼大於 9000 通常是上櫃/興櫃，或直接依序嘗試
+            suffix = ".TWO" if int(sid) >= 8000 else ".TW"
+            
+        t = f"{sid}{suffix}"
         res = analyze_v7(t, row['stock_name'])
         if res: results.append(res)
-        time.sleep(0.5)
+        time.sleep(0.4)
 
     if results:
         msg = f"🔍 【{datetime.date.today()} 法人精選清單】\n\n" + "\n".join(results)
         send_line(msg)
         
-        # 存檔供 GitHub Artifacts 下載
+        # 存檔
         fname = f"scan_report_{datetime.date.today()}.txt"
         with open(fname, "w", encoding="utf-8") as f: f.write(msg)
         with open("latest_scan.txt", "w", encoding="utf-8") as f: f.write(msg)
+    else:
+        print("今日篩選無符合條件之標的。")
 
 if __name__ == "__main__":
     main()
