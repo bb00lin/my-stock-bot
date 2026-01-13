@@ -57,8 +57,9 @@ def fetch_pro_metrics(sid):
         if df_hist.empty: return None
         
         info = stock.info
-        curr_p = df_hist['Close'].iloc[-1]
-        curr_vol = df_hist['Volume'].iloc[-1]
+        latest = df_hist.iloc[-1]
+        curr_p = latest['Close']
+        curr_vol = latest['Volume']
         
         today_amount = (curr_vol * curr_p) / 100_000_000
         avg_amount_5d = ((df_hist['Volume'].iloc[-5:] * df_hist['Close'].iloc[-5:]).mean()) / 100_000_000
@@ -149,11 +150,22 @@ def main():
     print("\n--- 📯 最終診斷報告輸出 ---", flush=True)
     print(msg, flush=True)
 
-    # 2. 雲端存檔 (.txt)
+    # 2. 儲存報告
+    # A. 當前目錄 (雲端 Commit 用)
     with open(dynamic_filename, "w", encoding="utf-8") as f:
         f.write(msg)
     with open("latest_report.txt", "w", encoding="utf-8") as f:
         f.write(f"最新掃描日期: {current_date}\n請參閱 {dynamic_filename}")
+
+    # B. D 槽同步 (本地執行用)
+    local_mega_path = r"D:\MEGA\下載\股票"
+    if os.path.exists(local_mega_path):
+        try:
+            with open(os.path.join(local_mega_path, dynamic_filename), "w", encoding="utf-8") as f:
+                f.write(msg)
+            print(f"🏠 本地 D 槽同步成功: {dynamic_filename}")
+        except Exception as e:
+            print(f"⚠️ 本地存檔失敗: {e}")
 
     # 3. LINE 通知
     if LINE_ACCESS_TOKEN and LINE_USER_ID:
