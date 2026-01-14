@@ -21,20 +21,25 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 3. 安裝必要套件 (包含 tqdm)
+      - name: 3. 安裝必要套件 (包含 Google Sheets 支援)
         run: |
-          pip install yfinance pandas requests FinMind tqdm
+          pip install yfinance pandas requests FinMind tqdm gspread oauth2client
 
-      - name: 4. 執行股票分析
+      - name: 4. 建立 Google 金鑰檔案
+        run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
+
+      - name: 5. 執行股票分析
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python DailyStockBot.py
 
-      - name: 5. 自動 Commit 報告
+      - name: 6. 自動 Commit 報告
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+          # 移除 google_key.json 以免被上傳到公開倉庫（安全性考量）
+          rm -f google_key.json
           git add scan_report_*.txt latest_scan.txt || true
           if git diff --staged --quiet; then
             echo "今日無變動"
