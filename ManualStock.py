@@ -1,33 +1,34 @@
 import os, yfinance as yf, pandas as pd, requests, datetime, time, sys
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from FinMind.data import DataLoader
 from ta.momentum import RSIIndicator
 
 # ==========================================
 # 1. 環境設定
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+FINMIND_TOKEN = os.getenv("FINMIND_TOKEN") # 建議設定，若無則使用免費限制
 LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
 
-def to_df(fm_obj):
-    """安全轉換 FinMind 物件為 DataFrame"""
+def get_finmind_data(dataset, stock_id, start_date):
+    """直接透過 API 請求資料，繞過 DataLoader"""
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": dataset,
+        "data_id": stock_id,
+        "start_date": start_date,
+        "token": FINMIND_TOKEN,
+    }
     try:
-        # 嘗試官方標準方法
-        if hasattr(fm_obj, 'to_pandas'):
-            return fm_obj.to_pandas()
-        # 嘗試屬性存取
-        if hasattr(fm_obj, 'data'):
-            return pd.DataFrame(fm_obj.data)
-        # 嘗試直接轉換
-        return pd.DataFrame(fm_obj)
+        res = requests.get(url, params=params)
+        data = res.json().get("data", [])
+        return pd.DataFrame(data)
     except:
         return pd.DataFrame()
 
 def get_stock_name_map():
     try:
-        dl = DataLoader()
-        df = to_df(dl.taiwan_stock_info())
+        df = get_finmind_data("TaiwanStockInfo", "", "")
         if not df.empty and 'stock_id' in df.columns:
             return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
         return {}
@@ -55,15 +56,14 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼邏輯 (官方 to_pandas 轉換)
+# 2. 籌碼邏輯 (直接 API 請求版)
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
     try:
-        dl = DataLoader()
         # --- 法人連買 ---
         start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
-        df_i = to_df(dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d))
+        df_i = get_finmind_data("TaiwanStockInstitutionalInvestorsBuySell", sid_clean, start_d)
         
         if not df_i.empty and 'name' in df_i.columns:
             def count_buy_streak(name):
@@ -78,7 +78,7 @@ def get_detailed_chips(sid_clean):
         
         # --- 大戶持股 ---
         start_w = (datetime.date.today() - datetime.timedelta(days=45)).strftime('%Y-%m-%d')
-        df_h = to_df(dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w))
+        df_h = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_w)
         
         if not df_h.empty and 'hold_shares_level' in df_h.columns:
             latest_date = df_h['date'].max()
