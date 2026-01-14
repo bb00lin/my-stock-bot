@@ -8,10 +8,9 @@ from ta.momentum import RSIIndicator
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
-FINMIND_TOKEN = os.getenv("FINMIND_TOKEN") # 讓程式自動去 Secrets 找
+FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 
 def get_finmind_data(dataset, stock_id, start_date):
-    """最穩定的底層 API 請求方式"""
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": dataset,
@@ -24,7 +23,9 @@ def get_finmind_data(dataset, stock_id, start_date):
         res_json = res.json()
         data = res_json.get("data", [])
         if not data:
-            print(f"⚠️ API 回傳數據為空: {dataset} ({stock_id})")
+            # 偵錯用：如果沒資料，印出 API 給出的訊息
+            msg = res_json.get("msg", "No message")
+            print(f"ℹ️ [{stock_id}] {dataset} 無數據. 原因: {msg}")
         return pd.DataFrame(data)
     except Exception as e:
         print(f"❌ API 請求失敗: {e}")
@@ -32,7 +33,7 @@ def get_finmind_data(dataset, stock_id, start_date):
 
 def get_stock_name_map():
     try:
-        df = get_finmind_data("TaiwanStockInfo", "", "")
+        df = get_finmind_data("TaiwanStockInfo", "", "2025-01-01")
         if not df.empty and 'stock_id' in df.columns:
             return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
         return {}
@@ -46,7 +47,6 @@ def sync_to_sheets(data_list):
         creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
         client = gspread.authorize(creds)
         sheet = client.open("個股深度診斷").get_worksheet(0)
-        # 使用 USER_ENTERED 確保試算表能自動辨識數字格式
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆診斷結果至雲端")
     except Exception as e:
@@ -61,68 +61,67 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼邏輯
+# 2. 籌碼邏輯 (強化版：解決大戶空值問題)
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
     try:
-        # 法人連買 (回溯 40 天)
-        start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
+        # --- 1. 法人買賣超 ---
+        start_d = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
         df_i = get_finmind_data("TaiwanStockInstitutionalInvestorsBuySell", sid_clean, start_d)
-        
-        if not df_i.empty and 'name' in df_i.columns:
-            def count_buy_streak(name):
+        if not df_i.empty:
+            def streak(name):
                 d = df_i[df_i['name'] == name].sort_values('date', ascending=False)
                 c = 0
                 for _, r in d.iterrows():
-                    net_buy = (int(r.get('buy', 0)) - int(r.get('sell', 0)))
-                    if net_buy > 0: c += 1
-                    elif net_buy < 0: break
+                    if (int(r.get('buy', 0)) - int(r.get('sell', 0))) > 0: c += 1
+                    else: break
                 return c
-            chips["fs"], chips["ss"] = count_buy_streak('Foreign_Investor'), count_buy_streak('Investment_Trust')
-        
-        # 大戶持股 (回溯 60 天，強化級別判定)
-        start_w = (datetime.date.today() - datetime.timedelta(days=60)).strftime('%Y-%m-%d')
+            chips["fs"], chips["ss"] = streak('Foreign_Investor'), streak('Investment_Trust')
+
+        # --- 2. 大戶持股 (核心修正：不限制起點日期) ---
+        # 改為回溯 90 天，確保至少能抓到最新的週資料
+        start_w = (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
         df_h = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_w)
         
-        if not df_h.empty and 'hold_shares_level' in df_h.columns:
+        # 備援：如果 90 天沒資料，嘗試抓取「該資料集」最後一筆資料
+        if df_h.empty:
+            df_h = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, "2024-01-01")
+
+        if not df_h.empty:
             latest_date = df_h['date'].max()
             df_latest = df_h[df_h['date'] == latest_date].copy()
-            df_latest['level_str'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
+            df_latest['lvl'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
             
-            # 定義大戶標準：包含 '400張' 以上文字，或是 11~15 級 (API 數字代表大戶)
-            mask = df_latest['level_str'].str.contains('400|600|800|1000|以上|11|12|13|14|15')
+            # 匹配大戶級別 (11級=400張以上, 15級=1000張以上)
+            mask = df_latest['lvl'].str.contains('400|600|800|1000|以上|11|12|13|14|15')
             big_val = df_latest[mask]['percent'].sum()
             
-            # 備援機制：如果匹配失敗，則抓取最後 5 筆級別的總和
-            if big_val == 0:
+            if big_val == 0: # 另一種 API 格式可能出現在尾端
                 big_val = df_latest.sort_values('hold_shares_level').tail(5)['percent'].sum()
             
             chips["big"] = round(float(big_val), 1)
-            print(f"📊 [{sid_clean}] 抓取日期: {latest_date}, 大戶%: {chips['big']}%")
+            print(f"📊 [{sid_clean}] 成功獲取大戶數據: {chips['big']}% ({latest_date})")
                 
     except Exception as e:
         print(f"❌ 籌碼解析異常 ({sid_clean}): {e}")
 
-    # 量能計算
+    # --- 3. 量能計算 ---
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
         h = yf.Ticker(ticker).history(period="10d")
         if len(h) >= 3:
             v_today, v_avg = h['Volume'].iloc[-1], h['Volume'].iloc[-6:-1].mean()
             chips["v_ratio"] = round(v_today / v_avg, 1) if v_avg > 0 else 0
-            chips["v_status"] = "🔥爆量" if chips["v_ratio"] > 2.0 else "☁️量平"
+            chips["v_status"] = "🔥爆量" if chips["v_ratio"] > 1.8 else "☁️量平"
     except: pass
     return chips
 
-# ==========================================
-# 3. 核心診斷邏輯
-# ==========================================
 def run_diagnostic(sid):
     try:
         clean_id = str(sid).split('.')[0].strip()
-        stock_ticker = f"{clean_id}.TW" if int(clean_id) < 9000 else f"{clean_id}.TWO"
-        stock = yf.Ticker(stock_ticker)
+        tk_str = f"{clean_id}.TW" if int(clean_id) < 9000 else f"{clean_id}.TWO"
+        stock = yf.Ticker(tk_str)
         df = stock.history(period="1y")
         if df.empty: return None, None
         
