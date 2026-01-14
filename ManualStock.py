@@ -5,7 +5,7 @@ from FinMind.data import DataLoader
 from ta.momentum import RSIIndicator
 
 # ==========================================
-# 1. 環境設定與名稱對照初始化
+# 1. 環境設定
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
@@ -39,7 +39,7 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼與量能邏輯 (強制修復大戶 % 顯示問題)
+# 2. 籌碼與量能邏輯 (修正 'data' 錯誤)
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
@@ -48,7 +48,9 @@ def get_detailed_chips(sid_clean):
         # --- 法人連買 ---
         start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
         df_i = dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d)
-        if df_i is not None and not df_i.empty:
+        
+        # 修正：檢查是否為 DataFrame
+        if isinstance(df_i, pd.DataFrame) and not df_i.empty:
             def count_buy_streak(name):
                 d = df_i[df_i['name'] == name].sort_values('date', ascending=False)
                 c = 0
@@ -59,33 +61,29 @@ def get_detailed_chips(sid_clean):
                 return c
             chips["fs"], chips["ss"] = count_buy_streak('Foreign_Investor'), count_buy_streak('Investment_Trust')
         
-        # --- 大戶持股 (強化版：模糊匹配與多層級偵測) ---
+        # --- 大戶持股 ---
         start_w = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
         df_h = dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w)
         
-        if df_h is not None and not df_h.empty:
-            # 1. 取得最近一次有數據的日期
+        if isinstance(df_h, pd.DataFrame) and not df_h.empty:
+            # 取得最新一筆有資料的週次日期
             latest_date = df_h['date'].max()
             df_latest = df_h[df_h['date'] == latest_date].copy()
             
-            # 2. 清理級別字串 (去除空格)
-            df_latest['hold_shares_level'] = df_latest['hold_shares_level'].str.replace(' ', '')
+            # 清理字串避免空格干擾
+            df_latest['hold_shares_level'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
             
-            # 3. 嘗試多種匹配方式
-            # 方式 A: 匹配 400 張以上的所有層級
-            targets = ['400-600', '600-800', '800-1000', '1000以上', '400-600股', '600-800股', '800-1000股', '1000股以上']
-            big_total = df_latest[df_latest['hold_shares_level'].isin(targets)]['percent'].sum()
+            # 抓取 400 張以上等級的加總
+            # 包含：400-600, 600-800, 800-1000, 1000以上
+            big_mask = df_latest['hold_shares_level'].str.contains('400|600|800|1000|以上')
+            chips["big"] = round(df_latest[big_mask]['percent'].sum(), 1)
             
-            # 方式 B: 萬一方式 A 還是 0 (有些 API 回傳格式不同)，使用大範圍關鍵字匹配
-            if big_total == 0:
-                big_total = df_latest[df_latest['hold_shares_level'].str.contains('400|600|800|1000|以上', na=False)]['percent'].sum()
-            
-            # 方式 C: 極端情況 (防止重複計算)，若超過 100 則修正
-            chips["big"] = min(big_total, 100.0)
-            print(f"DEBUG [{sid_clean}]: 日期 {latest_date}, 偵測到大戶% {chips['big']}%")
-            
+            # 若計算出來為 0，進行最後手段：抓取索引最後 5 筆 (通常是大戶等級)
+            if chips["big"] == 0:
+                chips["big"] = round(df_latest.tail(5)['percent'].sum(), 1)
+                
     except Exception as e:
-        print(f"❌ 籌碼分析錯誤 ({sid_clean}): {e}")
+        print(f"❌ 籌碼處理失敗 ({sid_clean}): {str(e)}")
 
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
@@ -135,12 +133,12 @@ def run_diagnostic(sid):
         sheet_row = [
             str(datetime.date.today()), clean_id, ch_name, 
             curr_p, round(rsi, 1), eps, pe, round(margin, 1), 
-            c['fs'], c['ss'], round(c['big'], 1), f"{c['v_status']}({c['v_ratio']:.1f}x)",
+            c['fs'], c['ss'], c['big'], f"{c['v_status']}({c['v_ratio']:.1f}x)",
             trend, round(bias, 1), tip
         ]
         return line_msg, sheet_row
     except Exception as e:
-        print(f"❌ 診斷失敗 ({sid}): {e}")
+        print(f"❌ 診斷出錯 ({sid}): {str(e)}")
         return None, None
 
 if __name__ == "__main__":
