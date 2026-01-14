@@ -10,12 +10,25 @@ from ta.momentum import RSIIndicator
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
 
+def to_df(fm_obj):
+    """安全轉換 FinMind 物件為 DataFrame"""
+    try:
+        # 嘗試官方標準方法
+        if hasattr(fm_obj, 'to_pandas'):
+            return fm_obj.to_pandas()
+        # 嘗試屬性存取
+        if hasattr(fm_obj, 'data'):
+            return pd.DataFrame(fm_obj.data)
+        # 嘗試直接轉換
+        return pd.DataFrame(fm_obj)
+    except:
+        return pd.DataFrame()
+
 def get_stock_name_map():
     try:
         dl = DataLoader()
-        # 強制將 FinMind 資料轉換為 DataFrame
-        df = pd.DataFrame(dl.taiwan_stock_info())
-        if 'stock_id' in df.columns:
+        df = to_df(dl.taiwan_stock_info())
+        if not df.empty and 'stock_id' in df.columns:
             return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
         return {}
     except: return {}
@@ -42,7 +55,7 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼邏輯 (改用 pd.DataFrame 強制轉向)
+# 2. 籌碼邏輯 (官方 to_pandas 轉換)
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
@@ -50,8 +63,7 @@ def get_detailed_chips(sid_clean):
         dl = DataLoader()
         # --- 法人連買 ---
         start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
-        # 這裡改用 pd.DataFrame(dl...) 強制處理
-        df_i = pd.DataFrame(dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d))
+        df_i = to_df(dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d))
         
         if not df_i.empty and 'name' in df_i.columns:
             def count_buy_streak(name):
@@ -66,14 +78,13 @@ def get_detailed_chips(sid_clean):
         
         # --- 大戶持股 ---
         start_w = (datetime.date.today() - datetime.timedelta(days=45)).strftime('%Y-%m-%d')
-        df_h = pd.DataFrame(dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w))
+        df_h = to_df(dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w))
         
         if not df_h.empty and 'hold_shares_level' in df_h.columns:
             latest_date = df_h['date'].max()
             df_latest = df_h[df_h['date'] == latest_date].copy()
             df_latest['level'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
             
-            # 加總大戶級別
             mask = df_latest['level'].str.contains('400|600|800|1000|以上')
             big_val = df_latest[mask]['percent'].sum()
             if big_val == 0:
@@ -116,21 +127,22 @@ def run_diagnostic(sid):
         
         c = get_detailed_chips(clean_id)
         
+        bias = ((curr_p-ma60)/ma60)*100
         line_msg = (
             f"=== {clean_id} {ch_name} ===\n"
             f"現價：{curr_p:.2f} | RSI：{rsi:.1f}\n"
             f"法人：外{c['fs']}d 投{c['ss']}d | 大戶:{c['big']:.1f}%\n"
             f"量能：{c['v_status']}({c['v_ratio']:.1f}x)\n"
-            f"趨勢：{'🔥多頭' if curr_p > ma60 else '☁️空頭'}(乖離{((curr_p-ma60)/ma60)*100:+.1f}%)\n"
-            f"提示：{'⚠️高檔防回' if ((curr_p-ma60)/ma60)*100 > 15 else '✅位階安全'}"
+            f"趨勢：{'🔥多頭' if curr_p > ma60 else '☁️空頭'}(乖離{bias:+.1f}%)\n"
+            f"提示：{'⚠️高檔防回' if bias > 15 else '✅位階安全'}"
         )
 
         sheet_row = [
             str(datetime.date.today()), clean_id, ch_name, 
             curr_p, round(rsi, 1), eps, pe, round(margin, 1), 
             c['fs'], c['ss'], c['big'], f"{c['v_status']}({c['v_ratio']:.1f}x)",
-            "🔥多頭" if curr_p > ma60 else "☁️空頭", round(((curr_p-ma60)/ma60)*100, 1), 
-            "⚠️高檔防回" if ((curr_p-ma60)/ma60)*100 > 15 else "✅位階安全"
+            "🔥多頭" if curr_p > ma60 else "☁️空頭", round(bias, 1), 
+            "⚠️高檔防回" if bias > 15 else "✅位階安全"
         ]
         return line_msg, sheet_row
     except Exception as e:
