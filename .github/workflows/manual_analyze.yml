@@ -18,16 +18,16 @@ jobs:
       - name: 1. 檢出代碼
         uses: actions/checkout@v3
 
-      - name: 2. 設定 Python
+      - name: 2. 設定 Python 執行環境
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: 3. 安裝必要套件
+      - name: 3. 安裝必要套件 (包含修復 FinMind 報錯的 tqdm)
         run: |
-          pip install yfinance pandas requests FinMind ta gspread oauth2client
+          pip install yfinance pandas requests FinMind ta gspread oauth2client tqdm
 
-      - name: 4. 建立 Google 金鑰
+      - name: 4. 建立 Google 金鑰檔案
         run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
 
       - name: 5. 執行深度診斷
