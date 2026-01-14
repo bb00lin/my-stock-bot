@@ -39,7 +39,7 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼與量能邏輯 (修正大戶 % 與連買)
+# 2. 籌碼與量能邏輯 (強制修復大戶 % 顯示問題)
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
@@ -55,23 +55,37 @@ def get_detailed_chips(sid_clean):
                 for _, r in d.iterrows():
                     net_buy = r['buy'] - r['sell']
                     if net_buy > 0: c += 1
-                    elif net_buy < 0: break # 有賣出就中斷
+                    elif net_buy < 0: break
                 return c
             chips["fs"], chips["ss"] = count_buy_streak('Foreign_Investor'), count_buy_streak('Investment_Trust')
         
-        # --- 大戶持股 (修正 0% 問題) ---
+        # --- 大戶持股 (強化版：模糊匹配與多層級偵測) ---
         start_w = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
         df_h = dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w)
+        
         if df_h is not None and not df_h.empty:
-            # 抓取最近一個有資料的日期 (解決週中無數據問題)
+            # 1. 取得最近一次有數據的日期
             latest_date = df_h['date'].max()
-            df_latest = df_h[df_h['date'] == latest_date]
-            # 加總 400 張以上所有等級的比例
-            # 層級名稱可能包含空格，故使用 str.contains
-            big_total = df_latest[df_latest['hold_shares_level'].str.contains('400|600|800|1000')]['percent'].sum()
-            chips["big"] = big_total
+            df_latest = df_h[df_h['date'] == latest_date].copy()
+            
+            # 2. 清理級別字串 (去除空格)
+            df_latest['hold_shares_level'] = df_latest['hold_shares_level'].str.replace(' ', '')
+            
+            # 3. 嘗試多種匹配方式
+            # 方式 A: 匹配 400 張以上的所有層級
+            targets = ['400-600', '600-800', '800-1000', '1000以上', '400-600股', '600-800股', '800-1000股', '1000股以上']
+            big_total = df_latest[df_latest['hold_shares_level'].isin(targets)]['percent'].sum()
+            
+            # 方式 B: 萬一方式 A 還是 0 (有些 API 回傳格式不同)，使用大範圍關鍵字匹配
+            if big_total == 0:
+                big_total = df_latest[df_latest['hold_shares_level'].str.contains('400|600|800|1000|以上', na=False)]['percent'].sum()
+            
+            # 方式 C: 極端情況 (防止重複計算)，若超過 100 則修正
+            chips["big"] = min(big_total, 100.0)
+            print(f"DEBUG [{sid_clean}]: 日期 {latest_date}, 偵測到大戶% {chips['big']}%")
+            
     except Exception as e:
-        print(f"籌碼數據分析異常: {e}")
+        print(f"❌ 籌碼分析錯誤 ({sid_clean}): {e}")
 
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
@@ -94,7 +108,7 @@ def run_diagnostic(sid):
         df = stock.history(period="1y")
         if df.empty: return None, None
         
-        ch_name = STOCK_NAME_MAP.get(clean_id, stock.info.get('shortName', '未知標的'))
+        ch_name = STOCK_NAME_MAP.get(clean_id, stock.info.get('shortName', '未知'))
         curr_p = df.iloc[-1]['Close']
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
@@ -126,7 +140,7 @@ def run_diagnostic(sid):
         ]
         return line_msg, sheet_row
     except Exception as e:
-        print(f"診斷失敗 ({sid}): {e}")
+        print(f"❌ 診斷失敗 ({sid}): {e}")
         return None, None
 
 if __name__ == "__main__":
