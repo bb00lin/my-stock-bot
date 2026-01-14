@@ -9,7 +9,7 @@ on:
         default: '2330 2317'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   diagnostic:
@@ -18,47 +18,24 @@ jobs:
       - name: 1. 檢出代碼
         uses: actions/checkout@v3
 
-      - name: 2. 設定 Python 執行環境
+      - name: 2. 設定 Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
       - name: 3. 安裝必要套件
         run: |
-          pip install yfinance pandas requests FinMind ta tqdm
+          pip install yfinance pandas requests FinMind ta gspread oauth2client
 
-      - name: 4. 執行深度診斷
+      - name: 4. 建立 Google 金鑰
+        run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
+
+      - name: 5. 執行深度診斷
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python ManualStock.py "${{ github.event.inputs.stock_list }}"
 
-      - name: 5. 自動清理舊報告並 Commit 回 Repo
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          
-          # --- 自動清理邏輯 ---
-          # 刪除 30 天前產出的 manual_report_*.txt 檔案
-          # -mtime +30 代表修改時間超過 30 天
-          find . -name "manual_report_*.txt" -mtime +30 -exec git rm {} \; || echo "沒有可清理的舊檔案"
-          
-          # --- 加入新檔案 ---
-          git add manual_report_*.txt latest_manual.txt || true
-          
-          if git diff --staged --quiet; then
-            echo "無變動（無新報告且無舊檔需清理），跳過提交。"
-          else
-            git commit -m "📝 診斷存檔與舊檔清理: ${{ github.event.inputs.stock_list }}"
-            git push
-          fi
-
-      - name: 6. 雲端存檔備份 - Upload Artifact
+      - name: 6. 清理金鑰
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Manual-Diagnostic-Report-${{ github.run_id }}
-          path: |
-            manual_report_*.txt
-            latest_manual.txt
-          retention-days: 7
+        run: rm -f google_key.json
