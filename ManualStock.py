@@ -13,7 +13,8 @@ LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
 def get_stock_name_map():
     try:
         dl = DataLoader()
-        df = dl.taiwan_stock_info()
+        df_obj = dl.taiwan_stock_info()
+        df = df_obj.data if hasattr(df_obj, 'data') else df_obj
         return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
     except: return {}
 
@@ -39,7 +40,7 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼與量能邏輯 (修正 'data' 錯誤)
+# 2. 籌碼與量能邏輯 (全面相容 FinMind 物件與 DataFrame)
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
@@ -47,40 +48,36 @@ def get_detailed_chips(sid_clean):
         dl = DataLoader()
         # --- 法人連買 ---
         start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
-        df_i = dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d)
+        res_i = dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d)
+        df_i = res_i.data if hasattr(res_i, 'data') else res_i
         
-        # 修正：檢查是否為 DataFrame
         if isinstance(df_i, pd.DataFrame) and not df_i.empty:
             def count_buy_streak(name):
                 d = df_i[df_i['name'] == name].sort_values('date', ascending=False)
                 c = 0
                 for _, r in d.iterrows():
-                    net_buy = r['buy'] - r['sell']
+                    net_buy = (r.get('buy', 0) - r.get('sell', 0))
                     if net_buy > 0: c += 1
                     elif net_buy < 0: break
                 return c
             chips["fs"], chips["ss"] = count_buy_streak('Foreign_Investor'), count_buy_streak('Investment_Trust')
         
         # --- 大戶持股 ---
-        start_w = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
-        df_h = dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w)
+        start_w = (datetime.date.today() - datetime.timedelta(days=45)).strftime('%Y-%m-%d')
+        res_h = dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w)
+        df_h = res_h.data if hasattr(res_h, 'data') else res_h
         
         if isinstance(df_h, pd.DataFrame) and not df_h.empty:
-            # 取得最新一筆有資料的週次日期
             latest_date = df_h['date'].max()
             df_latest = df_h[df_h['date'] == latest_date].copy()
-            
-            # 清理字串避免空格干擾
-            df_latest['hold_shares_level'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
-            
-            # 抓取 400 張以上等級的加總
-            # 包含：400-600, 600-800, 800-1000, 1000以上
-            big_mask = df_latest['hold_shares_level'].str.contains('400|600|800|1000|以上')
-            chips["big"] = round(df_latest[big_mask]['percent'].sum(), 1)
-            
-            # 若計算出來為 0，進行最後手段：抓取索引最後 5 筆 (通常是大戶等級)
-            if chips["big"] == 0:
-                chips["big"] = round(df_latest.tail(5)['percent'].sum(), 1)
+            # 轉換級別為字串並清理
+            df_latest['level'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
+            # 加總關鍵級別
+            mask = df_latest['level'].str.contains('400|600|800|1000|以上')
+            big_val = df_latest[mask]['percent'].sum()
+            if big_val == 0: # 後備方案
+                big_val = df_latest.tail(5)['percent'].sum()
+            chips["big"] = round(float(big_val), 1)
                 
     except Exception as e:
         print(f"❌ 籌碼處理失敗 ({sid_clean}): {str(e)}")
