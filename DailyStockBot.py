@@ -33,65 +33,74 @@ def get_streak_only(sid_clean):
         return count_s('Foreign_Investor'), count_s('Investment_Trust')
     except: return 0, 0
 
-def analyze_v7(ticker, name):
-    """核心篩選邏輯"""
+def analyze_v9(ticker, name):
+    """核心篩選邏輯 - 整合量能(🔥)與乖離率警示"""
     try:
         s = yf.Ticker(ticker)
         i = s.info
         m = i.get('grossMargins', 0) or 0
         e = i.get('trailingEps', 0) or 0
         
-        # 門檻：毛利 > 10% 且 EPS > 0
+        # 基本面過濾：毛利 > 10% 且 EPS > 0
         if m < 0.10 or e <= 0: return None
 
         df = s.history(period="1y")
         if len(df) < 60: return None
         
         cp = df.iloc[-1]['Close']
-        ma60 = df['Close'].rolling(60).mean().iloc[-1]
-        vol_ratio = df.iloc[-1]['Volume'] / df['Volume'].iloc[-11:-1].mean()
+        ma5 = df['Close'].rolling(5).mean().iloc[-1]   # 5日線
+        ma60 = df['Close'].rolling(60).mean().iloc[-1] # 季線
         
+        # 計算量比
+        vol_today = df.iloc[-1]['Volume']
+        vol_avg = df['Volume'].iloc[-11:-1].mean()
+        vol_ratio = vol_today / vol_avg if vol_avg > 0 else 0
+        
+        # 量能標籤
+        vol_tag = f"🔥爆量({vol_ratio:.1f}x)" if vol_ratio > 2.0 else f"{vol_ratio:.1f}x"
+        
+        # 計算 5日線乖離率
+        bias_5 = ((cp - ma5) / ma5) * 100
+        if bias_5 > 7:
+            bias_msg = f"⚠️過熱({bias_5:.1f}%)"
+        elif bias_5 < -5:
+            bias_msg = f"📉超跌({bias_5:.1f}%)"
+        else:
+            bias_msg = f"✅安全({bias_5:.1f}%)"
+
         fs, ss = get_streak_only(ticker.split('.')[0])
         
-        # 條件：法人連買 且 股價站上 MA60 且 有量能
+        # 篩選條件：法人有買 且 股價站上季線 且 量比大於 1.1
         if (fs >= 2 or ss >= 1) and cp > ma60 and vol_ratio > 1.1:
-            tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
-            return (f"📍{ticker} {name} ({tag})\n"
-                    f"法人：外資連買{fs}d | 投信連買{ss}d\n"
-                    f"現價：{cp:.2f} | 量比：{vol_ratio:.1f}\n"
+            type_tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
+            return (f"📍{ticker} {name} ({type_tag})\n"
+                    f"法人：外資{fs}d | 投信{ss}d\n"
+                    f"量比：{vol_tag}\n"
+                    f"狀態：{bias_msg}\n"
+                    f"現價：{cp:.2f}\n"
                     f"-----------------------------------")
     except: return None
 
 def main():
     dl = DataLoader()
-    # 獲取上市櫃股票清單
     stock_df = dl.taiwan_stock_info()
     
-    # --- 修正: 處理 market_type 欄位不存在的問題 ---
-    # 先列印出欄位名稱，方便 debug (GitHub Log 可見)
-    print(f"FinMind Columns: {stock_df.columns.tolist()}")
-    
-    # 判斷使用哪個欄位來區分上市/上櫃
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
-    if m_col not in stock_df.columns:
-        # 如果還是找不到，就預設全部用 .TW 測試 (yfinance 會自動修正部分錯誤)
-        m_col = None
+    if m_col not in stock_df.columns: m_col = None
 
-    # 優先掃描市值較大的前 200 檔
+    # 掃描權值前 200 檔
     targets = stock_df[stock_df['stock_id'].str.len() == 4].head(200) 
     
     results = []
     for _, row in targets.iterrows():
         sid = row['stock_id']
-        # 根據找到的欄位判斷字尾
         if m_col and m_col in row:
             suffix = ".TWO" if '上櫃' in str(row[m_col]) or 'OTC' in str(row[m_col]) else ".TW"
         else:
-            # 暴力法判斷：若代碼大於 9000 通常是上櫃/興櫃，或直接依序嘗試
             suffix = ".TWO" if int(sid) >= 8000 else ".TW"
             
         t = f"{sid}{suffix}"
-        res = analyze_v7(t, row['stock_name'])
+        res = analyze_v9(t, row['stock_name'])
         if res: results.append(res)
         time.sleep(0.4)
 
@@ -99,12 +108,12 @@ def main():
         msg = f"🔍 【{datetime.date.today()} 法人精選清單】\n\n" + "\n".join(results)
         send_line(msg)
         
-        # 存檔
-        fname = f"scan_report_{datetime.date.today()}.txt"
-        with open(fname, "w", encoding="utf-8") as f: f.write(msg)
+        # 存檔供備查
+        today_str = datetime.date.today().strftime('%Y-%m-%d')
+        with open(f"scan_report_{today_str}.txt", "w", encoding="utf-8") as f: f.write(msg)
         with open("latest_scan.txt", "w", encoding="utf-8") as f: f.write(msg)
     else:
-        print("今日篩選無符合條件之標的。")
+        print("今日篩選完畢，無符合條件標的。")
 
 if __name__ == "__main__":
     main()
