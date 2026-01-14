@@ -18,11 +18,11 @@ def sync_to_sheets(data_list):
         creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
         client = gspread.authorize(creds)
         sheet = client.open("全能金流診斷報表").get_worksheet(0)
-        # 使用 USER_ENTERED 確保 Sheets 識別百分比字串為數值格式
+        # 使用 USER_ENTERED 確保字串能被正確放入儲存格
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆診斷數據至 Google Sheets")
     except Exception as e:
-        print(f"⚠️ Google Sheets 同備失敗: {e}")
+        print(f"⚠️ Google Sheets 同步失敗: {e}")
 
 def get_global_stock_info():
     try:
@@ -74,7 +74,7 @@ def fetch_pro_metrics(sid):
         clean_rsi = 0.0 if pd.isna(curr_rsi) else round(curr_rsi, 1)
         rsi_status = "⚠️過熱" if clean_rsi > 75 else ("🟢穩健" if clean_rsi < 35 else "中性")
 
-        # 獲取殖利率與利潤率
+        # 殖利率處理
         raw_yield = info.get('dividendYield')
         dividend_yield_val = float(raw_yield) if raw_yield is not None else 0.0
         score_yield = dividend_yield_val * 100
@@ -82,8 +82,10 @@ def fetch_pro_metrics(sid):
         this_q_m = (info.get('profitMargins', 0) or 0) * 100
         inst_own = (info.get('heldPercentInstitutions', 0) or 0) * 100
         
-        # 1D 漲幅計算
+        # 漲幅計算與格式化
         d1 = ((curr_p / df_hist['Close'].iloc[-2]) - 1) * 100
+        d1_str = f"{d1:+.2f}%"  # 強制生成帶正負號的百分比字串
+        
         chip_status = "🔴加碼" if d1 > 0 and inst_own > 30 else "🟢觀望"
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
 
@@ -102,10 +104,10 @@ def fetch_pro_metrics(sid):
             "score": score, "name": stock_name, "industry": industry,
             "id": f"{sid}{'市' if '.TW' in full_id else '櫃'}",
             "rsi": clean_rsi, "rsi_s": rsi_status, 
-            "yield": dividend_yield_val, 
+            "yield": dividend_yield_val, # Sheets 依然傳入小數，請配合 Sheets 格式化
             "chip": chip_status, "vol_r": round(vol_ratio, 1),
             "amt_t": round(today_amount, 1), "p": round(curr_p, 1), 
-            "d1_str": f"{d1:+.2f}%"  # 格式化為 +2.50% 這種字串
+            "d1_str": d1_str
         }
     except: return None
 
@@ -122,7 +124,7 @@ def main():
         res = fetch_pro_metrics(sid)
         if res:
             results_line.append(res)
-            # 寫入 Sheet 資料：1D漲幅使用優化後的 res['d1_str']
+            # 寫入 Sheet 資料：強制使用 res['d1_str'] 確保百分比格式統一
             results_sheet.append([
                 current_date, res['id'], res['name'], res['score'], 
                 res['rsi'], res['industry'], res['chip'], res['vol_r'], 
