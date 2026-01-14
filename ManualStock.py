@@ -1,4 +1,6 @@
 import os, yfinance as yf, pandas as pd, requests, datetime, time, sys
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 from ta.momentum import RSIIndicator
 
@@ -8,9 +10,19 @@ from ta.momentum import RSIIndicator
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
 
+def sync_to_sheets(data_list):
+    """同步至 Google Sheets: 個股深度診斷"""
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
+        client = gspread.authorize(creds)
+        sheet = client.open("個股深度診斷").get_worksheet(0)
+        sheet.append_rows(data_list)
+        print(f"✅ 成功同步 {len(data_list)} 筆診斷結果至雲端")
+    except Exception as e:
+        print(f"⚠️ Google Sheets 同步失敗: {e}")
+
 def send_line_message(message):
-    print("\n" + "="*40 + "\n" + message + "\n" + "="*40)
-    sys.stdout.flush()
     if not LINE_ACCESS_TOKEN: return
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
@@ -19,14 +31,10 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 強化的籌碼與量能邏輯
+# 2. 籌碼與量能邏輯 (結構化返回)
 # ==========================================
 def get_detailed_chips(sid_clean):
-    inst_info = "法人：FinMind 無回應"
-    big_info = "大戶：FinMind 無回應"
-    vol_msg = ""
-
-    # --- A. 嘗試從 FinMind 抓法人與大戶 (分開 try) ---
+    chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
     try:
         dl = DataLoader()
         # 法人
@@ -40,95 +48,78 @@ def get_detailed_chips(sid_clean):
                     if (r['buy'] - r['sell']) > 0: c += 1
                     else: break
                 return c
-            inst_info = f"外資連買: {count_s('Foreign_Investor')}d | 投信連買: {count_s('Investment_Trust')}d"
+            chips["fs"], chips["ss"] = count_s('Foreign_Investor'), count_s('Investment_Trust')
         
         # 大戶
         start_w = (datetime.date.today() - datetime.timedelta(days=20)).strftime('%Y-%m-%d')
         df_h = dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w)
         if df_h is not None and not df_h.empty:
             latest = df_h[df_h['date'] == df_h['date'].max()]
-            b400 = latest[latest['hold_shares_level'].isin(['400-600','600-800','800-1000','1000以上'])]['percent'].sum()
-            big_info = f"大戶持股(400+): {b400:.1f}%"
-    except:
-        pass # 如果 FinMind 失敗，保持預設字串
+            chips["big"] = latest[latest['hold_shares_level'].isin(['400-600','600-800','800-1000','1000以上'])]['percent'].sum()
+    except: pass
 
-    # --- B. 強制執行的 yfinance 量能診斷 (備援) ---
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
-        s_obj = yf.Ticker(ticker)
-        h = s_obj.history(period="5d")
+        h = yf.Ticker(ticker).history(period="5d")
         if len(h) >= 3:
-            v_today = h['Volume'].iloc[-1]
-            v_avg = h['Volume'].iloc[:-1].mean()
-            v_ratio = v_today / v_avg if v_avg > 0 else 0
-            v_status = "🔥爆量" if v_ratio > 2.0 else "☁️量平"
-            vol_msg = f"● {v_status} (量比:{v_ratio:.1f}x)"
-    except:
-        vol_msg = "● 量能：數據獲取失敗"
-
-    return f"{inst_info}\n● {big_info}\n{vol_msg}"
+            v_today, v_avg = h['Volume'].iloc[-1], h['Volume'].iloc[:-1].mean()
+            chips["v_ratio"] = v_today / v_avg if v_avg > 0 else 0
+            chips["v_status"] = "🔥爆量" if chips["v_ratio"] > 2.0 else "☁️量平"
+    except: pass
+    return chips
 
 # ==========================================
 # 3. 核心診斷邏輯
 # ==========================================
-def get_diagnostic_report(sid):
+def run_diagnostic(sid):
     try:
         clean_id = str(sid).split('.')[0].strip()
         stock_ticker = f"{clean_id}.TW" if int(clean_id) < 9000 else f"{clean_id}.TWO"
         stock = yf.Ticker(stock_ticker)
-        info = stock.info
-        df = stock.history(period="1y")
-        
-        if df.empty: return f"❌ 找不到 {clean_id} 的資料。"
+        info, df = stock.history(period="1y"), stock.history(period="1y")
+        if df.empty: return None, None
         
         curr_p = df.iloc[-1]['Close']
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
+        eps = stock.info.get('trailingEps', 0) or 0
+        margin = (stock.info.get('grossMargins', 0) or 0) * 100
+        pe = stock.info.get('trailingPE', 0) or "N/A"
         
-        # 財報 (增加判斷，避免新藥股無 PE 導致報錯)
-        eps = info.get('trailingEps', 0) or 0
-        margin = (info.get('grossMargins', 0) or 0) * 100
-        pe = info.get('trailingPE', 0) or "N/A"
-        
-        # 籌碼與備援量能
-        chip_report = get_detailed_chips(clean_id)
+        c = get_detailed_chips(clean_id)
+        trend = "🔥多頭" if curr_p > ma60 else "☁️空頭"
+        bias = ((curr_p-ma60)/ma60)*100
+        tip = "⚠️高檔防回" if bias > 15 else "✅位階安全"
 
-        report = (
-            f"=== {clean_id} {info.get('shortName', '標的')} 診斷 ===\n"
-            f"● 現價：{curr_p:.2f} | RSI：{rsi:.1f}\n\n"
-            f"【📊 核心財報】\n"
-            f"● EPS：{eps:.2f} | 本益比：{pe}\n"
-            f"● 毛利率：{margin:.1f}%\n\n"
-            f"【💎 籌碼/量能】\n"
-            f"● {chip_report}\n\n"
-            f"【🚀 實戰指南】\n"
-            f"● 趨勢：{'🔥多頭' if curr_p > ma60 else '☁️空頭'} (乖離 {((curr_p-ma60)/ma60)*100:+.1f}%)\n"
-            f"● 提示：{'⚠️高檔防回檔' if (curr_p-ma60)/ma60 > 0.15 else '✅位階安全'}\n"
-            f"================================"
+        line_msg = (
+            f"=== {clean_id} {stock.info.get('shortName', '標的')} ===\n"
+            f"現價：{curr_p:.2f} | RSI：{rsi:.1f}\n"
+            f"法人：外{c['fs']}d 投{c['ss']}d | 大戶:{c['big']:.1f}%\n"
+            f"量能：{c['v_status']}({c['v_ratio']:.1f}x)\n"
+            f"趨勢：{trend}(乖離{bias:+.1f}%)\n"
+            f"提示：{tip}"
         )
-        return report
-    except Exception as e:
-        return f"❌ {sid} 總體診斷出錯: {e}"
+
+        sheet_row = [
+            str(datetime.date.today()), clean_id, stock.info.get('shortName'), 
+            curr_p, round(rsi, 1), eps, pe, round(margin, 1), 
+            c['fs'], c['ss'], round(c['big'], 1), f"{c['v_status']}({c['v_ratio']:.1f}x)",
+            trend, round(bias, 1), tip
+        ]
+        return line_msg, sheet_row
+    except: return None, None
 
 if __name__ == "__main__":
     input_str = sys.argv[1] if len(sys.argv) > 1 else "2330"
     targets = input_str.replace(',', ' ').split()
-    all_reports = []
+    results_sheet = []
+    
     for t in targets:
-        rep = get_diagnostic_report(t.strip())
-        send_line_message(rep)
-        all_reports.append(rep)
+        l_msg, s_row = run_diagnostic(t.strip())
+        if l_msg:
+            send_line_message(l_msg)
+            results_sheet.append(s_row)
         time.sleep(1)
     
-    # 存檔 (確保 GitHub 行動成功)
-    today = datetime.datetime.now().strftime('%Y-%m-%d')
-    content = "\n\n".join(all_reports)
-    with open(f"manual_report_{today}.txt", "w", encoding="utf-8") as f: f.write(content)
-    with open("latest_manual.txt", "w", encoding="utf-8") as f: f.write(content)
-    
-    # 本機同步
-    l_path = r"D:\MEGA\下載\股票"
-    if os.path.exists(l_path):
-        try:
-            with open(os.path.join(l_path, f"manual_report_{today}.txt"), "w", encoding="utf-8") as f: f.write(content)
-        except: pass
+    if results_sheet:
+        sync_to_sheets(results_sheet)
