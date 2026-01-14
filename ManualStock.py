@@ -3,17 +3,13 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from ta.momentum import RSIIndicator
 
+# 刪除原本貼上的那一長串，改回這幾行
 # ==========================================
 # 1. 環境設定
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-# 優先從 Secrets 讀取，若無則使用你提供的備用 Token
-FINMIND_TOKEN = os.getenv("FINMIND_TOKEN") or (
-    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMS0xNCAyMzoxMTo0MSIsInVz"
-    "ZXJfaWQiOiJiYjAwbGlubiIsImVtYWlsIjoiYmIwMGxpbkBnbWFpbC5jb20iLCJpcCI6IjExOC4xNTAuMTIwLjcyIn0."
-    "Yp8X-_bkA9j6y3pSJJjHposfxSm0MvtnLkhtlABpQxQ"
-)
-LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+FINMIND_TOKEN = os.getenv("FINMIND_TOKEN") # 讓程式自動去 Secrets 找
 
 def get_finmind_data(dataset, stock_id, start_date):
     """最穩定的底層 API 請求方式"""
