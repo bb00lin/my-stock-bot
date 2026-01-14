@@ -11,19 +11,15 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
 
 def get_stock_name_map():
-    """從 FinMind 獲取全市場中文名稱對照表"""
     try:
         dl = DataLoader()
         df = dl.taiwan_stock_info()
         return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
-    except:
-        return {}
+    except: return {}
 
-# 預先載入對照表，避免在迴圈中重複請求
 STOCK_NAME_MAP = get_stock_name_map()
 
 def sync_to_sheets(data_list):
-    """同步至 Google Sheets: 個股深度診斷"""
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
@@ -43,30 +39,39 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼與量能邏輯
+# 2. 籌碼與量能邏輯 (修正大戶 % 與連買)
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
     try:
         dl = DataLoader()
-        start_d = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+        # --- 法人連買 ---
+        start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
         df_i = dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d)
         if df_i is not None and not df_i.empty:
-            def count_s(name):
+            def count_buy_streak(name):
                 d = df_i[df_i['name'] == name].sort_values('date', ascending=False)
                 c = 0
                 for _, r in d.iterrows():
-                    if (r['buy'] - r['sell']) > 0: c += 1
-                    else: break
+                    net_buy = r['buy'] - r['sell']
+                    if net_buy > 0: c += 1
+                    elif net_buy < 0: break # 有賣出就中斷
                 return c
-            chips["fs"], chips["ss"] = count_s('Foreign_Investor'), count_s('Investment_Trust')
+            chips["fs"], chips["ss"] = count_buy_streak('Foreign_Investor'), count_buy_streak('Investment_Trust')
         
-        start_w = (datetime.date.today() - datetime.timedelta(days=20)).strftime('%Y-%m-%d')
+        # --- 大戶持股 (修正 0% 問題) ---
+        start_w = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
         df_h = dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w)
         if df_h is not None and not df_h.empty:
-            latest = df_h[df_h['date'] == df_h['date'].max()]
-            chips["big"] = latest[latest['hold_shares_level'].isin(['400-600','600-800','800-1000','1000以上'])]['percent'].sum()
-    except: pass
+            # 抓取最近一個有資料的日期 (解決週中無數據問題)
+            latest_date = df_h['date'].max()
+            df_latest = df_h[df_h['date'] == latest_date]
+            # 加總 400 張以上所有等級的比例
+            # 層級名稱可能包含空格，故使用 str.contains
+            big_total = df_latest[df_latest['hold_shares_level'].str.contains('400|600|800|1000')]['percent'].sum()
+            chips["big"] = big_total
+    except Exception as e:
+        print(f"籌碼數據分析異常: {e}")
 
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
@@ -89,15 +94,15 @@ def run_diagnostic(sid):
         df = stock.history(period="1y")
         if df.empty: return None, None
         
-        # 獲取中文名稱 (優先使用對照表)
         ch_name = STOCK_NAME_MAP.get(clean_id, stock.info.get('shortName', '未知標的'))
-        
         curr_p = df.iloc[-1]['Close']
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
-        eps = stock.info.get('trailingEps', 0) or 0
-        margin = (stock.info.get('grossMargins', 0) or 0) * 100
-        pe = stock.info.get('trailingPE', 0) or "N/A"
+        
+        info = stock.info
+        eps = info.get('trailingEps', 0) or 0
+        margin = (info.get('grossMargins', 0) or 0) * 100
+        pe = info.get('trailingPE', 0) or "N/A"
         
         c = get_detailed_chips(clean_id)
         trend = "🔥多頭" if curr_p > ma60 else "☁️空頭"
@@ -120,7 +125,9 @@ def run_diagnostic(sid):
             trend, round(bias, 1), tip
         ]
         return line_msg, sheet_row
-    except: return None, None
+    except Exception as e:
+        print(f"診斷失敗 ({sid}): {e}")
+        return None, None
 
 if __name__ == "__main__":
     input_str = sys.argv[1] if len(sys.argv) > 1 else "2330"
