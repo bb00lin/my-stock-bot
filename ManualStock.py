@@ -24,18 +24,7 @@ def get_finmind_data(dataset, stock_id, start_date):
         data = res_json.get("data", [])
         return pd.DataFrame(data), res_json.get("msg", "")
     except Exception as e:
-        print(f"❌ API 請求失敗: {e}")
         return pd.DataFrame(), str(e)
-
-def get_stock_name_map():
-    try:
-        df, _ = get_finmind_data("TaiwanStockInfo", "", "2025-01-01")
-        if not df.empty and 'stock_id' in df.columns:
-            return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
-        return {}
-    except: return {}
-
-STOCK_NAME_MAP = get_stock_name_map()
 
 def sync_to_sheets(data_list):
     try:
@@ -53,17 +42,17 @@ def send_line_message(message):
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
-    try: requests.post(url, headers=headers, json=payload)
-    except: pass
+    requests.post(url, headers=headers, json=payload)
 
 # ==========================================
-# 2. 籌碼邏輯 (具備自動權限備援)
+# 2. 籌碼邏輯 (自動處理 N/A 問題)
 # ==========================================
 def get_detailed_chips(sid_clean):
-    chips = {"fs": 0, "ss": 0, "chip_val": "N/A", "chip_name": "大戶%", "v_ratio": 0.0, "v_status": "未知"}
+    chips = {"fs": 0, "ss": 0, "chip_val": "N/A", "v_ratio": 0.0, "v_status": "未知"}
     try:
-        # --- 1. 法人買賣超 (30天) ---
         start_d = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+        
+        # 1. 法人連買 (免費權限可用)
         df_i, _ = get_finmind_data("TaiwanStockInstitutionalInvestorsBuySell", sid_clean, start_d)
         if not df_i.empty:
             def streak(name):
@@ -75,31 +64,26 @@ def get_detailed_chips(sid_clean):
                 return c
             chips["fs"], chips["ss"] = streak('Foreign_Investor'), streak('Investment_Trust')
 
-        # --- 2. 大戶持股 (嘗試抓取) ---
+        # 2. 嘗試抓取大戶，若失敗則抓融資
         df_h, msg = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_d)
         
-        if "Please update your user level" in msg:
-            # 💡 備援機制：權限不足時改抓「融資增減」
+        if not df_h.empty and "Please update your user level" not in msg:
+            latest_date = df_h['date'].max()
+            df_latest = df_h[df_h['date'] == latest_date].copy()
+            df_latest['lvl'] = df_latest['hold_shares_level'].astype(str)
+            mask = df_latest['lvl'].str.contains('400|600|800|1000|以上|11|12|13|14|15')
+            chips["chip_val"] = f"{round(float(df_latest[mask]['percent'].sum()), 1)}%"
+        else:
+            # 備援指標：融資增減 (免費權限可用)
             df_m, _ = get_finmind_data("TaiwanStockMarginPurchaseEvid", sid_clean, start_d)
             if not df_m.empty:
                 df_m = df_m.sort_values('date')
                 m_diff = int(df_m.iloc[-1]['MarginPurchaseBuy']) - int(df_m.iloc[-1]['MarginPurchaseSell'])
-                chips["chip_val"] = f"{'+' if m_diff > 0 else ''}{m_diff}張"
-                chips["chip_name"] = "融資增減"
-                print(f"ℹ️ [{sid_clean}] 權限限制，自動切換至融資指標: {chips['chip_val']}")
-        elif not df_h.empty:
-            latest_date = df_h['date'].max()
-            df_latest = df_h[df_h['date'] == latest_date].copy()
-            df_latest['lvl'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
-            mask = df_latest['lvl'].str.contains('400|600|800|1000|以上|11|12|13|14|15')
-            chips["chip_val"] = f"{round(float(df_latest[mask]['percent'].sum()), 1)}%"
-            chips["chip_name"] = "大戶%"
-            print(f"📊 [{sid_clean}] 成功獲取大戶數據: {chips['chip_val']}")
+                chips["chip_val"] = f"{'+' if m_diff > 0 else ''}{m_diff}張(融資)"
 
-    except Exception as e:
-        print(f"❌ 籌碼解析異常: {e}")
+    except: pass
 
-    # --- 3. 量能計算 ---
+    # 3. 量能計算
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
         h = yf.Ticker(ticker).history(period="10d")
@@ -111,38 +95,31 @@ def get_detailed_chips(sid_clean):
 
 def run_diagnostic(sid):
     try:
-        clean_id = str(sid).split('.')[0].strip()
+        clean_id = str(sid).strip()
         tk_str = f"{clean_id}.TW" if int(clean_id) < 9000 else f"{clean_id}.TWO"
         stock = yf.Ticker(tk_str)
         df = stock.history(period="1y")
         if df.empty: return None, None
         
-        ch_name = STOCK_NAME_MAP.get(clean_id, stock.info.get('shortName', '未知'))
         curr_p = round(df.iloc[-1]['Close'], 2)
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         rsi = round(RSIIndicator(df['Close']).rsi().iloc[-1], 1)
-        
-        info = stock.info
-        eps = info.get('trailingEps', 0) or 0
-        margin = round((info.get('grossMargins', 0) or 0) * 100, 1)
-        pe = info.get('trailingPE', 0) or "N/A"
         
         c = get_detailed_chips(clean_id)
         bias = round(((curr_p-ma60)/ma60)*100, 1)
         
         line_msg = (
-            f"=== {clean_id} {ch_name} ===\n"
+            f"=== {clean_id} ===\n"
             f"現價：{curr_p} | RSI：{rsi}\n"
-            f"法人：外{c['fs']}d 投{c['ss']}d\n"
-            f"{c['chip_name']}：{c['chip_val']}\n"
+            f"法人：外{c['fs']} 投{c['ss']}\n"
+            f"籌碼：{c['chip_val']}\n"
             f"量能：{c['v_status']}({c['v_ratio']}x)\n"
-            f"趨勢：{'🔥多頭' if curr_p > ma60 else '☁️空頭'}(乖離{bias:+.1f}%)\n"
-            f"提示：{'⚠️高檔防回' if bias > 15 else '✅位階安全'}"
+            f"趨勢：{'🔥多頭' if curr_p > ma60 else '☁️空頭'}"
         )
 
         sheet_row = [
-            str(datetime.date.today()), clean_id, ch_name, 
-            curr_p, rsi, eps, pe, margin, 
+            str(datetime.date.today()), clean_id, "", 
+            curr_p, rsi, "", "", "", 
             c['fs'], c['ss'], c['chip_val'], f"{c['v_status']}({c['v_ratio']}x)",
             "🔥多頭" if curr_p > ma60 else "☁️空頭", bias, 
             "⚠️高檔防回" if bias > 15 else "✅位階安全"
@@ -153,16 +130,13 @@ def run_diagnostic(sid):
         return None, None
 
 if __name__ == "__main__":
-    input_str = sys.argv[1] if len(sys.argv) > 1 else "2330"
-    targets = input_str.replace(',', ' ').split()
-    results_sheet = []
-    
+    targets = sys.argv[1].replace(',', ' ').split()
+    results = []
     for t in targets:
         l_msg, s_row = run_diagnostic(t.strip())
         if l_msg:
             send_line_message(l_msg)
-            results_sheet.append(s_row)
+            results.append(s_row)
         time.sleep(1)
-    
-    if results_sheet:
-        sync_to_sheets(results_sheet)
+    if results:
+        sync_to_sheets(results)
