@@ -11,6 +11,7 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    timeout-minutes: 50 # 確保 1000 檔掃描有足夠時間執行
     steps:
       - name: 1. 檢出代碼
         uses: actions/checkout@v3
