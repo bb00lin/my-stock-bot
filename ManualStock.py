@@ -8,7 +8,8 @@ from ta.momentum import RSIIndicator
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 # 若您有 FinMind Token 請設定在 GitHub Secrets，否則使用匿名限制
-FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "") 
+FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMS0xNCAyMzoxMTo0MSIsInVzZXJfaWQiOiJiYjAwbGlubiIsImVtYWlsIjoiYmIwMGxpbkBnbWFpbC5jb20iLCJpcCI6IjExOC4xNTAuMTIwLjcyIn0.Yp8X-_bkA9j6y3pSJJjHposfxSm0MvtnLkhtlABpQxQ
+") 
 LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
 
 def get_finmind_data(dataset, stock_id, start_date):
