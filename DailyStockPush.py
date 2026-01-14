@@ -1,28 +1,34 @@
-import os
-import yfinance as yf
-import pandas as pd
-import requests
-import datetime
-import time
+import os, yfinance as yf, pandas as pd, requests, time, datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
 # ==========================================
 # 1. 配置與對照表初始化
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
+LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
 WATCH_LIST = ["6770", "6706", "6684", "6271", "6269", "3105", "2538", "2014", "2010", "2002", "00992A", "00946", "2317", "2347", "2356", "4510", "4540", "9907"]
 MIN_AMOUNT_HUNDRED_MILLION = 1.0 
 
+def sync_to_sheets(data_list):
+    """將結果寫入 Google Sheets: 全能金流診斷報表"""
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
+        client = gspread.authorize(creds)
+        sheet = client.open("全能金流診斷報表").get_worksheet(0)
+        sheet.append_rows(data_list)
+        print(f"✅ 成功同步 {len(data_list)} 筆診斷數據至 Google Sheets")
+    except Exception as e:
+        print(f"⚠️ Google Sheets 同備失敗: {e}")
+
 def get_global_stock_info():
-    """獲取台股全市場名稱與產業對照"""
     try:
         dl = DataLoader()
         df = dl.taiwan_stock_info()
         return {str(row['stock_id']): (row['stock_name'], row['industry_category']) for _, row in df.iterrows()}
-    except Exception as e:
-        print(f"對照表獲取失敗: {e}", flush=True)
-        return {}
+    except: return {}
 
 STOCK_INFO_MAP = get_global_stock_info()
 
@@ -41,8 +47,7 @@ def get_tw_stock(sid):
     for suffix in [".TW", ".TWO"]:
         target = f"{clean_id}{suffix}"
         stock = yf.Ticker(target)
-        if not stock.history(period="1d").empty:
-            return stock, target
+        if not stock.history(period="1d").empty: return stock, target
     return None, None
 
 # ==========================================
@@ -51,43 +56,33 @@ def get_tw_stock(sid):
 def fetch_pro_metrics(sid):
     stock, full_id = get_tw_stock(sid)
     if not stock: return None
-    
     try:
         df_hist = stock.history(period="7mo")
         if df_hist.empty: return None
-        
         info = stock.info
         latest = df_hist.iloc[-1]
-        curr_p = latest['Close']
-        curr_vol = latest['Volume']
+        curr_p, curr_vol = latest['Close'], latest['Volume']
         
         today_amount = (curr_vol * curr_p) / 100_000_000
-        avg_amount_5d = ((df_hist['Volume'].iloc[-5:] * df_hist['Close'].iloc[-5:]).mean()) / 100_000_000
         if today_amount < MIN_AMOUNT_HUNDRED_MILLION: return None
 
         rsi_series = calculate_rsi(df_hist['Close'])
         curr_rsi = rsi_series.iloc[-1]
         rsi_status = "⚠️過熱" if curr_rsi > 75 else ("🟢穩健" if curr_rsi < 35 else "中性")
 
-        try:
-            income_stmt = stock.quarterly_financials
-            margins = (income_stmt.loc['Net Income'] / income_stmt.loc['Total Revenue']).iloc[:2].tolist()
-            this_q_m, m_trend = margins[0] * 100, ("📈Y" if margins[0] > margins[1] else "📉N")
-        except:
-            this_q_m, m_trend = (info.get('profitMargins', 0) or 0) * 100, "N/A"
+        # 獲取殖利率與利潤率
+        dividend_yield = (float(info.get('dividendYield', 0)) or 0) * 100
+        this_q_m = (info.get('profitMargins', 0) or 0) * 100
         
-        raw_yield = info.get('dividendYield', 0)
-        dividend_yield = (float(raw_yield) if raw_yield and raw_yield > 0.5 else (float(raw_yield)*100 if raw_yield else 0))
-
         inst_own = (info.get('heldPercentInstitutions', 0) or 0) * 100
         d1 = ((curr_p / df_hist['Close'].iloc[-2]) - 1) * 100
-        chip_status = "🔴法人加碼" if d1 > 0 and inst_own > 30 else "🟢法人觀望"
+        chip_status = "🔴加碼" if d1 > 0 and inst_own > 30 else "🟢觀望"
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
 
+        # 計分邏輯
         score = 0
         if this_q_m > 0: score += 2
         if curr_p > df_hist['Close'].iloc[0]: score += 3
-        if "📈" in m_trend: score += 2
         if 3.0 < dividend_yield < 15.0: score += 2
         if 40 < curr_rsi < 70: score += 1
         if today_amount > 10: score += 1
@@ -95,90 +90,57 @@ def fetch_pro_metrics(sid):
 
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
 
+        # 返回格式化數據與 Sheet 用的陣列
         return {
             "score": score, "name": stock_name, "industry": industry,
             "id": f"{sid}{'市' if '.TW' in full_id else '櫃'}",
-            "rsi": f"{curr_rsi:.1f} ({rsi_status})", "yield": f"{dividend_yield:.2f}%",
+            "rsi": f"{curr_rsi:.1f}", "rsi_s": rsi_status, "yield": f"{dividend_yield:.2f}%",
             "chip": chip_status, "vol_r": f"{vol_ratio:.1f}",
-            "amt_t": f"{today_amount:.1f} 億", "amt_5d": f"{avg_amount_5d:.1f} 億",
-            "p": f"{curr_p:.1f}", "m_q": f"{this_q_m:.1f}%", "m_up": m_trend,
-            "d1": f"{d1:+.1f}%", "m1": f"{(((curr_p/df_hist['Close'].iloc[-22])-1)*100):+.1f}%", 
-            "m6": f"{(((curr_p/df_hist['Close'].iloc[0])-1)*100):+.1f}%"
+            "amt_t": f"{today_amount:.1f}", "p": f"{curr_p:.1f}", "d1": f"{d1:+.1f}%"
         }
-    except Exception as e:
-        print(f"標的 {sid} 診斷失敗: {e}", flush=True)
-        return None
+    except: return None
 
 # ==========================================
-# 4. 主程序 (存檔與推送)
+# 4. 主程序
 # ==========================================
 def main():
-    start_time = datetime.datetime.now()
-    current_date = start_time.strftime('%Y-%m-%d')
-    dynamic_filename = f"report_{current_date}.txt"
+    current_date = datetime.date.today().strftime('%Y-%m-%d')
+    results_line = []
+    results_sheet = []
 
-    results = []
-    print(f"🚀 開始診斷清單: {WATCH_LIST}", flush=True)
+    print(f"🚀 開始診斷清單: {WATCH_LIST}")
     for sid in WATCH_LIST:
         res = fetch_pro_metrics(sid)
         if res:
-            results.append(res)
-            print(f"✅ 已完成 {sid} {res['name']} 的診斷 (得分: {res['score']})", flush=True)
-        else:
-            print(f"⏩ 跳過 {sid} (金流低於門檻或無數據)", flush=True)
+            results_line.append(res)
+            # 準備寫入 Sheet 的資料
+            results_sheet.append([
+                current_date, res['id'], res['name'], res['score'], 
+                res['rsi'], res['industry'], res['chip'], res['vol_r'], 
+                res['p'], res['yield'], res['amt_t'], res['d1']
+            ])
         time.sleep(0.5) 
     
-    results.sort(key=lambda x: x['score'], reverse=True)
-    
-    msg = f"🏆 【{current_date} 全能法人金流診斷】\n已過濾成交額 < {MIN_AMOUNT_HUNDRED_MILLION} 億標的\n"
-    
-    for r in results:
-        gem = "💎 " if r['score'] >= 9 else ""
-        section = (
-            f"━━━━━━━━━━━━━━\n"
-            f"{gem}Total Score: {r['score']} | RSI: {r['rsi']}\n"
-            f"標的: {r['id']} {r['name']}\n"
-            f"產業: {r['industry']}\n"
-            f"籌碼: {r['chip']} | 量比: {r['vol_r']}\n"
-            f"現價: {r['p']} | 殖利率: {r['yield']}\n"
-            f"今日金流: {r['amt_t']} (5日均:{r['amt_5d']})\n"
-            f"漲幅: 1D:{r['d1']} | 1M:{r['m1']} | 6M:{r['m6']}\n"
-        )
-        msg += section
+    # 排序並推送 LINE
+    results_line.sort(key=lambda x: x['score'], reverse=True)
+    if results_line:
+        msg = f"🏆 【{current_date} 全能金流診斷】\n"
+        for r in results_line:
+            gem = "💎 " if r['score'] >= 9 else ""
+            msg += (f"━━━━━━━━━━━━━━\n"
+                    f"{gem}Score: {r['score']} | RSI: {r['rsi']}({r['rsi_s']})\n"
+                    f"標的: {r['id']} {r['name']}\n"
+                    f"現價: {r['p']} | 漲幅: {r['d1']}\n"
+                    f"金流: {r['amt_t']}億 | 量比: {r['vol_r']}\n")
+        
+        # LINE 通知
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+        payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg}]}
+        requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
 
-    # 1. GitHub Log 輸出
-    print("\n--- 📯 最終診斷報告輸出 ---", flush=True)
-    print(msg, flush=True)
-
-    # 2. 儲存報告
-    # A. 當前目錄 (雲端 Commit 用)
-    with open(dynamic_filename, "w", encoding="utf-8") as f:
-        f.write(msg)
-    with open("latest_report.txt", "w", encoding="utf-8") as f:
-        f.write(f"最新掃描日期: {current_date}\n請參閱 {dynamic_filename}")
-
-    # B. D 槽同步 (本地執行用)
-    local_mega_path = r"D:\MEGA\下載\股票"
-    if os.path.exists(local_mega_path):
-        try:
-            with open(os.path.join(local_mega_path, dynamic_filename), "w", encoding="utf-8") as f:
-                f.write(msg)
-            print(f"🏠 本地 D 槽同步成功: {dynamic_filename}")
-        except Exception as e:
-            print(f"⚠️ 本地存檔失敗: {e}")
-
-    # 3. LINE 通知
-    if LINE_ACCESS_TOKEN and LINE_USER_ID:
-        try:
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
-            payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg}]}
-            response = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
-            if response.status_code == 200:
-                print("📤 已成功推送至 LINE。", flush=True)
-            else:
-                print(f"❌ LINE 推送失敗: {response.status_code}", flush=True)
-        except Exception as e:
-            print(f"❌ LINE 推送錯誤: {e}", flush=True)
+    # 同步雲端
+    if results_sheet:
+        sync_to_sheets(results_sheet)
 
 if __name__ == "__main__":
     main()
