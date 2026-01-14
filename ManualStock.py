@@ -13,9 +13,11 @@ LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
 def get_stock_name_map():
     try:
         dl = DataLoader()
-        df_obj = dl.taiwan_stock_info()
-        df = df_obj.data if hasattr(df_obj, 'data') else df_obj
-        return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
+        # 強制將 FinMind 資料轉換為 DataFrame
+        df = pd.DataFrame(dl.taiwan_stock_info())
+        if 'stock_id' in df.columns:
+            return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
+        return {}
     except: return {}
 
 STOCK_NAME_MAP = get_stock_name_map()
@@ -40,7 +42,7 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼與量能邏輯 (全面相容 FinMind 物件與 DataFrame)
+# 2. 籌碼邏輯 (改用 pd.DataFrame 強制轉向)
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
@@ -48,10 +50,10 @@ def get_detailed_chips(sid_clean):
         dl = DataLoader()
         # --- 法人連買 ---
         start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
-        res_i = dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d)
-        df_i = res_i.data if hasattr(res_i, 'data') else res_i
+        # 這裡改用 pd.DataFrame(dl...) 強制處理
+        df_i = pd.DataFrame(dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d))
         
-        if isinstance(df_i, pd.DataFrame) and not df_i.empty:
+        if not df_i.empty and 'name' in df_i.columns:
             def count_buy_streak(name):
                 d = df_i[df_i['name'] == name].sort_values('date', ascending=False)
                 c = 0
@@ -64,18 +66,17 @@ def get_detailed_chips(sid_clean):
         
         # --- 大戶持股 ---
         start_w = (datetime.date.today() - datetime.timedelta(days=45)).strftime('%Y-%m-%d')
-        res_h = dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w)
-        df_h = res_h.data if hasattr(res_h, 'data') else res_h
+        df_h = pd.DataFrame(dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w))
         
-        if isinstance(df_h, pd.DataFrame) and not df_h.empty:
+        if not df_h.empty and 'hold_shares_level' in df_h.columns:
             latest_date = df_h['date'].max()
             df_latest = df_h[df_h['date'] == latest_date].copy()
-            # 轉換級別為字串並清理
             df_latest['level'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
-            # 加總關鍵級別
+            
+            # 加總大戶級別
             mask = df_latest['level'].str.contains('400|600|800|1000|以上')
             big_val = df_latest[mask]['percent'].sum()
-            if big_val == 0: # 後備方案
+            if big_val == 0:
                 big_val = df_latest.tail(5)['percent'].sum()
             chips["big"] = round(float(big_val), 1)
                 
@@ -114,24 +115,22 @@ def run_diagnostic(sid):
         pe = info.get('trailingPE', 0) or "N/A"
         
         c = get_detailed_chips(clean_id)
-        trend = "🔥多頭" if curr_p > ma60 else "☁️空頭"
-        bias = ((curr_p-ma60)/ma60)*100
-        tip = "⚠️高檔防回" if bias > 15 else "✅位階安全"
-
+        
         line_msg = (
             f"=== {clean_id} {ch_name} ===\n"
             f"現價：{curr_p:.2f} | RSI：{rsi:.1f}\n"
             f"法人：外{c['fs']}d 投{c['ss']}d | 大戶:{c['big']:.1f}%\n"
             f"量能：{c['v_status']}({c['v_ratio']:.1f}x)\n"
-            f"趨勢：{trend}(乖離{bias:+.1f}%)\n"
-            f"提示：{tip}"
+            f"趨勢：{'🔥多頭' if curr_p > ma60 else '☁️空頭'}(乖離{((curr_p-ma60)/ma60)*100:+.1f}%)\n"
+            f"提示：{'⚠️高檔防回' if ((curr_p-ma60)/ma60)*100 > 15 else '✅位階安全'}"
         )
 
         sheet_row = [
             str(datetime.date.today()), clean_id, ch_name, 
             curr_p, round(rsi, 1), eps, pe, round(margin, 1), 
             c['fs'], c['ss'], c['big'], f"{c['v_status']}({c['v_ratio']:.1f}x)",
-            trend, round(bias, 1), tip
+            "🔥多頭" if curr_p > ma60 else "☁️空頭", round(((curr_p-ma60)/ma60)*100, 1), 
+            "⚠️高檔防回" if ((curr_p-ma60)/ma60)*100 > 15 else "✅位階安全"
         ]
         return line_msg, sheet_row
     except Exception as e:
