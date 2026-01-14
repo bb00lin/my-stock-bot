@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "e-caldron-484313-m4",
+  "private_key_id": "f5f298e46c546fbe47a63300339ae872fb2d8d74",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCowzI6/llhuh98\nOwIXw8BYQJywD3YbqNFL4RlJbbohFj1kZH9EnHSkGV8bMP+fRb1P8cx4cp5K2sH6\nZ6n8ijyeLR2Kmj2uytJDI+MFUnViGhhHqGPrG3dR+PSsGq4slvTEc/zJfYmsfQG7\nLcfWx7+WxAV90FwkDx7gKHvtkMwjpZ75kyE42lSZmKuQ7qucbBz12yKsXOgtRBWS\nIMHlcd/wznyUz4+u+jR8Cv9ia81FmEyJxDMHuNWH13uRUPLKXacaRfTPeBADe/X6\nYSl4cEvD40Ca3jnJHlvQgVvg3Wb+e3YoYYiWvY3ofjvAiOGCDEh61vHrGh00T5+w\nJevqN1sxAgMBAAECggEAAUyvgFYhE2g+1ygP1hBYf4AlNL3fEkt0gSRp8MTQNXJZ\nuqzYxgsmYspx5GBg4jXD8BpT5sGLMoGzaLLk/jWE+KWESrhGrVKRLUSDeluuMmPd\nDVWLShjbYbLhv3QyedQXwm4vjiWnVRVerrWlik6IzSe+mxTAVjlqQB5PsKlNc8t5\nfOQS6gf4ANusb2MBXqK3Bq2R0a5L21Znjb6eePHu2cVecKKYaKuxCClxlWje9SP/\n4I/4dLkElJq47gUv6zo4WHPDwHBVSwYhoWgHL3CIJ+ZmPDmCcAHlZPvFAGN8yFdF\noJNbcWWbhDVJB2Ct9UqF/bFiSpkjsZTJpftfNQEjgQKBgQDkCu9HpWLaXo08M4bW\ni+YjJFXA3fqdNT5Nm9sMD9nnv4ptxFUEvDS/8NIuvzXyMzSqchwHSsZ9ooFPZhGD\nOEhL+04FyP6Yv+k/j160Cg8PUyuWJKs+4K9uKGLpGq5mB8ww91Sd3Q1UywiRU5Bo\nDMg8J2o90man5Gm0rsG+b3MmOQKBgQC9c8QTWd3td74DSWYYiz0Z6j5zbvWiZ30L\nLv+Y+OWEAnxtKeiY2QTYYWKKM7g0rtFc0btEv+tBxIyEZQRJJXVG09ZZyTisAeuo\nyYjAxsmZjt8p+eEkv67PHOA7O58FyQDJfwIV97fgRJ6iT7J4dVwVr2M+FO59vTkp\nhBYhymacuQKBgQDVRZS7QOXOrJcSMm5swLIfM6AvnGsCFAWMt7KI+Vol73Ebb37D\nyvDagfNQXOuq9FDRB59HApvYa97bzu2Z901GImW561yQpwsRspgzcSTchEBDT1AI\nokHvmD3JHHb2XVyOfwHYEiChqLD+mVR4u1uZRpOJ9fikFG732GjCHaFnoQKBgErf\nrtVrBe+tDFamMohutyY/0pCygLe/qMa7u16Mt8C1btGB56BI3MZbrqMqD5oaoTnK\n1fU02Fh0wogsmEYEXNYyMJvpj9FDLQzXIYn2xoQ+1+nyDM4GR6MpKWGfjZiuuPXp\nkTx3W59x3zQMxV8gGtWjLFjD0wG0wButTUXrhSRZAoGAEbQ1JKbbbeyqJTrq+eWf\nIge68hfVqa4RTiJGxyXOB81jUU10Bl4YvgFYVeHbihybo/2eWMpEnqq2sO93Ya+0\nIE8qMLlW8TvGa2HYLFViL147WTXqSQuAYaHA+qpGZCUvyprUYuTZcKYXknuitStw\ntAAXRk8mgBsZ2ZijcCjs9tw=\n-----END PRIVATE KEY-----\n",
+  "client_email": "stock-sync@e-caldron-484313-m4.iam.gserviceaccount.com",
+  "client_id": "102814937011014623469",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/stock-sync%40e-caldron-484313-m4.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
