@@ -5,10 +5,22 @@ from FinMind.data import DataLoader
 from ta.momentum import RSIIndicator
 
 # ==========================================
-# 1. 環境設定
+# 1. 環境設定與名稱對照初始化
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
+
+def get_stock_name_map():
+    """從 FinMind 獲取全市場中文名稱對照表"""
+    try:
+        dl = DataLoader()
+        df = dl.taiwan_stock_info()
+        return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
+    except:
+        return {}
+
+# 預先載入對照表，避免在迴圈中重複請求
+STOCK_NAME_MAP = get_stock_name_map()
 
 def sync_to_sheets(data_list):
     """同步至 Google Sheets: 個股深度診斷"""
@@ -31,13 +43,12 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼與量能邏輯 (結構化返回)
+# 2. 籌碼與量能邏輯
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
     try:
         dl = DataLoader()
-        # 法人
         start_d = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
         df_i = dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start_d)
         if df_i is not None and not df_i.empty:
@@ -50,7 +61,6 @@ def get_detailed_chips(sid_clean):
                 return c
             chips["fs"], chips["ss"] = count_s('Foreign_Investor'), count_s('Investment_Trust')
         
-        # 大戶
         start_w = (datetime.date.today() - datetime.timedelta(days=20)).strftime('%Y-%m-%d')
         df_h = dl.taiwan_stock_holding_shares_per(stock_id=sid_clean, start_date=start_w)
         if df_h is not None and not df_h.empty:
@@ -60,9 +70,9 @@ def get_detailed_chips(sid_clean):
 
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
-        h = yf.Ticker(ticker).history(period="5d")
+        h = yf.Ticker(ticker).history(period="10d")
         if len(h) >= 3:
-            v_today, v_avg = h['Volume'].iloc[-1], h['Volume'].iloc[:-1].mean()
+            v_today, v_avg = h['Volume'].iloc[-1], h['Volume'].iloc[-6:-1].mean()
             chips["v_ratio"] = v_today / v_avg if v_avg > 0 else 0
             chips["v_status"] = "🔥爆量" if chips["v_ratio"] > 2.0 else "☁️量平"
     except: pass
@@ -76,8 +86,11 @@ def run_diagnostic(sid):
         clean_id = str(sid).split('.')[0].strip()
         stock_ticker = f"{clean_id}.TW" if int(clean_id) < 9000 else f"{clean_id}.TWO"
         stock = yf.Ticker(stock_ticker)
-        info, df = stock.history(period="1y"), stock.history(period="1y")
+        df = stock.history(period="1y")
         if df.empty: return None, None
+        
+        # 獲取中文名稱 (優先使用對照表)
+        ch_name = STOCK_NAME_MAP.get(clean_id, stock.info.get('shortName', '未知標的'))
         
         curr_p = df.iloc[-1]['Close']
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
@@ -92,7 +105,7 @@ def run_diagnostic(sid):
         tip = "⚠️高檔防回" if bias > 15 else "✅位階安全"
 
         line_msg = (
-            f"=== {clean_id} {stock.info.get('shortName', '標的')} ===\n"
+            f"=== {clean_id} {ch_name} ===\n"
             f"現價：{curr_p:.2f} | RSI：{rsi:.1f}\n"
             f"法人：外{c['fs']}d 投{c['ss']}d | 大戶:{c['big']:.1f}%\n"
             f"量能：{c['v_status']}({c['v_ratio']:.1f}x)\n"
@@ -101,7 +114,7 @@ def run_diagnostic(sid):
         )
 
         sheet_row = [
-            str(datetime.date.today()), clean_id, stock.info.get('shortName'), 
+            str(datetime.date.today()), clean_id, ch_name, 
             curr_p, round(rsi, 1), eps, pe, round(margin, 1), 
             c['fs'], c['ss'], round(c['big'], 1), f"{c['v_status']}({c['v_ratio']:.1f}x)",
             trend, round(bias, 1), tip
