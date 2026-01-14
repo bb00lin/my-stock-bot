@@ -6,9 +6,8 @@ on:
     - cron: '10 8 * * 1-5' # 台北 16:10
   workflow_dispatch: 
 
-# 賦予寫入權限以便自動 Commit 報告
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   run_job:
@@ -22,10 +21,12 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install System Dependencies
+      - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install tqdm requests pandas yfinance FinMind ta scikit-learn
+          pip install tqdm requests pandas yfinance FinMind gspread oauth2client
+
+      - name: Create Key File
+        run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
 
       - name: Run DailyStockPush
         env:
@@ -33,23 +34,6 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python DailyStockPush.py
 
-      - name: 歷史回溯 - 自動 Commit 報告回 Repo
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          # 抓取所有每日報告
-          git add report_*.txt latest_report.txt
-          if git diff --staged --quiet; then
-            echo "今日報告無變動，跳過提交。"
-          else
-            git commit -m "📝 更新每日診斷報告: $(date +'%Y-%m-%d')"
-            git push origin main
-          fi
-
-      - name: 雲端存檔備份 - Upload Artifact
+      - name: Cleanup Key
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Daily-Stock-Report-${{ github.run_id }}
-          path: report_*.txt
-          retention-days: 7
+        run: rm -f google_key.json
