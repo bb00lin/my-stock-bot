@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read # 只需要讀取權限即可
 
 jobs:
   analyze:
@@ -34,16 +34,6 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: python DailyStockBot.py
 
-      - name: 6. 自動 Commit 報告
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          # 移除 google_key.json 以免被上傳到公開倉庫（安全性考量）
-          rm -f google_key.json
-          git add scan_report_*.txt latest_scan.txt || true
-          if git diff --staged --quiet; then
-            echo "今日無變動"
-          else
-            git commit -m "📝 每日掃描存檔: $(date +'%Y-%m-%d')"
-            git push
-          fi
+      - name: 6. 清理金鑰
+        if: always() # 無論分析成功或失敗都執行清理，確保安全性
+        run: rm -f google_key.json
