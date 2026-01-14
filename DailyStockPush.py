@@ -18,11 +18,11 @@ def sync_to_sheets(data_list):
         creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
         client = gspread.authorize(creds)
         sheet = client.open("全能金流診斷報表").get_worksheet(0)
-        # 使用 USER_ENTERED 確保字串格式（如 +2.50%）能被正確放入儲存格
+        # 使用 USER_ENTERED 讓 Sheets 自動解析純數字
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆診斷數據至 Google Sheets")
     except Exception as e:
-        print(f"⚠️ Google Sheets 同步失敗: {e}")
+        print(f"⚠️ Google Sheets 同備失敗: {e}")
 
 def get_global_stock_info():
     try:
@@ -71,30 +71,27 @@ def fetch_pro_metrics(sid):
 
         rsi_series = calculate_rsi(df_hist['Close'])
         curr_rsi = rsi_series.iloc[-1]
-        # 處理 RSI NaN 狀況
         clean_rsi = 0.0 if pd.isna(curr_rsi) else round(curr_rsi, 1)
         rsi_status = "⚠️過熱" if clean_rsi > 75 else ("🟢穩健" if clean_rsi < 35 else "中性")
 
-        # 殖利率處理
+        # 殖利率 (傳出原始小數，與您的需求一致)
         raw_yield = info.get('dividendYield')
         dividend_yield_val = float(raw_yield) if raw_yield is not None else 0.0
-        score_yield = dividend_yield_val * 100
 
         this_q_m = (info.get('profitMargins', 0) or 0) * 100
         inst_own = (info.get('heldPercentInstitutions', 0) or 0) * 100
         
-        # --- 1D 漲幅關鍵修復 ---
-        d1 = ((curr_p / df_hist['Close'].iloc[-2]) - 1) * 100
-        d1_str = f"{d1:+.2f}%"  # 強制生成帶正負號、兩位小數的百分比字串
+        # --- 1D 漲幅優化：改為純數字小數 (與殖利率欄位內容邏輯一致) ---
+        d1_raw = (curr_p / df_hist['Close'].iloc[-2]) - 1
         
-        chip_status = "🔴加碼" if d1 > 0 and inst_own > 30 else "🟢觀望"
+        chip_status = "🔴加碼" if d1_raw > 0 and inst_own > 30 else "🟢觀望"
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
 
-        # 計分邏輯
+        # 計分邏輯 (計分時需轉換回百分比判斷)
         score = 0
         if this_q_m > 0: score += 2
         if curr_p > df_hist['Close'].iloc[0]: score += 3
-        if 3.0 < score_yield < 15.0: score += 2
+        if 0.03 < dividend_yield_val < 0.15: score += 2
         if 40 < clean_rsi < 70: score += 1
         if today_amount > 10: score += 1
         if vol_ratio > 1.5: score += 1
@@ -108,7 +105,7 @@ def fetch_pro_metrics(sid):
             "yield": dividend_yield_val, 
             "chip": chip_status, "vol_r": round(vol_ratio, 1),
             "amt_t": round(today_amount, 1), "p": round(curr_p, 1), 
-            "d1_str": d1_str
+            "d1": d1_raw # 傳出純數字小數
         }
     except: return None
 
@@ -125,15 +122,15 @@ def main():
         res = fetch_pro_metrics(sid)
         if res:
             results_line.append(res)
-            # 寫入 Sheet 資料：統一使用 res['d1_str'] 百分比字串
+            # 準備寫入 Sheet 的資料：1D 漲幅現在是純數字
             results_sheet.append([
                 current_date, res['id'], res['name'], res['score'], 
                 res['rsi'], res['industry'], res['chip'], res['vol_r'], 
-                res['p'], res['yield'], res['amt_t'], res['d1_str']
+                res['p'], res['yield'], res['amt_t'], res['d1']
             ])
         time.sleep(0.5) 
     
-    # 排序並推送 LINE
+    # LINE 推送 (訊息中仍保持百分比字串方便閱讀)
     results_line.sort(key=lambda x: x['score'], reverse=True)
     if results_line:
         msg = f"🏆 【{current_date} 全能金流診斷】\n"
@@ -142,7 +139,7 @@ def main():
             msg += (f"━━━━━━━━━━━━━━\n"
                     f"{gem}Score: {r['score']} | RSI: {r['rsi']}({r['rsi_s']})\n"
                     f"標的: {r['id']} {r['name']}\n"
-                    f"現價: {r['p']} | 漲幅: {r['d1_str']}\n"
+                    f"現價: {r['p']} | 漲幅: {r['d1']*100:+.2f}%\n"
                     f"金流: {r['amt_t']}億 | 量比: {r['vol_r']}\n")
         
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
