@@ -18,10 +18,11 @@ def sync_to_sheets(data_list):
         creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
         client = gspread.authorize(creds)
         sheet = client.open("全能金流診斷報表").get_worksheet(0)
-        sheet.append_rows(data_list, value_input_option='USER_ENTERED') # 使用 USER_ENTERED 確保數值格式正確
+        # 關鍵：加入 value_input_option='USER_ENTERED' 確保 Sheets 自動識別格式
+        sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆診斷數據至 Google Sheets")
     except Exception as e:
-        print(f"⚠️ Google Sheets 同步失敗: {e}")
+        print(f"⚠️ Google Sheets 同備失敗: {e}")
 
 def get_global_stock_info():
     try:
@@ -39,6 +40,7 @@ def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    if loss.iloc[-1] == 0: return pd.Series([100.0] * len(series))
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
@@ -68,31 +70,28 @@ def fetch_pro_metrics(sid):
 
         rsi_series = calculate_rsi(df_hist['Close'])
         curr_rsi = rsi_series.iloc[-1]
-        # 處理 RSI 為 NaN 的情況
-        display_rsi = 0.0 if pd.isna(curr_rsi) else round(curr_rsi, 1)
-        rsi_status = "⚠️過熱" if display_rsi > 75 else ("🟢穩健" if display_rsi < 35 else "中性")
+        # 處理 RSI NaN 狀況
+        clean_rsi = 0.0 if pd.isna(curr_rsi) else round(curr_rsi, 1)
+        rsi_status = "⚠️過熱" if clean_rsi > 75 else ("🟢穩健" if clean_rsi < 35 else "中性")
 
-        # --- 殖利率修正邏輯 ---
-        # yfinance 的 dividendYield 可能是 0.05 (代表 5%)
+        # --- 殖利率優化邏輯 ---
         raw_yield = info.get('dividendYield')
-        if raw_yield is None:
-            dividend_yield = 0.0
-        else:
-            dividend_yield = float(raw_yield) * 100 # 轉為 5.5 這種格式
+        dividend_yield_val = float(raw_yield) if raw_yield is not None else 0.0
+        # 計分時使用百分比判斷 (3% ~ 15%)
+        score_yield = dividend_yield_val * 100
 
         this_q_m = (info.get('profitMargins', 0) or 0) * 100
         inst_own = (info.get('heldPercentInstitutions', 0) or 0) * 100
-        
         d1 = ((curr_p / df_hist['Close'].iloc[-2]) - 1) * 100
-        chip_status = "🔴加碼" if d1 > 0 and inst_own > 30 else "● 觀望"
+        chip_status = "🔴加碼" if d1 > 0 and inst_own > 30 else "🟢觀望"
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
 
         # 計分邏輯
         score = 0
         if this_q_m > 0: score += 2
         if curr_p > df_hist['Close'].iloc[0]: score += 3
-        if 3.0 < dividend_yield < 15.0: score += 2
-        if 40 < display_rsi < 70: score += 1
+        if 3.0 < score_yield < 15.0: score += 2
+        if 40 < clean_rsi < 70: score += 1
         if today_amount > 10: score += 1
         if vol_ratio > 1.5: score += 1
 
@@ -101,10 +100,10 @@ def fetch_pro_metrics(sid):
         return {
             "score": score, "name": stock_name, "industry": industry,
             "id": f"{sid}{'市' if '.TW' in full_id else '櫃'}",
-            "rsi": display_rsi, "rsi_s": rsi_status, 
-            "yield": round(dividend_yield, 2), # 存數值，不帶 % 符號
+            "rsi": clean_rsi, "rsi_s": rsi_status, 
+            "yield": dividend_yield_val, # 傳出原始小數 (如 0.055)
             "chip": chip_status, "vol_r": round(vol_ratio, 1),
-            "amt_t": round(today_amount, 1), "p": round(curr_p, 1), "d1": f"{d1:+.1f}%"
+            "amt_t": round(today_amount, 1), "p": round(curr_p, 1), "d1": d1
         }
     except: return None
 
@@ -121,24 +120,24 @@ def main():
         res = fetch_pro_metrics(sid)
         if res:
             results_line.append(res)
-            # 準備寫入 Sheet 的資料 (調整順序與格式)
+            # 傳入 Sheet 的格式化
             results_sheet.append([
                 current_date, res['id'], res['name'], res['score'], 
                 res['rsi'], res['industry'], res['chip'], res['vol_r'], 
-                res['p'], res['yield'], res['amt_t'], res['d1']
+                res['p'], res['yield'], res['amt_t'], f"{res['d1']:+.1f}%"
             ])
-        time.sleep(1) # 增加延遲避免被 yfinance 鎖定
+        time.sleep(0.5) 
     
     # 排序並推送 LINE
     results_line.sort(key=lambda x: x['score'], reverse=True)
     if results_line:
-        msg = f"🏆 【{current_date} 金流報表】\n"
+        msg = f"🏆 【{current_date} 全能金流診斷】\n"
         for r in results_line:
-            gem = "💎 " if r['score'] >= 8 else ""
+            gem = "💎 " if r['score'] >= 9 else ""
             msg += (f"━━━━━━━━━━━━━━\n"
-                    f"{gem}Score: {r['score']} | RSI: {r['rsi']}\n"
+                    f"{gem}Score: {r['score']} | RSI: {r['rsi']}({r['rsi_s']})\n"
                     f"標的: {r['id']} {r['name']}\n"
-                    f"現價: {r['p']} | 殖利率: {r['yield']}%\n"
+                    f"現價: {r['p']} | 殖利率: {r['yield']*100:.2f}%\n"
                     f"金流: {r['amt_t']}億 | 量比: {r['vol_r']}\n")
         
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
