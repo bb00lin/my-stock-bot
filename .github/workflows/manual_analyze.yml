@@ -34,6 +34,7 @@ jobs:
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python ManualStock.py "${{ github.event.inputs.stock_list }}"
 
       - name: 6. 清理金鑰
