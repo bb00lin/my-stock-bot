@@ -3,7 +3,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from ta.momentum import RSIIndicator
 
-# 刪除原本貼上的那一長串，改回這幾行
 # ==========================================
 # 1. 環境設定
 # ==========================================
@@ -82,7 +81,7 @@ def get_detailed_chips(sid_clean):
                 return c
             chips["fs"], chips["ss"] = count_buy_streak('Foreign_Investor'), count_buy_streak('Investment_Trust')
         
-        # 大戶持股 (回溯 60 天)
+        # 大戶持股 (回溯 60 天，強化級別判定)
         start_w = (datetime.date.today() - datetime.timedelta(days=60)).strftime('%Y-%m-%d')
         df_h = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_w)
         
@@ -91,9 +90,11 @@ def get_detailed_chips(sid_clean):
             df_latest = df_h[df_h['date'] == latest_date].copy()
             df_latest['level_str'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
             
-            mask = df_latest['level_str'].str.contains('400|600|800|1000|以上')
+            # 定義大戶標準：包含 '400張' 以上文字，或是 11~15 級 (API 數字代表大戶)
+            mask = df_latest['level_str'].str.contains('400|600|800|1000|以上|11|12|13|14|15')
             big_val = df_latest[mask]['percent'].sum()
             
+            # 備援機制：如果匹配失敗，則抓取最後 5 筆級別的總和
             if big_val == 0:
                 big_val = df_latest.sort_values('hold_shares_level').tail(5)['percent'].sum()
             
@@ -132,7 +133,7 @@ def run_diagnostic(sid):
         
         info = stock.info
         eps = info.get('trailingEps', 0) or 0
-        margin = (info.get('grossMargins', 0) or 0) * 100
+        margin = round((info.get('grossMargins', 0) or 0) * 100, 1)
         pe = info.get('trailingPE', 0) or "N/A"
         
         c = get_detailed_chips(clean_id)
@@ -149,7 +150,7 @@ def run_diagnostic(sid):
 
         sheet_row = [
             str(datetime.date.today()), clean_id, ch_name, 
-            curr_p, rsi, eps, pe, round(margin, 1), 
+            curr_p, rsi, eps, pe, margin, 
             c['fs'], c['ss'], c['big'], f"{c['v_status']}({c['v_ratio']}x)",
             "🔥多頭" if curr_p > ma60 else "☁️空頭", bias, 
             "⚠️高檔防回" if bias > 15 else "✅位階安全"
