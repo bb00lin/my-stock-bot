@@ -1,5 +1,7 @@
 import os, yfinance as yf, pandas as pd, requests, time, datetime
 import numpy as np
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
 # ==========================================
@@ -15,6 +17,23 @@ def send_line(msg):
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg}]}
     try: requests.post(url, headers=headers, json=payload)
     except: pass
+
+def sync_to_sheets(data_list):
+    """將結果寫入 Google Sheets"""
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        # 這裡會讀取還原出來的 google_key.json
+        creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
+        client = gspread.authorize(creds)
+        
+        # 開啟試算表 (請確保名稱完全一致)
+        sheet = client.open("法人精選監測").get_worksheet(0)
+        
+        # 批量寫入數據以提高效率
+        sheet.append_rows(data_list)
+        print(f"✅ 成功同步 {len(data_list)} 筆數據至 Google Sheets")
+    except Exception as e:
+        print(f"⚠️ Google Sheets 同步失敗: {e}")
 
 def get_streak_only(sid_clean):
     """獲取法人連買天數"""
@@ -49,22 +68,22 @@ def calculate_indicators(df):
     
     # 計算 KD (9, 3, 3)
     rsv = (close - low_min) / (high_max - low_min) * 100
-    k = rsv.ewm(com=2).mean() # 類似傳統 DEMA 平滑
+    k = rsv.ewm(com=2).mean() 
     d = k.ewm(com=2).mean()
     
     return rsi, k, d
 
-def analyze_v12(ticker, name):
-    """核心篩選邏輯 - 1000檔 | 重複過濾 | KD & RSI & 乖離 & 量能"""
+def analyze_v13(ticker, name):
+    """核心篩選邏輯 - 回傳 LINE 訊息與 Sheet 結構化數據"""
     try:
         s = yf.Ticker(ticker)
         i = s.info
         m = i.get('grossMargins', 0) or 0
         e = i.get('trailingEps', 0) or 0
-        if m < 0.10 or e <= 0: return None
+        if m < 0.10 or e <= 0: return None, None
 
         df = s.history(period="1y")
-        if len(df) < 60: return None
+        if len(df) < 60: return None, None
         
         cp = df.iloc[-1]['Close']
         ma5 = df['Close'].rolling(5).mean().iloc[-1]
@@ -74,7 +93,6 @@ def analyze_v12(ticker, name):
         rsi_series, k_series, d_series = calculate_indicators(df)
         rsi_val = rsi_series.iloc[-1]
         k_val = k_series.iloc[-1]
-        d_val = d_series.iloc[-1]
         
         # 2. 量能診斷
         vol_today = df.iloc[-1]['Volume']
@@ -86,35 +104,48 @@ def analyze_v12(ticker, name):
         bias_5 = ((cp - ma5) / ma5) * 100
         kd_status = "高檔" if k_val > 80 else ("低檔" if k_val < 20 else "穩定")
         
+        status_label = "✅安全"
         if bias_5 > 7 or rsi_val > 75 or k_val > 85:
-            status_msg = f"⚠️過熱(乖離{bias_5:.1f}%|RSI:{rsi_val:.0f}|K:{k_val:.0f})"
-        else:
-            status_msg = f"✅安全(乖離{bias_5:.1f}%|RSI:{rsi_val:.0f}|K:{k_val:.0f})"
+            status_label = "⚠️過熱"
+        
+        status_msg = f"{status_label}(乖離{bias_5:.1f}%|RSI:{rsi_val:.0f}|K:{k_val:.0f})"
 
         # 4. 籌碼篩選
         fs, ss = get_streak_only(ticker.split('.')[0])
         
         if (fs >= 2 or ss >= 1) and cp > ma60 and vol_ratio > 1.1:
             type_tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
-            return (f"📍{ticker} {name} ({type_tag})\n"
-                    f"法人：外資{fs}d | 投信{ss}d\n"
-                    f"量比：{vol_tag}\n"
-                    f"狀態：{status_msg} [{kd_status}]\n"
-                    f"現價：{cp:.2f}\n"
-                    f"-----------------------------------")
-    except: return None
+            
+            # 回傳 LINE 用的文字
+            line_txt = (f"📍{ticker} {name} ({type_tag})\n"
+                        f"法人：外資{fs}d | 投信{ss}d\n"
+                        f"量比：{vol_tag}\n"
+                        f"狀態：{status_msg} [{kd_status}]\n"
+                        f"現價：{cp:.2f}\n"
+                        f"-----------------------------------")
+            
+            # 回傳 Sheet 用的陣列 (日期, 代碼, 名稱, 標籤, 外資, 投信, 量比, 狀態, RSI, K值, 現價)
+            sheet_data = [
+                str(datetime.date.today()), ticker, name, type_tag, 
+                fs, ss, round(vol_ratio, 2), status_label, 
+                round(rsi_val, 1), round(k_val, 1), cp
+            ]
+            
+            return line_txt, sheet_data
+    except: return None, None
+    return None, None
 
 def main():
     dl = DataLoader()
     stock_df = dl.taiwan_stock_info()
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
     
-    # 擴大掃描至前 1000 檔
     targets = stock_df[stock_df['stock_id'].str.len() == 4].head(1000) 
     
-    results = []
+    line_results = []
+    sheet_results = []
     seen_ids = set()
-    print(f"啟動旗艦級掃描 (1000檔)... 預計耗時 25 分鐘")
+    print(f"啟動旗艦級同步版掃描 (1000檔)... 預計耗時 25 分鐘")
     
     for _, row in targets.iterrows():
         sid = row['stock_id']
@@ -127,12 +158,19 @@ def main():
             suffix = ".TWO" if int(sid) >= 8000 else ".TW"
             
         t = f"{sid}{suffix}"
-        res = analyze_v12(t, row['stock_name'])
-        if res: results.append(res)
+        l_res, s_res = analyze_v13(t, row['stock_name'])
+        if l_res:
+            line_results.append(l_res)
+            sheet_results.append(s_res)
         time.sleep(0.4)
 
-    if results:
-        msg = f"🔍 【{datetime.date.today()} 法人精選(1000檔規模)】\n\n" + "\n".join(results)
+    # 執行 Google Sheets 同步
+    if sheet_results:
+        sync_to_sheets(sheet_results)
+
+    # 執行 LINE 通知與本機存檔
+    if line_results:
+        msg = f"🔍 【{datetime.date.today()} 法人精選(1000檔規模)】\n\n" + "\n".join(line_results)
         send_line(msg)
         with open("latest_scan.txt", "w", encoding="utf-8") as f: f.write(msg)
     else:
