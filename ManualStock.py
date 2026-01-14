@@ -22,18 +22,14 @@ def get_finmind_data(dataset, stock_id, start_date):
         res = requests.get(url, params=params, timeout=15)
         res_json = res.json()
         data = res_json.get("data", [])
-        if not data:
-            # 偵錯用：如果沒資料，印出 API 給出的訊息
-            msg = res_json.get("msg", "No message")
-            print(f"ℹ️ [{stock_id}] {dataset} 無數據. 原因: {msg}")
-        return pd.DataFrame(data)
+        return pd.DataFrame(data), res_json.get("msg", "")
     except Exception as e:
         print(f"❌ API 請求失敗: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), str(e)
 
 def get_stock_name_map():
     try:
-        df = get_finmind_data("TaiwanStockInfo", "", "2025-01-01")
+        df, _ = get_finmind_data("TaiwanStockInfo", "", "2025-01-01")
         if not df.empty and 'stock_id' in df.columns:
             return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
         return {}
@@ -61,14 +57,14 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼邏輯 (強化版：解決大戶空值問題)
+# 2. 籌碼邏輯 (具備自動權限備援)
 # ==========================================
 def get_detailed_chips(sid_clean):
-    chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
+    chips = {"fs": 0, "ss": 0, "chip_val": "N/A", "chip_name": "大戶%", "v_ratio": 0.0, "v_status": "未知"}
     try:
-        # --- 1. 法人買賣超 ---
+        # --- 1. 法人買賣超 (30天) ---
         start_d = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
-        df_i = get_finmind_data("TaiwanStockInstitutionalInvestorsBuySell", sid_clean, start_d)
+        df_i, _ = get_finmind_data("TaiwanStockInstitutionalInvestorsBuySell", sid_clean, start_d)
         if not df_i.empty:
             def streak(name):
                 d = df_i[df_i['name'] == name].sort_values('date', ascending=False)
@@ -79,41 +75,37 @@ def get_detailed_chips(sid_clean):
                 return c
             chips["fs"], chips["ss"] = streak('Foreign_Investor'), streak('Investment_Trust')
 
-        # --- 2. 大戶持股 (核心修正：不限制起點日期) ---
-        # 改為回溯 90 天，確保至少能抓到最新的週資料
-        start_w = (datetime.date.today() - datetime.timedelta(days=90)).strftime('%Y-%m-%d')
-        df_h = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_w)
+        # --- 2. 大戶持股 (嘗試抓取) ---
+        df_h, msg = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_d)
         
-        # 備援：如果 90 天沒資料，嘗試抓取「該資料集」最後一筆資料
-        if df_h.empty:
-            df_h = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, "2024-01-01")
-
-        if not df_h.empty:
+        if "Please update your user level" in msg:
+            # 💡 備援機制：權限不足時改抓「融資增減」
+            df_m, _ = get_finmind_data("TaiwanStockMarginPurchaseEvid", sid_clean, start_d)
+            if not df_m.empty:
+                df_m = df_m.sort_values('date')
+                m_diff = int(df_m.iloc[-1]['MarginPurchaseBuy']) - int(df_m.iloc[-1]['MarginPurchaseSell'])
+                chips["chip_val"] = f"{'+' if m_diff > 0 else ''}{m_diff}張"
+                chips["chip_name"] = "融資增減"
+                print(f"ℹ️ [{sid_clean}] 權限限制，自動切換至融資指標: {chips['chip_val']}")
+        elif not df_h.empty:
             latest_date = df_h['date'].max()
             df_latest = df_h[df_h['date'] == latest_date].copy()
             df_latest['lvl'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
-            
-            # 匹配大戶級別 (11級=400張以上, 15級=1000張以上)
             mask = df_latest['lvl'].str.contains('400|600|800|1000|以上|11|12|13|14|15')
-            big_val = df_latest[mask]['percent'].sum()
-            
-            if big_val == 0: # 另一種 API 格式可能出現在尾端
-                big_val = df_latest.sort_values('hold_shares_level').tail(5)['percent'].sum()
-            
-            chips["big"] = round(float(big_val), 1)
-            print(f"📊 [{sid_clean}] 成功獲取大戶數據: {chips['big']}% ({latest_date})")
-                
+            chips["chip_val"] = f"{round(float(df_latest[mask]['percent'].sum()), 1)}%"
+            chips["chip_name"] = "大戶%"
+            print(f"📊 [{sid_clean}] 成功獲取大戶數據: {chips['chip_val']}")
+
     except Exception as e:
-        print(f"❌ 籌碼解析異常 ({sid_clean}): {e}")
+        print(f"❌ 籌碼解析異常: {e}")
 
     # --- 3. 量能計算 ---
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
         h = yf.Ticker(ticker).history(period="10d")
-        if len(h) >= 3:
-            v_today, v_avg = h['Volume'].iloc[-1], h['Volume'].iloc[-6:-1].mean()
-            chips["v_ratio"] = round(v_today / v_avg, 1) if v_avg > 0 else 0
-            chips["v_status"] = "🔥爆量" if chips["v_ratio"] > 1.8 else "☁️量平"
+        v_today, v_avg = h['Volume'].iloc[-1], h['Volume'].iloc[-6:-1].mean()
+        chips["v_ratio"] = round(v_today / v_avg, 1) if v_avg > 0 else 0
+        chips["v_status"] = "🔥爆量" if chips["v_ratio"] > 1.8 else "☁️量平"
     except: pass
     return chips
 
@@ -141,7 +133,8 @@ def run_diagnostic(sid):
         line_msg = (
             f"=== {clean_id} {ch_name} ===\n"
             f"現價：{curr_p} | RSI：{rsi}\n"
-            f"法人：外{c['fs']}d 投{c['ss']}d | 大戶:{c['big']}%\n"
+            f"法人：外{c['fs']}d 投{c['ss']}d\n"
+            f"{c['chip_name']}：{c['chip_val']}\n"
             f"量能：{c['v_status']}({c['v_ratio']}x)\n"
             f"趨勢：{'🔥多頭' if curr_p > ma60 else '☁️空頭'}(乖離{bias:+.1f}%)\n"
             f"提示：{'⚠️高檔防回' if bias > 15 else '✅位階安全'}"
@@ -150,7 +143,7 @@ def run_diagnostic(sid):
         sheet_row = [
             str(datetime.date.today()), clean_id, ch_name, 
             curr_p, rsi, eps, pe, margin, 
-            c['fs'], c['ss'], c['big'], f"{c['v_status']}({c['v_ratio']}x)",
+            c['fs'], c['ss'], c['chip_val'], f"{c['v_status']}({c['v_ratio']}x)",
             "🔥多頭" if curr_p > ma60 else "☁️空頭", bias, 
             "⚠️高檔防回" if bias > 15 else "✅位階安全"
         ]
