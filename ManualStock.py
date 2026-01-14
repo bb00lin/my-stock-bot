@@ -7,9 +7,12 @@ from ta.momentum import RSIIndicator
 # 1. 環境設定
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-# 若您有 FinMind Token 請設定在 GitHub Secrets，否則使用匿名限制
-FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMS0xNCAyMzoxMTo0MSIsInVzZXJfaWQiOiJiYjAwbGlubiIsImVtYWlsIjoiYmIwMGxpbkBnbWFpbC5jb20iLCJpcCI6IjExOC4xNTAuMTIwLjcyIn0.Yp8X-_bkA9j6y3pSJJjHposfxSm0MvtnLkhtlABpQxQ
-") 
+# 優先從 Secrets 讀取，若無則使用你提供的備用 Token
+FINMIND_TOKEN = os.getenv("FINMIND_TOKEN") or (
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMS0xNCAyMzoxMTo0MSIsInVz"
+    "ZXJfaWQiOiJiYjAwbGlubiIsImVtYWlsIjoiYmIwMGxpbkBnbWFpbC5jb20iLCJpcCI6IjExOC4xNTAuMTIwLjcyIn0."
+    "Yp8X-_bkA9j6y3pSJJjHposfxSm0MvtnLkhtlABpQxQ"
+)
 LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
 
 def get_finmind_data(dataset, stock_id, start_date):
@@ -34,7 +37,6 @@ def get_finmind_data(dataset, stock_id, start_date):
 
 def get_stock_name_map():
     try:
-        # 獲取名稱對照表
         df = get_finmind_data("TaiwanStockInfo", "", "")
         if not df.empty and 'stock_id' in df.columns:
             return {str(row['stock_id']): row['stock_name'] for _, row in df.iterrows()}
@@ -49,7 +51,8 @@ def sync_to_sheets(data_list):
         creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
         client = gspread.authorize(creds)
         sheet = client.open("個股深度診斷").get_worksheet(0)
-        sheet.append_rows(data_list)
+        # 使用 USER_ENTERED 確保試算表能自動辨識數字格式
+        sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆診斷結果至雲端")
     except Exception as e:
         print(f"⚠️ Google Sheets 同步失敗: {e}")
@@ -63,12 +66,12 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼邏輯 (強化日期回溯與數據匹配)
+# 2. 籌碼邏輯
 # ==========================================
 def get_detailed_chips(sid_clean):
     chips = {"fs": 0, "ss": 0, "big": 0.0, "v_ratio": 0.0, "v_status": "未知"}
     try:
-        # --- 1. 法人連買 (回溯 40 天) ---
+        # 法人連買 (回溯 40 天)
         start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
         df_i = get_finmind_data("TaiwanStockInstitutionalInvestorsBuySell", sid_clean, start_d)
         
@@ -83,21 +86,18 @@ def get_detailed_chips(sid_clean):
                 return c
             chips["fs"], chips["ss"] = count_buy_streak('Foreign_Investor'), count_buy_streak('Investment_Trust')
         
-        # --- 2. 大戶持股 (強化回溯 60 天，確保集保數據不漏抓) ---
+        # 大戶持股 (回溯 60 天)
         start_w = (datetime.date.today() - datetime.timedelta(days=60)).strftime('%Y-%m-%d')
         df_h = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_w)
         
         if not df_h.empty and 'hold_shares_level' in df_h.columns:
             latest_date = df_h['date'].max()
             df_latest = df_h[df_h['date'] == latest_date].copy()
-            # 強制清理所有格式
             df_latest['level_str'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
             
-            # 匹配 400 張以上 (涵蓋所有大戶級別)
             mask = df_latest['level_str'].str.contains('400|600|800|1000|以上')
             big_val = df_latest[mask]['percent'].sum()
             
-            # 如果還是 0，則抓取該股「持股級別」最後 5 筆直接相加 (因為級別是從小排到大)
             if big_val == 0:
                 big_val = df_latest.sort_values('hold_shares_level').tail(5)['percent'].sum()
             
@@ -107,7 +107,7 @@ def get_detailed_chips(sid_clean):
     except Exception as e:
         print(f"❌ 籌碼解析異常 ({sid_clean}): {e}")
 
-    # --- 3. 量能計算 ---
+    # 量能計算
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
         h = yf.Ticker(ticker).history(period="10d")
@@ -130,9 +130,9 @@ def run_diagnostic(sid):
         if df.empty: return None, None
         
         ch_name = STOCK_NAME_MAP.get(clean_id, stock.info.get('shortName', '未知'))
-        curr_p = df.iloc[-1]['Close']
+        curr_p = round(df.iloc[-1]['Close'], 2)
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
-        rsi = RSIIndicator(df['Close']).rsi().iloc[-1]
+        rsi = round(RSIIndicator(df['Close']).rsi().iloc[-1], 1)
         
         info = stock.info
         eps = info.get('trailingEps', 0) or 0
@@ -140,12 +140,12 @@ def run_diagnostic(sid):
         pe = info.get('trailingPE', 0) or "N/A"
         
         c = get_detailed_chips(clean_id)
+        bias = round(((curr_p-ma60)/ma60)*100, 1)
         
-        bias = ((curr_p-ma60)/ma60)*100
         line_msg = (
             f"=== {clean_id} {ch_name} ===\n"
-            f"現價：{curr_p:.2f} | RSI：{rsi:.1f}\n"
-            f"法人：外{c['fs']}d 投{c['ss']}d | 大戶:{c['big']:.1f}%\n"
+            f"現價：{curr_p} | RSI：{rsi}\n"
+            f"法人：外{c['fs']}d 投{c['ss']}d | 大戶:{c['big']}%\n"
             f"量能：{c['v_status']}({c['v_ratio']}x)\n"
             f"趨勢：{'🔥多頭' if curr_p > ma60 else '☁️空頭'}(乖離{bias:+.1f}%)\n"
             f"提示：{'⚠️高檔防回' if bias > 15 else '✅位階安全'}"
@@ -153,9 +153,9 @@ def run_diagnostic(sid):
 
         sheet_row = [
             str(datetime.date.today()), clean_id, ch_name, 
-            curr_p, round(rsi, 1), eps, pe, round(margin, 1), 
+            curr_p, rsi, eps, pe, round(margin, 1), 
             c['fs'], c['ss'], c['big'], f"{c['v_status']}({c['v_ratio']}x)",
-            "🔥多頭" if curr_p > ma60 else "☁️空頭", round(bias, 1), 
+            "🔥多頭" if curr_p > ma60 else "☁️空頭", bias, 
             "⚠️高檔防回" if bias > 15 else "✅位階安全"
         ]
         return line_msg, sheet_row
