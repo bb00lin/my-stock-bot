@@ -65,7 +65,7 @@ def get_detailed_chips(sid_clean):
     try:
         start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
         
-        # --- 1. 法人買賣超 (核心指標) ---
+        # --- 1. 法人買賣超 (基礎指標) ---
         df_i, _ = get_finmind_data("TaiwanStockInstitutionalInvestorsBuySell", sid_clean, start_d)
         if not df_i.empty:
             def streak(name):
@@ -78,10 +78,11 @@ def get_detailed_chips(sid_clean):
                 return c
             chips["fs"], chips["ss"] = streak('Foreign_Investor'), streak('Investment_Trust')
 
-        # --- 2. 籌碼價值判斷 (大戶 -> 融資 -> 備援) ---
+        # --- 2. 籌碼價值判斷 (大戶 -> 融資 -> 法人) ---
         df_h, msg = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_d)
         
         if not df_h.empty and "update your user level" not in msg:
+            # 優先權 1: 大戶持股
             latest_date = df_h['date'].max()
             df_latest = df_h[df_h['date'] == latest_date].copy()
             df_latest['lvl'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
@@ -90,6 +91,7 @@ def get_detailed_chips(sid_clean):
             chips["chip_val"] = f"{val}%"
             chips["chip_name"] = "大戶%"
         else:
+            # 優先權 2: 融資增減
             df_m, _ = get_finmind_data("TaiwanStockMarginPurchaseEvid", sid_clean, start_d)
             if not df_m.empty:
                 df_m = df_m.sort_values('date')
@@ -97,6 +99,7 @@ def get_detailed_chips(sid_clean):
                 chips["chip_val"] = f"{'+' if m_diff > 0 else ''}{m_diff}張"
                 chips["chip_name"] = "融資增減"
             else:
+                # 優先權 3: 法人連買強度
                 total_inst = chips["fs"] + chips["ss"]
                 chips["chip_val"] = f"連買{total_inst}d"
                 chips["chip_name"] = "法人力道"
@@ -104,6 +107,7 @@ def get_detailed_chips(sid_clean):
     except Exception as e:
         print(f"❌ 籌碼解析異常 ({sid_clean}): {e}")
 
+    # --- 3. 量能計算 ---
     try:
         ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
         h = yf.Ticker(ticker).history(period="10d")
