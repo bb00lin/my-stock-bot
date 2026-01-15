@@ -32,7 +32,7 @@ def get_gspread_client():
 
 def get_gemini_advice(s):
     """
-    將數據發送給 Gemini 生成精簡操作建議
+    將數據發送給 Gemini 生成精簡操作建議 (用於法人精選監測與 WATCH_LIST 理由)
     """
     if not GEMINI_API_KEY: return "AI 未啟動"
     
@@ -67,7 +67,10 @@ def sync_to_sheets(data_list):
         print(f"⚠️ '法人精選監測' 同步失敗: {e}")
 
 def update_watch_list_sheet(recommended_stocks):
-    """將推薦標的匯入 'WATCH_LIST'"""
+    """
+    將推薦標的匯入 'WATCH_LIST'
+    這裡會將 AI 的建議作為理由寫入備註欄
+    """
     if not recommended_stocks: return
 
     try:
@@ -88,6 +91,8 @@ def update_watch_list_sheet(recommended_stocks):
         for stock in recommended_stocks:
             sid = stock['id']
             if sid not in existing_ids:
+                # WATCH_LIST 格式: [代號, 名稱, 庫存Y/N, 成本, 股數, 備註/理由]
+                # 名稱、庫存、成本、股數留白，由使用者或 Push 腳本填補
                 reason_note = f"{today_str} {stock['reason']}"
                 new_rows.append([sid, "", "", "", "", reason_note])
                 existing_ids.add(sid)
@@ -200,6 +205,7 @@ def analyze_v14(ticker, name):
                         f"-----------------------------------")
             
             # Sheet 數據格式 (確保符合 A-N 欄位)
+            # A-H, I(量比), J-L, M(現價), N(AI)
             sheet_data = [
                 str(datetime.date.today()),  # A: 日期
                 pure_id,                     # B: 代碼
@@ -209,11 +215,11 @@ def analyze_v14(ticker, name):
                 vol_str,                     # F: 量能狀態
                 fs,                          # G: 外資連買
                 ss,                          # H: 投信連買
-                round(vol_ratio, 2),         # I: 量比 (新增，讓後面順延)
+                round(vol_ratio, 2),         # I: 量比 (修正點：新增此欄)
                 status_label,                # J: 狀態
                 round(rsi_val, 1),           # K: RSI
                 round(k_val, 1),             # L: K值
-                cp,                          # M: 現價 (現在對齊了)
+                cp,                          # M: 現價 (正確對齊)
                 ai_advice                    # N: AI 投資策略
             ]
 
@@ -239,6 +245,7 @@ def main():
     stock_df = dl.taiwan_stock_info()
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
     
+    # 掃描前 1000 檔
     targets = stock_df[stock_df['stock_id'].str.len() == 4].head(1000) 
     
     line_results = []
@@ -270,12 +277,15 @@ def main():
 
         time.sleep(0.4)
 
+    # 1. 更新 法人精選監測
     if sheet_results:
         sync_to_sheets(sheet_results)
 
+    # 2. 自動增補 WATCH_LIST
     if watch_list_candidates:
         update_watch_list_sheet(watch_list_candidates)
 
+    # 3. LINE 通知
     if line_results:
         msg = f"🔍 【{datetime.date.today()} 法人精選+AI診斷】\n\n" + "\n".join(line_results)
         send_line(msg)
