@@ -12,6 +12,7 @@ permissions:
 jobs:
   run_job:
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # 增加超時保護，避免異常跑太久
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -23,6 +24,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
+          # 這裡維持您倒回版本需要的套件即可，已移除 AI 相關套件
           pip install tqdm requests pandas yfinance FinMind gspread oauth2client
 
       - name: Create Key File
@@ -32,6 +34,7 @@ jobs:
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          # 注意：此處已不需要 GEMINI_API_KEY，因為腳本內已無 AI 邏輯
         run: python DailyStockPush.py
 
       - name: Cleanup Key
