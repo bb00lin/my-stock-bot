@@ -12,6 +12,7 @@ permissions:
 jobs:
   run_job:
     runs-on: ubuntu-latest
+    timeout-minutes: 30 # 建議加上超時設定，避免 AI 卡住浪費額度
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -22,8 +23,9 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
+        # ⚠️ 重點 1：必須加入 google-generativeai
         run: |
-          pip install tqdm requests pandas yfinance FinMind gspread oauth2client
+          pip install tqdm requests pandas yfinance FinMind gspread oauth2client google-generativeai
 
       - name: Create Key File
         run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
@@ -32,6 +34,8 @@ jobs:
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          # ⚠️ 重點 2：必須將 AI 金鑰傳入環境變數
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python DailyStockPush.py
 
       - name: Cleanup Key
