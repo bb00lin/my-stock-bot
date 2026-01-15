@@ -21,7 +21,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        ai_model = genai.GenerativeModel('gemini-1.5-flash')
+        # [重要修正] 改用 gemini-pro，解決 404 Model Not Found 問題
+        ai_model = genai.GenerativeModel('gemini-pro')
     except Exception as e:
         print(f"Gemini 初始化失敗: {e}")
 
@@ -40,7 +41,7 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. AI 策略生成器 (已開啟詳細除錯 LOG)
+# 2. AI 策略生成器 (使用 gemini-pro)
 # ==========================================
 def get_gemini_strategy(data):
     """
@@ -72,15 +73,12 @@ def get_gemini_strategy(data):
         response = ai_model.generate_content(prompt, request_options={"timeout": 30})
         return response.text.replace('\n', ' ').strip()
     except Exception as e:
-        # [關鍵修正] 將錯誤原因印出來，方便在 GitHub Actions 查看
         error_msg = str(e)
         print(f"❌ Gemini Error ({data['id']}): {error_msg}")
         
         if "429" in error_msg: return "AI 忙線中 (429)"
-        if "403" in error_msg: return "API Key 權限錯誤 (403)"
-        if "400" in error_msg: return "請求無效 (400)"
+        if "404" in error_msg: return "模型未找到 (404)"
         
-        # 將錯誤的前 15 個字寫入報表，方便直接看 Sheet 除錯
         return f"AI 異常: {error_msg[:15]}..."
 
 # ==========================================
@@ -215,8 +213,11 @@ def fetch_pro_metrics(stock_data):
 
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
 
+        # [修正] 準確判斷市或櫃 (之前把 .TW 也算進 .TWO 裡了)
+        market_label = '櫃' if '.TWO' in full_id else '市'
+
         res = {
-            "id": f"{sid}{'市' if '.TW' in full_id else '櫃'}", "name": stock_name, 
+            "id": f"{sid}{market_label}", "name": stock_name, 
             "score": score, "rsi": clean_rsi, "industry": industry,
             "vol_r": round(vol_ratio, 1), "p": round(curr_p, 2), 
             "yield": raw_yield, "amt_t": round(today_amount, 1),
@@ -228,7 +229,6 @@ def fetch_pro_metrics(stock_data):
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
-        # 呼叫 AI
         ai_strategy = get_gemini_strategy(res)
         res['ai_strategy'] = ai_strategy
         
@@ -279,7 +279,6 @@ def main():
             
         time.sleep(4.0) 
     
-    # LINE 推送 (取精簡字數)
     results_line.sort(key=lambda x: x['score'], reverse=True)
     if results_line:
         msg = f"📊 【{current_date} 庫存與 AI 診斷】\n"
