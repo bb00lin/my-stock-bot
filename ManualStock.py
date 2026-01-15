@@ -57,15 +57,19 @@ def send_line_message(message):
     except: pass
 
 # ==========================================
-# 2. 籌碼邏輯 (具備三重防禦機制)
+# 2. 籌碼邏輯 (具備三重防禦機制 & 修正量能抓取)
 # ==========================================
-def get_detailed_chips(sid_clean):
+def get_detailed_chips(sid_clean, specific_ticker=None):
+    """
+    sid_clean: 純數字代號 (給 FinMind 用)
+    specific_ticker: 完整的 Yahoo 代號 (例如 5443.TWO，給量能計算用)
+    """
     chips = {"fs": 0, "ss": 0, "chip_val": "無數據", "chip_name": "籌碼指標", "v_ratio": 0.0, "v_status": "未知"}
     
     try:
         start_d = (datetime.date.today() - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
         
-        # --- 1. 法人買賣超 (基礎指標) ---
+        # --- 1. 法人買賣超 (FinMind) ---
         df_i, _ = get_finmind_data("TaiwanStockInstitutionalInvestorsBuySell", sid_clean, start_d)
         if not df_i.empty:
             def streak(name):
@@ -78,11 +82,11 @@ def get_detailed_chips(sid_clean):
                 return c
             chips["fs"], chips["ss"] = streak('Foreign_Investor'), streak('Investment_Trust')
 
-        # --- 2. 籌碼價值判斷 (大戶 -> 融資 -> 法人) ---
+        # --- 2. 籌碼價值判斷 (FinMind) ---
+        # 優先嘗試：大戶持股
         df_h, msg = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_d)
         
         if not df_h.empty and "update your user level" not in msg:
-            # 優先權 1: 大戶持股
             latest_date = df_h['date'].max()
             df_latest = df_h[df_h['date'] == latest_date].copy()
             df_latest['lvl'] = df_latest['hold_shares_level'].astype(str).str.replace(' ', '')
@@ -91,7 +95,7 @@ def get_detailed_chips(sid_clean):
             chips["chip_val"] = f"{val}%"
             chips["chip_name"] = "大戶%"
         else:
-            # 優先權 2: 融資增減
+            # 備援 A：融資增減
             df_m, _ = get_finmind_data("TaiwanStockMarginPurchaseEvid", sid_clean, start_d)
             if not df_m.empty:
                 df_m = df_m.sort_values('date')
@@ -99,7 +103,7 @@ def get_detailed_chips(sid_clean):
                 chips["chip_val"] = f"{'+' if m_diff > 0 else ''}{m_diff}張"
                 chips["chip_name"] = "融資增減"
             else:
-                # 優先權 3: 法人連買強度
+                # 備援 B：法人連買
                 total_inst = chips["fs"] + chips["ss"]
                 chips["chip_val"] = f"連買{total_inst}d"
                 chips["chip_name"] = "法人力道"
@@ -107,10 +111,11 @@ def get_detailed_chips(sid_clean):
     except Exception as e:
         print(f"❌ 籌碼解析異常 ({sid_clean}): {e}")
 
-    # --- 3. 量能計算 ---
+    # --- 3. 量能計算 (Yahoo Finance) ---
     try:
-        ticker = f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO"
-        h = yf.Ticker(ticker).history(period="10d")
+        # 使用傳入的正確 Ticker (解決 5443.TW 找不到的問題)
+        target = specific_ticker if specific_ticker else (f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO")
+        h = yf.Ticker(target).history(period="10d")
         if not h.empty and len(h) >= 2:
             v_today, v_avg = h['Volume'].iloc[-1], h['Volume'].iloc[-6:-1].mean()
             chips["v_ratio"] = round(v_today / v_avg, 1) if v_avg > 0 else 0
@@ -122,10 +127,22 @@ def get_detailed_chips(sid_clean):
 def run_diagnostic(sid):
     try:
         clean_id = str(sid).split('.')[0].strip()
-        tk_str = f"{clean_id}.TW" if int(clean_id) < 9000 else f"{clean_id}.TWO"
+        
+        # --- 修正後的市場判斷邏輯 (Try TW first, then TWO) ---
+        tk_str = f"{clean_id}.TW"
         stock = yf.Ticker(tk_str)
         df = stock.history(period="1y")
-        if df.empty: return None, None
+        
+        # 如果上市找不到，改找上櫃 (.TWO)
+        if df.empty:
+            tk_str = f"{clean_id}.TWO"
+            stock = yf.Ticker(tk_str)
+            df = stock.history(period="1y")
+            
+        if df.empty:
+            print(f"❌ 找不到股票 {clean_id} 的數據")
+            return None, None
+        # ------------------------------------------------
         
         ch_name = STOCK_NAME_MAP.get(clean_id, stock.info.get('shortName', '未知'))
         curr_p = round(df.iloc[-1]['Close'], 2)
@@ -137,7 +154,9 @@ def run_diagnostic(sid):
         margin = round((info.get('grossMargins', 0) or 0) * 100, 1)
         pe = info.get('trailingPE', 0) or "N/A"
         
-        c = get_detailed_chips(clean_id)
+        # 將正確的 ticker 傳給籌碼分析，確保量能計算正確
+        c = get_detailed_chips(clean_id, tk_str)
+        
         bias = round(((curr_p-ma60)/ma60)*100, 1)
         
         line_msg = (
@@ -163,6 +182,7 @@ def run_diagnostic(sid):
         return None, None
 
 if __name__ == "__main__":
+    # 支援命令行參數，預設 2330
     input_str = sys.argv[1] if len(sys.argv) > 1 else "2330"
     targets = input_str.replace(',', ' ').split()
     results_sheet = []
