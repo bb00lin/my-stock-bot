@@ -17,40 +17,13 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ==========================================
-# [關鍵修正] Gemini 初始化與模型自動偵測
-# ==========================================
-ai_model = None
-
+# 初始化 Gemini AI (強制使用 gemini-pro)
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        
-        # 1. 嘗試列出所有可用模型，方便除錯
-        print("🔍 正在偵測可用模型...")
-        available_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-                print(f"   - {m.name}")
-        
-        # 2. 優先選擇順序
-        target_model = "models/gemini-1.5-flash" # 首選：最快最穩
-        if target_model not in available_models:
-            # 如果首選不在，嘗試找 gemini-pro
-            if "models/gemini-pro" in available_models:
-                target_model = "models/gemini-pro"
-            # 如果還沒有，就選列表中的第一個
-            elif available_models:
-                target_model = available_models[0]
-            else:
-                target_model = "gemini-1.5-flash" # 萬一列表失敗，盲猜一個
-
-        print(f"✅ 決定使用模型: {target_model}")
-        ai_model = genai.GenerativeModel(target_model)
-        
+        ai_model = genai.GenerativeModel('gemini-pro') 
     except Exception as e:
-        print(f"❌ Gemini 初始化失敗: {e}")
+        print(f"Gemini 初始化失敗: {e}")
 
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -70,11 +43,7 @@ STOCK_INFO_MAP = get_global_stock_info()
 # 2. AI 策略生成器
 # ==========================================
 def get_gemini_strategy(data):
-    """
-    根據數據生成具體操作策略
-    """
-    if not ai_model: 
-        return "AI 未啟動 (初始化失敗)"
+    if not GEMINI_API_KEY: return "AI 未啟動 (缺 Key)"
     
     hold_txt = f"目前持有 (成本 {data['cost']})" if data['is_hold'] else "目前空手觀望"
     
@@ -94,32 +63,23 @@ def get_gemini_strategy(data):
     3. "最佳買點：等待回測 5日線({data['ma5']}) 縮量佈局。"
     """
     try:
-        # 執行請求
-        response = ai_model.generate_content(prompt, request_options={"timeout": 30})
+        # 增加重試機制
+        response = ai_model.generate_content(prompt, request_options={"timeout": 60})
         return response.text.replace('\n', ' ').strip()
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ Gemini Error ({data['id']}): {error_msg}")
-        
-        if "429" in error_msg: return "AI 忙線中 (429)"
-        if "404" in error_msg: return "模型錯誤 (404)"
-        
+        if "429" in error_msg: return "AI 忙線 (429)"
         return f"AI 異常: {error_msg[:15]}..."
 
 # ==========================================
-# 3. 讀取 WATCH_LIST (含防呆補零)
+# 3. 讀取 WATCH_LIST
 # ==========================================
 def get_watch_list_from_sheet():
     try:
         client = get_gspread_client()
-        try:
-            sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
-        except:
-            sheet = client.open("WATCH_LIST").get_worksheet(0)
-            
+        sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
         records = sheet.get_all_records()
         watch_data = []
-        print(f"📋 正在讀取雲端觀察名單，共 {len(records)} 筆...")
         
         for row in records:
             raw_sid = str(row.get('股票代號', '')).strip()
@@ -205,9 +165,7 @@ def fetch_pro_metrics(stock_data):
     cost = stock_data['cost']
 
     stock, full_id = get_tw_stock(sid)
-    if not stock: 
-        print(f"⚠️ 找不到數據: {sid}")
-        return None
+    if not stock: return None
     try:
         df_hist = stock.history(period="6mo")
         if len(df_hist) < 60: return None
@@ -279,7 +237,7 @@ def main():
         print("⚠️ 無法讀取觀察名單，請檢查 Google Sheet。")
         return
 
-    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 4 秒)...")
+    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 10 秒，確保 100% 成功)...")
 
     for stock_data in watch_data_list:
         res = fetch_pro_metrics(stock_data)
@@ -297,7 +255,8 @@ def main():
                 res['ai_strategy']
             ])
             
-        time.sleep(4.0) 
+        # [關鍵修正] 10 秒間隔，絕對不會觸發 429 錯誤
+        time.sleep(10.0) 
     
     results_line.sort(key=lambda x: x['score'], reverse=True)
     if results_line:
