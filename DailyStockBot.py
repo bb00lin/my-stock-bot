@@ -1,14 +1,21 @@
-import os, yfinance as yf, pandas as pd, requests, time, datetime
+import os, yfinance as yf, pandas as pd, requests, time, datetime, sys
 import numpy as np
 import gspread
+import google.generativeai as genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
 # ==========================================
-# 設定與環境變數
+# 1. 設定與環境變數
 # ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# 初始化 Gemini AI
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    ai_model = genai.GenerativeModel('gemini-1.5-flash')
 
 def send_line(msg):
     if not LINE_ACCESS_TOKEN: return
@@ -23,14 +30,38 @@ def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
     return gspread.authorize(creds)
 
+def get_gemini_advice(s):
+    """
+    將數據發送給 Gemini 生成精簡操作建議
+    """
+    if not GEMINI_API_KEY: return "AI 未啟動"
+    
+    prompt = f"""
+    你是一位台股操盤手。請根據數據提供「操作建議」(50字內)。
+    標的：{s['name']} ({s['id']}) | 現價：{s['cp']}
+    狀態：{s['status']} | 乖離率：{s['bias']} | 量能：{s['vol_str']}
+    籌碼：外資{s['fs']}連買 | 投信{s['ss']}連買 | RSI：{s['rsi']}
+    
+    請回答：
+    1. 關鍵防守價或目標價。
+    2. 明日看盤重點(如補量或過高)。
+    3. 給出簡評(如:強勢續抱、拉回佈局)。
+    """
+    try:
+        response = ai_model.generate_content(prompt)
+        return response.text.replace('\n', ' ').strip()
+    except:
+        return "AI 分析異常"
+
 def sync_to_sheets(data_list):
     """將結果寫入 '法人精選監測' Google Sheets"""
     try:
         client = get_gspread_client()
         sheet = client.open("法人精選監測").get_worksheet(0)
-        # 注意：因增加了欄位，建議您在 Sheet 第一列補上標題：
-        # 日期, 代號, 名稱, 類型, 乖離%, 量能狀態, 外資連買, 投信連買, 狀態, RSI, K值, 現價
-        sheet.append_rows(data_list)
+        # 欄位順序對應: 
+        # A:日期, B:代號, C:名稱, D:標籤, E:乖離%, F:量能狀態, 
+        # G:外資, H:投信, I:量比, J:狀態, K:RSI, L:K值, M:現價, N:AI策略
+        sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆數據至 '法人精選監測'")
     except Exception as e:
         print(f"⚠️ '法人精選監測' 同步失敗: {e}")
@@ -57,7 +88,6 @@ def update_watch_list_sheet(recommended_stocks):
         for stock in recommended_stocks:
             sid = stock['id']
             if sid not in existing_ids:
-                # 寫入格式: 代號, (空), (空), (空), (空), 推薦理由
                 reason_note = f"{today_str} {stock['reason']}"
                 new_rows.append([sid, "", "", "", "", reason_note])
                 existing_ids.add(sid)
@@ -72,7 +102,6 @@ def update_watch_list_sheet(recommended_stocks):
         print(f"⚠️ 更新 WATCH_LIST 失敗: {e}")
 
 def get_streak_only(sid_clean):
-    """獲取法人連買天數"""
     try:
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=20)).strftime('%Y-%m-%d')
@@ -90,7 +119,6 @@ def get_streak_only(sid_clean):
     except: return 0, 0
 
 def calculate_indicators(df):
-    """計算 RSI 與 KD 指標"""
     close = df['Close']
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
@@ -107,7 +135,7 @@ def calculate_indicators(df):
     return rsi, k, d
 
 def analyze_v14(ticker, name):
-    """核心篩選邏輯：雙軌制 + 深度指標 (乖離/量能狀態)"""
+    """核心篩選邏輯：雙軌制 + 深度指標 + AI 診斷 (修正欄位對齊)"""
     try:
         s = yf.Ticker(ticker)
         i = s.info
@@ -120,7 +148,7 @@ def analyze_v14(ticker, name):
         
         cp = df.iloc[-1]['Close']
         ma5 = df['Close'].rolling(5).mean().iloc[-1]
-        ma60 = df['Close'].rolling(60).mean().iloc[-1] # 季線/生命線
+        ma60 = df['Close'].rolling(60).mean().iloc[-1]
         
         rsi_series, k_series, d_series = calculate_indicators(df)
         rsi_val = rsi_series.iloc[-1]
@@ -130,15 +158,15 @@ def analyze_v14(ticker, name):
         vol_avg = df['Volume'].iloc[-11:-1].mean()
         vol_ratio = vol_today / vol_avg if vol_avg > 0 else 0
         
-        # --- 2. 量能狀態文字化 ---
+        # 量能狀態 (文字)
         if vol_ratio > 1.8: vol_str = f"🔥爆量({vol_ratio:.1f}x)"
         elif vol_ratio > 1.0: vol_str = f"📈溫和({vol_ratio:.1f}x)"
         elif vol_ratio < 0.7: vol_str = f"⚠️縮量({vol_ratio:.1f}x)"
         else: vol_str = f"☁️量平({vol_ratio:.1f}x)"
         
-        # --- 3. 乖離率計算 (以季線 MA60 為基準，代表波段位置) ---
+        # 乖離率
         bias_60 = ((cp - ma60) / ma60) * 100
-        bias_5 = ((cp - ma5) / ma5) * 100 # 用於短線過熱判斷
+        bias_5 = ((cp - ma5) / ma5) * 100
         
         kd_status = "高檔" if k_val > 80 else ("低檔" if k_val < 20 else "穩定")
         
@@ -151,52 +179,54 @@ def analyze_v14(ticker, name):
         pure_id = ticker.split('.')[0]
         fs, ss = get_streak_only(pure_id)
         
-        # --- 基礎報表生成 ---
+        # --- 基礎報表生成 (符合基本面+技術面) ---
         if (fs >= 2 or ss >= 1) and cp > ma60 and vol_ratio > 1.1:
             type_tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
             
-            # LINE 訊息: 增加顯示 Bias 與 量能文字
+            # 準備數據給 AI 進行診斷
+            stock_info = {
+                'id': pure_id, 'name': name, 'cp': round(cp, 2), 
+                'status': status_label, 'bias': f"{bias_60:+.1f}%", 
+                'vol_str': vol_str, 'fs': fs, 'ss': ss, 'rsi': round(rsi_val, 1)
+            }
+            ai_advice = get_gemini_advice(stock_info)
+            
+            # LINE 訊息
             line_txt = (f"📍{ticker} {name} ({type_tag})\n"
-                        f"法人：外資{fs}d | 投信{ss}d\n"
                         f"量能：{vol_str}\n"
                         f"狀態：{status_msg}\n"
                         f"現價：{cp:.2f}\n"
+                        f"💡AI策略：{ai_advice[:20]}...\n"
                         f"-----------------------------------")
             
-            # Sheet 數據格式 (增加 乖離% 與 量能狀態 欄位)
-            # 欄位順序: 日期, 代號, 名稱, 類型, 乖離%, 量能狀態, 外連買, 投連買, 狀態, RSI, K, 現價
+            # Sheet 數據格式 (確保符合 A-N 欄位)
             sheet_data = [
-                str(datetime.date.today()), pure_id, name, type_tag, 
-                f"{bias_60:+.1f}%", vol_str, 
-                fs, ss, status_label, 
-                round(rsi_val, 1), round(k_val, 1), cp
+                str(datetime.date.today()),  # A: 日期
+                pure_id,                     # B: 代碼
+                name,                        # C: 名稱
+                type_tag,                    # D: 標籤
+                f"{bias_60:+.1f}%",          # E: 乖離%
+                vol_str,                     # F: 量能狀態
+                fs,                          # G: 外資連買
+                ss,                          # H: 投信連買
+                round(vol_ratio, 2),         # I: 量比 (新增，讓後面順延)
+                status_label,                # J: 狀態
+                round(rsi_val, 1),           # K: RSI
+                round(k_val, 1),             # L: K值
+                cp,                          # M: 現價 (現在對齊了)
+                ai_advice                    # N: AI 投資策略
             ]
 
-            # --- 進階 AI 雙軌推薦邏輯 ---
+            # --- 進階 AI 雙軌推薦邏輯 (匯入 WATCH_LIST) ---
             recommendation = None
-            
-            # 策略 A: 🛡️ AI 穩健型 (低風險，買起漲)
-            is_stable = (
-                (ss >= 2 or fs >= 3) and        # 籌碼連續性要求高
-                (vol_ratio > 1.2) and           # 有量
-                (50 <= rsi_val <= 75) and       # 趨勢健康
-                (k_val <= 80)                   # KD未鈍化
-            )
-
-            # 策略 B: 🚀 AI 飆股型 (高風險，追噴出)
-            is_aggressive = (
-                (ss >= 1 or fs >= 2) and        # 籌碼有點火即可
-                (vol_ratio > 2.5) and           # 必須爆大量 (攻擊訊號)
-                (rsi_val > 60) and              # 動能要強
-                (cp > ma5)                      # 股價必須強勢在5日線上
-            )
+            is_stable = ((ss >= 2 or fs >= 3) and (vol_ratio > 1.2) and (50 <= rsi_val <= 75) and (k_val <= 80))
+            is_aggressive = ((ss >= 1 or fs >= 2) and (vol_ratio > 2.5) and (rsi_val > 60) and (cp > ma5))
 
             if is_stable:
-                reason = f"🛡️AI穩健: {type_tag} (量{vol_ratio:.1f}x/乖離{bias_60:.1f}%)"
+                reason = f"🛡️AI穩健: {ai_advice}"
                 recommendation = {'id': pure_id, 'reason': reason}
-            
             elif is_aggressive:
-                reason = f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs}投{ss})"
+                reason = f"🚀AI飆股: {ai_advice}"
                 recommendation = {'id': pure_id, 'reason': reason}
 
             return line_txt, sheet_data, recommendation
@@ -209,7 +239,6 @@ def main():
     stock_df = dl.taiwan_stock_info()
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
     
-    # 掃描前 1000 檔
     targets = stock_df[stock_df['stock_id'].str.len() == 4].head(1000) 
     
     line_results = []
@@ -217,7 +246,7 @@ def main():
     watch_list_candidates = []
 
     seen_ids = set()
-    print(f"啟動雙軌策略+深度指標掃描 (1000檔)...")
+    print(f"啟動雙軌策略+AI智能診斷掃描 (1000檔)...")
     
     for _, row in targets.iterrows():
         sid = row['stock_id']
@@ -248,7 +277,7 @@ def main():
         update_watch_list_sheet(watch_list_candidates)
 
     if line_results:
-        msg = f"🔍 【{datetime.date.today()} 法人精選(1000檔)】\n\n" + "\n".join(line_results)
+        msg = f"🔍 【{datetime.date.today()} 法人精選+AI診斷】\n\n" + "\n".join(line_results)
         send_line(msg)
     else:
         print("今日無符合標的。")
