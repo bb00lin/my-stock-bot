@@ -12,7 +12,7 @@ permissions:
 jobs:
   run_job:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # 建議增加時間，因為 AI 分析每檔需間隔 4 秒
+    timeout-minutes: 30
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -24,8 +24,8 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          # 必須加入 google-generativeai 才能執行 AI 分析
-          pip install tqdm requests pandas yfinance FinMind gspread oauth2client google-generativeai
+          # [重點] 加上 -U 強制更新到最新版，解決模型 404 問題
+          pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-generativeai
 
       - name: Create Key File
         run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
@@ -34,7 +34,6 @@ jobs:
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          # 關鍵：必須將 AI 金鑰傳入，Python 腳本才能連線 Gemini
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python DailyStockPush.py
 
