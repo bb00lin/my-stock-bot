@@ -12,7 +12,7 @@ permissions:
 jobs:
   run_job:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45 # 增加超時，確保跑完所有股票
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -24,7 +24,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          # [重點] 加上 -U 強制更新到最新版，解決模型 404 問題
+          # 強制更新到最新版 SDK
           pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-generativeai
 
       - name: Create Key File
