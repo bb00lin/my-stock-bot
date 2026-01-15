@@ -23,7 +23,7 @@ if GEMINI_API_KEY:
         genai.configure(api_key=GEMINI_API_KEY)
         ai_model = genai.GenerativeModel('gemini-1.5-flash')
     except Exception as e:
-        print(f"Gemini 初始化警告: {e}")
+        print(f"Gemini 初始化失敗: {e}")
 
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -40,41 +40,48 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. AI 策略生成器 (核心：模仿您的語氣)
+# 2. AI 策略生成器 (已開啟詳細除錯 LOG)
 # ==========================================
 def get_gemini_strategy(data):
     """
-    根據數據生成具體操作策略 (回測點位、量能監控)
+    根據數據生成具體操作策略
     """
-    if not GEMINI_API_KEY: return "AI 未啟動 (缺 Key)"
+    if not GEMINI_API_KEY: 
+        print(f"⚠️ 略過 {data['id']}: 找不到 GEMINI_API_KEY")
+        return "AI 未啟動 (缺 Key)"
     
     hold_txt = f"目前持有 (成本 {data['cost']})" if data['is_hold'] else "目前空手觀望"
     
     prompt = f"""
-    角色：專業且犀利的台股操盤手。
+    角色：專業台股操盤手。
     任務：分析個股 {data['name']} ({data['id']}) 並給出約 80 字的操作建議。
     
     【技術數據】
     - 收盤：{data['p']} (漲跌幅 {data['d1']:.2%})
-    - 均線支撐：5日線 {data['ma5']} | 10日線 {data['ma10']} | 20日線 {data['ma20']} (月線)
-    - 指標：RSI {data['rsi']} | 量比 {data['vol_r']}x (大於1.5為爆量)
+    - 均線支撐：5日線 {data['ma5']} | 10日線 {data['ma10']} | 20日線 {data['ma20']}
+    - 指標：RSI {data['rsi']} | 量比 {data['vol_r']}x
     - 狀態：{data['risk']} | {hold_txt}
 
-    【請模仿以下語氣與邏輯撰寫】
-    1. "如果明日開盤能維持在 {data['p']} 元以上，向上挑戰..."
-    2. "監控量能：若成交量持續超過今日，則為強勢領頭羊..."
-    3. "最佳買點：建議等待回測 5日線({data['ma5']}) 或 10日線({data['ma10']}) 且量縮後佈局。"
-    4. 若 RSI>80，請警告 "高檔過熱，建議分批獲利了結"。
-
-    請給出一段綜合的、具體的、帶有數字的操作策略。
+    【請模仿以下語氣撰寫】
+    1. "如果明日開盤維持在 {data['p']} 以上..."
+    2. "監控量能：若持續出量則..."
+    3. "最佳買點：等待回測 5日線({data['ma5']}) 縮量佈局。"
     """
     try:
-        # 設定 30 秒超時，避免卡住
+        # 執行請求
         response = ai_model.generate_content(prompt, request_options={"timeout": 30})
         return response.text.replace('\n', ' ').strip()
     except Exception as e:
-        if "429" in str(e): return "AI 忙線中 (429)"
-        return "AI 分析暫時無法取得"
+        # [關鍵修正] 將錯誤原因印出來，方便在 GitHub Actions 查看
+        error_msg = str(e)
+        print(f"❌ Gemini Error ({data['id']}): {error_msg}")
+        
+        if "429" in error_msg: return "AI 忙線中 (429)"
+        if "403" in error_msg: return "API Key 權限錯誤 (403)"
+        if "400" in error_msg: return "請求無效 (400)"
+        
+        # 將錯誤的前 15 個字寫入報表，方便直接看 Sheet 除錯
+        return f"AI 異常: {error_msg[:15]}..."
 
 # ==========================================
 # 3. 讀取 WATCH_LIST (含防呆補零)
@@ -95,7 +102,6 @@ def get_watch_list_from_sheet():
             raw_sid = str(row.get('股票代號', '')).strip()
             if not raw_sid: continue
             
-            # 自動補零邏輯 (946 -> 00946)
             if raw_sid.isdigit():
                 if len(raw_sid) == 3: sid = "00" + raw_sid
                 elif len(raw_sid) < 4: sid = raw_sid.zfill(4)
@@ -126,7 +132,6 @@ def calculate_rsi(series, period=14):
 
 def get_tw_stock(sid):
     clean_id = str(sid).strip().upper()
-    # 智能判斷：3,4,5,6,8 開頭優先測 .TWO
     if clean_id.startswith(('3', '4', '5', '6', '8')):
         suffixes = [".TWO", ".TW"]
     else:
@@ -157,7 +162,6 @@ def generate_auto_analysis(r, is_hold, cost):
     
     trend_status = " | ".join(trends) if trends else "動能平淡"
     
-    # 簡易提示
     hint = ""
     profit_pct = ((r['p'] - cost) / cost * 100) if (is_hold and cost > 0) else 0
     profit_str = f"({profit_pct:+.1f}%)" if (is_hold and cost > 0) else ""
@@ -182,7 +186,6 @@ def fetch_pro_metrics(stock_data):
         print(f"⚠️ 找不到數據: {sid}")
         return None
     try:
-        # 取半年數據算均線
         df_hist = stock.history(period="6mo")
         if len(df_hist) < 60: return None
         
@@ -193,7 +196,6 @@ def fetch_pro_metrics(stock_data):
         rsi_series = calculate_rsi(df_hist['Close'])
         clean_rsi = 0.0 if pd.isna(rsi_series.iloc[-1]) else round(rsi_series.iloc[-1], 1)
         
-        # --- 計算關鍵均線 (給 AI 用) ---
         ma5 = df_hist['Close'].rolling(5).mean().iloc[-1]
         ma10 = df_hist['Close'].rolling(10).mean().iloc[-1]
         ma20 = df_hist['Close'].rolling(20).mean().iloc[-1]
@@ -205,7 +207,6 @@ def fetch_pro_metrics(stock_data):
         m6 = (curr_p / df_hist['Close'].iloc[-121]) if len(df_hist) >= 121 else 0
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
 
-        # 計分
         score = 0
         if curr_p > df_hist['Close'].iloc[0]: score += 3
         if 40 < clean_rsi < 70: score += 2
@@ -221,14 +222,13 @@ def fetch_pro_metrics(stock_data):
             "yield": raw_yield, "amt_t": round(today_amount, 1),
             "d1": d1, "d5": d5, "m1": m1, "m6": m6,
             "is_hold": is_hold, "cost": cost,
-            # 傳遞均線給 AI
             "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2)
         }
 
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
-        # --- 呼叫 AI 生成策略 ---
+        # 呼叫 AI
         ai_strategy = get_gemini_strategy(res)
         res['ai_strategy'] = ai_strategy
         
@@ -241,7 +241,6 @@ def sync_to_sheets(data_list):
     try:
         client = get_gspread_client()
         sheet = client.open("全能金流診斷報表").get_worksheet(0)
-        # 注意：建議在 Sheet 的最後一欄標題加上 "AI 操作策略"
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆數據與 AI 分析")
     except Exception as e:
@@ -275,13 +274,12 @@ def main():
                 "🟢觀望", res['vol_r'], res['p'], res['yield'], res['amt_t'], 
                 res['d1'], res['d5'], res['m1'], res['m6'],
                 res['risk'], res['trend'], res['hint'],
-                res['ai_strategy'] # <--- AI 策略寫在這裡
+                res['ai_strategy']
             ])
             
-        # [關鍵] 為了避免 429 錯誤，每檔請求後休息 4 秒
         time.sleep(4.0) 
     
-    # LINE 推送 (只推精簡版)
+    # LINE 推送 (取精簡字數)
     results_line.sort(key=lambda x: x['score'], reverse=True)
     if results_line:
         msg = f"📊 【{current_date} 庫存與 AI 診斷】\n"
@@ -295,7 +293,6 @@ def main():
         msg += "\n--- 🚀 重點關注 ---\n"
         others = [r for r in results_line if not r['is_hold']][:5]
         for r in others:
-            # LINE 訊息太長會被切斷，這裡只取 AI 策略的前 25 個字
             short_ai = r['ai_strategy'].split("。")[0]
             msg += (f"{r['name']}: {short_ai[:25]}...\n")
 
@@ -303,7 +300,6 @@ def main():
         payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg}]}
         requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
 
-    # 同步回 Sheet
     if results_sheet:
         sync_to_sheets(results_sheet)
 
