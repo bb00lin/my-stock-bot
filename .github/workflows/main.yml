@@ -6,12 +6,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read # 只需要讀取權限即可
+  contents: read
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 60 # 確保 1000 檔掃描與 AI 分析有足夠時間
+    timeout-minutes: 60 #稍微增加時間以防萬一
     steps:
       - name: 1. 檢出代碼
         uses: actions/checkout@v3
@@ -21,9 +21,9 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 3. 安裝必要套件 (含 AI 與 Google Sheets 支援)
+      - name: 3. 安裝必要套件
         run: |
-          pip install yfinance pandas requests FinMind tqdm gspread oauth2client numpy google-generativeai
+          pip install yfinance pandas requests FinMind tqdm gspread oauth2client numpy
 
       - name: 4. 建立 Google 金鑰檔案
         run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
@@ -32,9 +32,8 @@ jobs:
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # 關鍵：啟用 AI 智能診斷
         run: python DailyStockBot.py
 
       - name: 6. 清理金鑰
-        if: always() # 無論成功或失敗都執行清理
+        if: always()
         run: rm -f google_key.json
