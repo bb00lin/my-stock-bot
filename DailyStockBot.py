@@ -18,21 +18,64 @@ def send_line(msg):
     try: requests.post(url, headers=headers, json=payload)
     except: pass
 
+def get_gspread_client():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
+    return gspread.authorize(creds)
+
 def sync_to_sheets(data_list):
-    """將結果寫入 Google Sheets"""
+    """將結果寫入 '法人精選監測' Google Sheets"""
     try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
-        client = gspread.authorize(creds)
-        
-        # 開啟試算表 (名稱：法人精選監測)
+        client = get_gspread_client()
         sheet = client.open("法人精選監測").get_worksheet(0)
-        
-        # 批量寫入數據
         sheet.append_rows(data_list)
-        print(f"✅ 成功同步 {len(data_list)} 筆數據至 Google Sheets")
+        print(f"✅ 成功同步 {len(data_list)} 筆數據至 '法人精選監測'")
     except Exception as e:
-        print(f"⚠️ Google Sheets 同步失敗: {e}")
+        print(f"⚠️ '法人精選監測' 同步失敗: {e}")
+
+def update_watch_list_sheet(recommended_stocks):
+    """
+    將推薦標的匯入 'WATCH_LIST'
+    recommended_stocks: list of dict {'id': '2330', 'reason': '投信認養...'}
+    """
+    if not recommended_stocks: return
+
+    try:
+        client = get_gspread_client()
+        # 嘗試開啟 WATCH_LIST，相容性處理
+        try:
+            sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
+        except:
+            sheet = client.open("WATCH_LIST").get_worksheet(0)
+
+        # 1. 讀取現有代碼，避免重複加入
+        existing_records = sheet.get_all_records()
+        existing_ids = set(str(row.get('股票代號', '')).strip() for row in existing_records)
+        
+        new_rows = []
+        today_str = datetime.date.today().strftime('%Y-%m-%d')
+
+        print(f"📋 準備將 {len(recommended_stocks)} 檔潛力股匯入 WATCH_LIST...")
+
+        for stock in recommended_stocks:
+            sid = stock['id']
+            # 如果代碼不在現有名單中，才加入
+            if sid not in existing_ids:
+                # 欄位順序對應: 股票代號, 股票名稱(留白), 我的庫存倉位(留白), 平均成本(留白), 股數(留白), 日期/理由(放在最後註解)
+                # 假設 WATCH_LIST 格式為: [代號, 名稱, 庫存Y/N, 成本, 股數, 備註/理由]
+                reason_note = f"{today_str} {stock['reason']}"
+                # 這裡對應 WATCH_LIST 的欄位結構，前5欄標準，第6欄放理由
+                new_rows.append([sid, "", "", "", "", reason_note])
+                existing_ids.add(sid) # 防止同一次執行中重複添加
+
+        if new_rows:
+            sheet.append_rows(new_rows, value_input_option='USER_ENTERED')
+            print(f"✅ 已將 {len(new_rows)} 檔新標的加入 'WATCH_LIST'")
+        else:
+            print("ℹ️ 推薦標的已存在於 WATCH_LIST，無新增項目。")
+
+    except Exception as e:
+        print(f"⚠️ 更新 WATCH_LIST 失敗: {e}")
 
 def get_streak_only(sid_clean):
     """獲取法人連買天數"""
@@ -58,13 +101,11 @@ def calculate_indicators(df):
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
     
-    # 計算 RSI (14)
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rsi = 100 - (100 / (1 + (gain / loss)))
     
-    # 計算 KD (9, 3, 3)
     rsv = (close - low_min) / (high_max - low_min) * 100
     k = rsv.ewm(com=2).mean() 
     d = k.ewm(com=2).mean()
@@ -72,33 +113,30 @@ def calculate_indicators(df):
     return rsi, k, d
 
 def analyze_v14(ticker, name):
-    """核心篩選邏輯 - 1000檔 | 重複過濾 | KD & RSI & 乖離 & 量能"""
+    """核心篩選邏輯"""
     try:
         s = yf.Ticker(ticker)
         i = s.info
         m = i.get('grossMargins', 0) or 0
         e = i.get('trailingEps', 0) or 0
-        if m < 0.10 or e <= 0: return None, None
+        if m < 0.10 or e <= 0: return None, None, None # 多回傳一個 None
 
         df = s.history(period="1y")
-        if len(df) < 60: return None, None
+        if len(df) < 60: return None, None, None
         
         cp = df.iloc[-1]['Close']
         ma5 = df['Close'].rolling(5).mean().iloc[-1]
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         
-        # 1. 指標計算
         rsi_series, k_series, d_series = calculate_indicators(df)
         rsi_val = rsi_series.iloc[-1]
         k_val = k_series.iloc[-1]
         
-        # 2. 量能診斷
         vol_today = df.iloc[-1]['Volume']
         vol_avg = df['Volume'].iloc[-11:-1].mean()
         vol_ratio = vol_today / vol_avg if vol_avg > 0 else 0
         vol_tag = f"🔥爆量({vol_ratio:.1f}x)" if vol_ratio > 2.0 else f"{vol_ratio:.1f}x"
         
-        # 3. 狀態標籤
         bias_5 = ((cp - ma5) / ma5) * 100
         kd_status = "高檔" if k_val > 80 else ("低檔" if k_val < 20 else "穩定")
         
@@ -109,11 +147,14 @@ def analyze_v14(ticker, name):
         status_msg = f"{status_label}(乖離{bias_5:.1f}%|RSI:{rsi_val:.0f}|K:{k_val:.0f})"
 
         # 4. 籌碼篩選
-        fs, ss = get_streak_only(ticker.split('.')[0])
+        pure_id = ticker.split('.')[0] # 提取純數字代碼 (例如 2330)
+        fs, ss = get_streak_only(pure_id)
         
+        # 篩選條件
         if (fs >= 2 or ss >= 1) and cp > ma60 and vol_ratio > 1.1:
             type_tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
             
+            # LINE 訊息格式
             line_txt = (f"📍{ticker} {name} ({type_tag})\n"
                         f"法人：外資{fs}d | 投信{ss}d\n"
                         f"量比：{vol_tag}\n"
@@ -121,14 +162,24 @@ def analyze_v14(ticker, name):
                         f"現價：{cp:.2f}\n"
                         f"-----------------------------------")
             
+            # Sheet 數據格式 (移除 .TW/.TWO)
             sheet_data = [
-                str(datetime.date.today()), ticker, name, type_tag, 
+                str(datetime.date.today()), pure_id, name, type_tag, 
                 fs, ss, round(vol_ratio, 2), status_label, 
                 round(rsi_val, 1), round(k_val, 1), cp
             ]
-            return line_txt, sheet_data
-    except: return None, None
-    return None, None
+
+            # 判斷是否值得加入 WATCH_LIST 的推薦物件
+            recommendation = None
+            # 條件：投信連買 >= 2天 或 外資連買 >= 3天，且非過熱狀態
+            if (ss >= 2 or fs >= 3) and status_label == "✅安全":
+                reason = f"AI推薦: {type_tag} (投信{ss}連買/外資{fs}連買)"
+                recommendation = {'id': pure_id, 'reason': reason}
+
+            return line_txt, sheet_data, recommendation
+
+    except: return None, None, None
+    return None, None, None
 
 def main():
     dl = DataLoader()
@@ -140,6 +191,8 @@ def main():
     
     line_results = []
     sheet_results = []
+    watch_list_candidates = [] # 儲存要匯入 WATCH_LIST 的候選名單
+
     seen_ids = set()
     print(f"啟動純雲端旗艦版掃描 (1000檔)...")
     
@@ -154,17 +207,26 @@ def main():
             suffix = ".TWO" if int(sid) >= 8000 else ".TW"
             
         t = f"{sid}{suffix}"
-        l_res, s_res = analyze_v14(t, row['stock_name'])
+        l_res, s_res, rec_obj = analyze_v14(t, row['stock_name'])
+        
         if l_res:
             line_results.append(l_res)
             sheet_results.append(s_res)
+        
+        if rec_obj:
+            watch_list_candidates.append(rec_obj)
+
         time.sleep(0.4)
 
-    # 1. 執行 Google Sheets 同步
+    # 1. 執行 Google Sheets 同步 (法人精選監測)
     if sheet_results:
         sync_to_sheets(sheet_results)
 
-    # 2. 執行 LINE 通知 (不再進行本機 .txt 存檔)
+    # 2. 執行 WATCH_LIST 自動增補 (新功能)
+    if watch_list_candidates:
+        update_watch_list_sheet(watch_list_candidates)
+
+    # 3. 執行 LINE 通知
     if line_results:
         msg = f"🔍 【{datetime.date.today()} 法人精選(1000檔規模)】\n\n" + "\n".join(line_results)
         send_line(msg)
