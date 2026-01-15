@@ -17,14 +17,40 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# 初始化 Gemini AI
+# ==========================================
+# [關鍵修正] Gemini 初始化與模型自動偵測
+# ==========================================
+ai_model = None
+
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        # [重要修正] 改用 gemini-pro，解決 404 Model Not Found 問題
-        ai_model = genai.GenerativeModel('gemini-pro')
+        
+        # 1. 嘗試列出所有可用模型，方便除錯
+        print("🔍 正在偵測可用模型...")
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+                print(f"   - {m.name}")
+        
+        # 2. 優先選擇順序
+        target_model = "models/gemini-1.5-flash" # 首選：最快最穩
+        if target_model not in available_models:
+            # 如果首選不在，嘗試找 gemini-pro
+            if "models/gemini-pro" in available_models:
+                target_model = "models/gemini-pro"
+            # 如果還沒有，就選列表中的第一個
+            elif available_models:
+                target_model = available_models[0]
+            else:
+                target_model = "gemini-1.5-flash" # 萬一列表失敗，盲猜一個
+
+        print(f"✅ 決定使用模型: {target_model}")
+        ai_model = genai.GenerativeModel(target_model)
+        
     except Exception as e:
-        print(f"Gemini 初始化失敗: {e}")
+        print(f"❌ Gemini 初始化失敗: {e}")
 
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -41,15 +67,14 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. AI 策略生成器 (使用 gemini-pro)
+# 2. AI 策略生成器
 # ==========================================
 def get_gemini_strategy(data):
     """
     根據數據生成具體操作策略
     """
-    if not GEMINI_API_KEY: 
-        print(f"⚠️ 略過 {data['id']}: 找不到 GEMINI_API_KEY")
-        return "AI 未啟動 (缺 Key)"
+    if not ai_model: 
+        return "AI 未啟動 (初始化失敗)"
     
     hold_txt = f"目前持有 (成本 {data['cost']})" if data['is_hold'] else "目前空手觀望"
     
@@ -77,7 +102,7 @@ def get_gemini_strategy(data):
         print(f"❌ Gemini Error ({data['id']}): {error_msg}")
         
         if "429" in error_msg: return "AI 忙線中 (429)"
-        if "404" in error_msg: return "模型未找到 (404)"
+        if "404" in error_msg: return "模型錯誤 (404)"
         
         return f"AI 異常: {error_msg[:15]}..."
 
@@ -212,8 +237,6 @@ def fetch_pro_metrics(stock_data):
         if is_hold: score += 1
 
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
-
-        # [修正] 準確判斷市或櫃 (之前把 .TW 也算進 .TWO 裡了)
         market_label = '櫃' if '.TWO' in full_id else '市'
 
         res = {
@@ -246,9 +269,6 @@ def sync_to_sheets(data_list):
     except Exception as e:
         print(f"⚠️ Google Sheets 同步失敗: {e}")
 
-# ==========================================
-# 6. 主程序
-# ==========================================
 def main():
     current_date = datetime.date.today().strftime('%Y-%m-%d')
     results_line, results_sheet = [], []
