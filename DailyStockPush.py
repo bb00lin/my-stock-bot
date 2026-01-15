@@ -27,13 +27,13 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. 讀取 WATCH_LIST (新功能)
+# 2. 讀取 WATCH_LIST
 # ==========================================
 def get_watch_list_from_sheet():
     """從 Google Sheet 'WATCH_LIST' 讀取觀察名單與庫存狀態"""
     try:
         client = get_gspread_client()
-        # 嘗試開啟名為 WATCH_LIST 的工作表，若無則開啟第一個
+        # 嘗試開啟名為 WATCH_LIST 的工作表
         try:
             sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
         except:
@@ -62,7 +62,6 @@ def get_watch_list_from_sheet():
         return watch_data
     except Exception as e:
         print(f"❌ 讀取 WATCH_LIST 失敗: {e}")
-        # 備援：如果讀取失敗，回傳一個空的或預設的，避免程式崩潰
         return []
 
 # ==========================================
@@ -85,47 +84,65 @@ def get_tw_stock(sid):
     return None, None
 
 # ==========================================
-# 4. 核心診斷引擎 (結合庫存邏輯)
+# 4. 核心診斷引擎 (動態警示/建議邏輯)
 # ==========================================
 def generate_auto_analysis(r, is_hold, cost):
     """
-    根據數據與庫存狀態生成評語
-    r: 技術指標數據
-    is_hold: 是否為庫存 (True/False)
-    cost: 平均成本
+    根據當下數據與庫存狀態，生成動態操作建議
     """
-    # 1. 風控評級
-    if r['rsi'] > 75: risk = "🚩高檔過熱"
-    elif 40 <= r['rsi'] <= 60 and r['d1'] > 0: risk = "✅穩健起漲"
-    elif r['rsi'] < 30: risk = "🛡️超跌區"
-    else: risk = "正常波動"
-
-    # 2. 動向判斷
-    trends = []
-    if r['vol_r'] > 1.8 and r['d1'] > 0: trends.append("🔥主力攻擊")
-    elif r['vol_r'] < 0.7 and r['d1'] > 0.01: trends.append("⚠️量價背離")
-    if r['amt_t'] > 30: trends.append("💰金流集中")
-    trend_status = " | ".join(trends) if trends else "橫盤整理"
-
-    # 3. 操作建議 (結合庫存狀態)
-    hint = "持續觀察"
-    
-    # 庫存股的建議邏輯
-    if is_hold:
-        profit_pct = ((r['p'] - cost) / cost * 100) if cost > 0 else 0
-        profit_str = f"(帳面{profit_pct:+.1f}%)" if cost > 0 else ""
-        
-        if r['rsi'] > 80: hint = f"🚨獲利了結? {profit_str}"
-        elif r['d1'] < -0.03 and r['m1'] < 0: hint = f"🛑停損審視 {profit_str}"
-        elif r['m6'] > 0.1: hint = f"💎續抱待漲 {profit_str}"
-        else: hint = f"📦庫存持股 {profit_str}"
-    
-    # 非庫存股 (觀察名單) 的建議邏輯
+    # --- A. 風控評級 (RSI 狀態) ---
+    if r['rsi'] >= 80: 
+        risk = "🚨 極度過熱"
+    elif r['rsi'] >= 70:
+        risk = "🚩 高檔警戒"
+    elif 40 <= r['rsi'] <= 60 and r['d1'] > 0:
+        risk = "✅ 趨勢穩健"
+    elif r['rsi'] <= 30:
+        risk = "🛡️ 超跌打底"
     else:
-        if r['score'] >= 9: hint = "⭐⭐優先佈局"
-        elif r['yield'] > 0.05 and r['m6'] > 0: hint = "🧧存股首選"
-        elif r['rsi'] < 30 and r['d1'] > 0: hint = "💡抄底機會"
-        elif r['m1'] > 0.1 and r['d1'] < -0.02: hint = "📉拉回找點"
+        risk = "正常波動"
+
+    # --- B. 動向判斷 (量價關係) ---
+    trends = []
+    if r['vol_r'] > 2.0 and r['d1'] > 0: trends.append("🔥 主力強攻")
+    elif r['vol_r'] > 1.2 and r['d1'] > 0: trends.append("📈 有效放量")
+    elif r['vol_r'] < 0.7 and r['d1'] > 0.01: trends.append("⚠️ 縮量背離")
+    if r['amt_t'] > 30: trends.append("💰 熱錢中心")
+    trend_status = " | ".join(trends) if trends else "動能平淡"
+
+    # --- C. 綜合提示 (操作指令) ---
+    hint = ""
+    # 計算損益百分比 (若有成本)
+    profit_pct = ((r['p'] - cost) / cost * 100) if (is_hold and cost > 0) else 0
+    profit_str = f"({profit_pct:+.1f}%)" if (is_hold and cost > 0) else ""
+
+    # 1. 庫存股邏輯 (重點在守成與停利)
+    if is_hold:
+        if r['rsi'] >= 80:
+            hint = f"❗指令：分批止盈 {profit_str}"
+        elif r['d1'] <= -0.04: # 單日大跌
+            hint = f"📢警示：急跌守5日線 {profit_str}"
+        elif r['rsi'] < 45 and r['d5'] < -0.05:
+            hint = f"🛑指令：停損審視 {profit_str}"
+        elif r['m6'] > 0.1 and r['d1'] > -0.02:
+            hint = f"💎指令：波段續抱 {profit_str}"
+        else:
+            hint = f"📦指令：持股觀察 {profit_str}"
+    
+    # 2. 觀察股邏輯 (重點在找買點)
+    else:
+        if r['score'] >= 9:
+            hint = "⭐⭐ 優先佈局：指標極強"
+        elif r['score'] >= 8 and r['vol_r'] > 1.5:
+            hint = "🚀 進場訊號：放量轉強"
+        elif r['rsi'] <= 30 and r['d1'] > 0:
+            hint = "💡 進場訊號：跌深反彈"
+        elif r['rsi'] >= 75:
+            hint = "🚫 指令：高位，禁止追價"
+        elif r['m1'] > 0.1 and r['d1'] < -0.02:
+            hint = "📉 觀察：拉回找支撐"
+        else:
+            hint = "持續追蹤"
 
     return risk, trend_status, hint
 
@@ -145,7 +162,7 @@ def fetch_pro_metrics(stock_data):
         curr_p, curr_vol = latest['Close'], latest['Volume']
         today_amount = (curr_vol * curr_p) / 100_000_000
         
-        # 移除金額過小的過濾，因為這可能是您的庫存，即使量縮也要看
+        # 移除金額過小的過濾，保留所有庫存與觀察股
         # if today_amount < MIN_AMOUNT_HUNDRED_MILLION: return None
 
         # 指標計算
@@ -159,7 +176,7 @@ def fetch_pro_metrics(stock_data):
         m6 = (curr_p / df_hist['Close'].iloc[-121]) - 1
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
 
-        # 計分
+        # 計分邏輯
         score = 0
         if (info.get('profitMargins', 0) or 0) > 0: score += 2
         if curr_p > df_hist['Close'].iloc[0]: score += 3
@@ -168,7 +185,7 @@ def fetch_pro_metrics(stock_data):
         if today_amount > 10: score += 1
         if vol_ratio > 1.5: score += 1
         
-        # 庫存股加分 (讓它排在前面)
+        # 庫存股加分 (讓它在排序時稍微靠前)
         if is_hold: score += 0.5 
 
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
@@ -194,9 +211,7 @@ def sync_to_sheets(data_list):
     try:
         client = get_gspread_client()
         sheet = client.open("全能金流診斷報表").get_worksheet(0)
-        # 清空舊資料 (保留標題列)
-        # sheet.clear() # 若想保留歷史紀錄可註解掉這行，但建議每日更新清空舊的比較乾淨
-        # 這裡我們只 Append，若要覆蓋可改用 update
+        # 這裡我們只 Append，若要覆蓋可改用 update，這裡保留您的 append 設定
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆數據與分析")
     except Exception as e:
