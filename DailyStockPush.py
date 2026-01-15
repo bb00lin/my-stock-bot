@@ -21,7 +21,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        ai_model = genai.GenerativeModel('gemini-pro') 
+        ai_model = genai.GenerativeModel('gemini-pro')
     except Exception as e:
         print(f"Gemini 初始化失敗: {e}")
 
@@ -63,28 +63,44 @@ def get_gemini_strategy(data):
     3. "最佳買點：等待回測 5日線({data['ma5']}) 縮量佈局。"
     """
     try:
-        # 增加重試機制
         response = ai_model.generate_content(prompt, request_options={"timeout": 60})
         return response.text.replace('\n', ' ').strip()
     except Exception as e:
         error_msg = str(e)
         if "429" in error_msg: return "AI 忙線 (429)"
+        if "404" in error_msg: return "模型錯誤 (404)"
         return f"AI 異常: {error_msg[:15]}..."
 
 # ==========================================
-# 3. 讀取 WATCH_LIST
+# 3. 讀取 WATCH_LIST (增強容錯邏輯)
 # ==========================================
 def get_watch_list_from_sheet():
     try:
         client = get_gspread_client()
-        sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
+        
+        # 1. 先嘗試開啟檔案
+        try:
+            spreadsheet = client.open("WATCH_LIST")
+        except Exception:
+            print("❌ 找不到檔案 'WATCH_LIST'。請確認檔名正確且已分享給機器人。")
+            return []
+
+        # 2. 再嘗試開啟分頁 (若找不到指定名稱，就開第一個)
+        try:
+            sheet = spreadsheet.worksheet("WATCH_LIST")
+        except Exception:
+            print("⚠️ 找不到 'WATCH_LIST' 分頁，自動切換讀取『第一個分頁』...")
+            sheet = spreadsheet.get_worksheet(0)
+            
         records = sheet.get_all_records()
         watch_data = []
+        print(f"📋 正在讀取雲端觀察名單，共 {len(records)} 筆...")
         
         for row in records:
             raw_sid = str(row.get('股票代號', '')).strip()
             if not raw_sid: continue
             
+            # 自動補零 (946 -> 00946)
             if raw_sid.isdigit():
                 if len(raw_sid) == 3: sid = "00" + raw_sid
                 elif len(raw_sid) < 4: sid = raw_sid.zfill(4)
@@ -99,7 +115,7 @@ def get_watch_list_from_sheet():
             watch_data.append({'sid': sid, 'is_hold': is_hold, 'cost': float(cost)})
         return watch_data
     except Exception as e:
-        print(f"❌ 讀取 WATCH_LIST 失敗: {e}")
+        print(f"❌ 讀取 WATCH_LIST 發生未預期錯誤: {e}")
         return []
 
 # ==========================================
@@ -165,7 +181,9 @@ def fetch_pro_metrics(stock_data):
     cost = stock_data['cost']
 
     stock, full_id = get_tw_stock(sid)
-    if not stock: return None
+    if not stock: 
+        print(f"⚠️ 找不到數據: {sid}")
+        return None
     try:
         df_hist = stock.history(period="6mo")
         if len(df_hist) < 60: return None
@@ -234,10 +252,10 @@ def main():
     watch_data_list = get_watch_list_from_sheet()
     
     if not watch_data_list:
-        print("⚠️ 無法讀取觀察名單，請檢查 Google Sheet。")
+        print("❌ 中止執行：觀察名單讀取失敗。")
         return
 
-    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 10 秒，確保 100% 成功)...")
+    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 10 秒，確保 AI 不中斷)...")
 
     for stock_data in watch_data_list:
         res = fetch_pro_metrics(stock_data)
@@ -255,7 +273,6 @@ def main():
                 res['ai_strategy']
             ])
             
-        # [關鍵修正] 10 秒間隔，絕對不會觸發 429 錯誤
         time.sleep(10.0) 
     
     results_line.sort(key=lambda x: x['score'], reverse=True)
