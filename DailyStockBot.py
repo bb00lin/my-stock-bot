@@ -28,8 +28,7 @@ def sync_to_sheets(data_list):
     try:
         client = get_gspread_client()
         sheet = client.open("法人精選監測").get_worksheet(0)
-        # 批量寫入數據，採用 USER_ENTERED 以保持格式
-        sheet.append_rows(data_list, value_input_option='USER_ENTERED')
+        sheet.append_rows(data_list)
         print(f"✅ 成功同步 {len(data_list)} 筆數據至 '法人精選監測'")
     except Exception as e:
         print(f"⚠️ '法人精選監測' 同步失敗: {e}")
@@ -37,6 +36,7 @@ def sync_to_sheets(data_list):
 def update_watch_list_sheet(recommended_stocks):
     """將推薦標的匯入 'WATCH_LIST'"""
     if not recommended_stocks: return
+
     try:
         client = get_gspread_client()
         try:
@@ -49,9 +49,13 @@ def update_watch_list_sheet(recommended_stocks):
         
         new_rows = []
         today_str = datetime.date.today().strftime('%Y-%m-%d')
+
+        print(f"📋 準備將 {len(recommended_stocks)} 檔潛力股匯入 WATCH_LIST...")
+
         for stock in recommended_stocks:
             sid = stock['id']
             if sid not in existing_ids:
+                # 寫入格式: 代號, (空), (空), (空), (空), 推薦理由
                 reason_note = f"{today_str} {stock['reason']}"
                 new_rows.append([sid, "", "", "", "", reason_note])
                 existing_ids.add(sid)
@@ -59,6 +63,9 @@ def update_watch_list_sheet(recommended_stocks):
         if new_rows:
             sheet.append_rows(new_rows, value_input_option='USER_ENTERED')
             print(f"✅ 已將 {len(new_rows)} 檔新標的加入 'WATCH_LIST'")
+        else:
+            print("ℹ️ 推薦標的已存在於 WATCH_LIST，無新增項目。")
+
     except Exception as e:
         print(f"⚠️ 更新 WATCH_LIST 失敗: {e}")
 
@@ -69,6 +76,7 @@ def get_streak_only(sid_clean):
         start = (datetime.date.today() - datetime.timedelta(days=20)).strftime('%Y-%m-%d')
         df = dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start)
         if df is None or df.empty: return 0, 0
+        
         def count_s(name):
             d = df[df['name'] == name].sort_values('date', ascending=False)
             c = 0
@@ -84,19 +92,27 @@ def calculate_indicators(df):
     close = df['Close']
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
+    
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rsi = 100 - (100 / (1 + (gain / loss)))
+    
     rsv = (close - low_min) / (high_max - low_min) * 100
     k = rsv.ewm(com=2).mean() 
     d = k.ewm(com=2).mean()
+    
     return rsi, k, d
 
 def analyze_v14(ticker, name):
-    """核心篩選邏輯：雙軌制 + 深度指標 (乖離/量能狀態)"""
+    """核心篩選邏輯：雙軌制 (穩健型 vs 飆股型)"""
     try:
         s = yf.Ticker(ticker)
+        i = s.info
+        m = i.get('grossMargins', 0) or 0
+        e = i.get('trailingEps', 0) or 0
+        if m < 0.10 or e <= 0: return None, None, None
+
         df = s.history(period="1y")
         if len(df) < 60: return None, None, None
         
@@ -111,60 +127,68 @@ def analyze_v14(ticker, name):
         vol_today = df.iloc[-1]['Volume']
         vol_avg = df['Volume'].iloc[-11:-1].mean()
         vol_ratio = vol_today / vol_avg if vol_avg > 0 else 0
+        vol_tag = f"🔥爆量({vol_ratio:.1f}x)" if vol_ratio > 2.0 else f"{vol_ratio:.1f}x"
         
-        if vol_ratio > 1.8: vol_str = f"🔥爆量({vol_ratio:.1f}x)"
-        elif vol_ratio > 1.0: vol_str = f"📈溫和({vol_ratio:.1f}x)"
-        elif vol_ratio < 0.7: vol_str = f"⚠️縮量({vol_ratio:.1f}x)"
-        else: vol_str = f"☁️量平({vol_ratio:.1f}x)"
-        
-        bias_60 = ((cp - ma60) / ma60) * 100
         bias_5 = ((cp - ma5) / ma5) * 100
+        kd_status = "高檔" if k_val > 80 else ("低檔" if k_val < 20 else "穩定")
         
         status_label = "✅安全"
         if bias_5 > 7 or rsi_val > 75 or k_val > 85:
             status_label = "⚠️過熱"
         
+        status_msg = f"{status_label}(乖離{bias_5:.1f}%|RSI:{rsi_val:.0f}|K:{k_val:.0f})"
+
         pure_id = ticker.split('.')[0]
         fs, ss = get_streak_only(pure_id)
         
-        # --- 篩選條件 ---
+        # --- 基礎報表生成 (只要有法人買且多頭就列入) ---
         if (fs >= 2 or ss >= 1) and cp > ma60 and vol_ratio > 1.1:
             type_tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
             
             line_txt = (f"📍{ticker} {name} ({type_tag})\n"
-                        f"量能：{vol_str}\n"
-                        f"狀態：乖離{bias_60:.1f}% | RSI:{rsi_val:.0f}\n"
+                        f"法人：外資{fs}d | 投信{ss}d\n"
+                        f"量比：{vol_tag}\n"
+                        f"狀態：{status_msg} [{kd_status}]\n"
                         f"現價：{cp:.2f}\n"
                         f"-----------------------------------")
             
-            # --- 重要：修正欄位對齊 (對應 A 到 N 欄) ---
             sheet_data = [
-                str(datetime.date.today()), # A: 日期
-                pure_id,                    # B: 代碼
-                name,                       # C: 名稱
-                type_tag,                   # D: 標籤
-                f"{bias_60:+.1f}%",         # E: 乖離%
-                vol_str,                    # F: 量能狀態
-                fs,                         # G: 外資連買
-                ss,                         # H: 投信連買
-                round(vol_ratio, 2),        # I: 量比 (數值) -> 修正處
-                status_label,               # J: 狀態 -> 修正處
-                round(rsi_val, 1),          # K: RSI
-                round(k_val, 1),            # L: K值
-                cp,                         # M: 現價
-                ""                          # N: AI 投資策略 (由 DailyStockPush 填寫或留白)
+                str(datetime.date.today()), pure_id, name, type_tag, 
+                fs, ss, round(vol_ratio, 2), status_label, 
+                round(rsi_val, 1), round(k_val, 1), cp
             ]
 
+            # --- 進階 AI 雙軌推薦邏輯 ---
             recommendation = None
-            is_stable = ((ss >= 2 or fs >= 3) and (vol_ratio > 1.2) and (50 <= rsi_val <= 75) and (k_val <= 80))
-            is_aggressive = ((ss >= 1 or fs >= 2) and (vol_ratio > 2.5) and (rsi_val > 60) and (cp > ma5))
+            
+            # 策略 A: 🛡️ AI 穩健型 (低風險，買起漲)
+            # 條件：籌碼穩定 + 量能溫和 + 技術面未過熱
+            is_stable = (
+                (ss >= 2 or fs >= 3) and        # 籌碼連續性要求高
+                (vol_ratio > 1.2) and           # 有量但不失控
+                (50 <= rsi_val <= 75) and       # 趨勢健康
+                (k_val <= 80)                   # KD未鈍化
+            )
+
+            # 策略 B: 🚀 AI 飆股型 (高風險，追噴出)
+            # 條件：爆量攻擊 + 技術面強勢 (不限RSI/KD上限) + 必須站上5日線
+            is_aggressive = (
+                (ss >= 1 or fs >= 2) and        # 籌碼有點火即可
+                (vol_ratio > 2.5) and           # 必須爆大量 (攻擊訊號)
+                (rsi_val > 60) and              # 動能要強
+                (cp > ma5)                      # 股價必須強勢在5日線上
+            )
 
             if is_stable:
-                recommendation = {'id': pure_id, 'reason': f"🛡️AI穩健: {type_tag} (量{vol_ratio:.1f}x/乖離{bias_60:.1f}%)"}
+                reason = f"🛡️AI穩健: {type_tag} (量{vol_ratio:.1f}x/RSI{rsi_val:.0f})"
+                recommendation = {'id': pure_id, 'reason': reason}
+            
             elif is_aggressive:
-                recommendation = {'id': pure_id, 'reason': f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs}投{ss})"}
+                reason = f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs}投{ss})"
+                recommendation = {'id': pure_id, 'reason': reason}
 
             return line_txt, sheet_data, recommendation
+
     except: return None, None, None
     return None, None, None
 
@@ -172,33 +196,49 @@ def main():
     dl = DataLoader()
     stock_df = dl.taiwan_stock_info()
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
+    
     targets = stock_df[stock_df['stock_id'].str.len() == 4].head(1000) 
     
-    line_results, sheet_results, watch_list_candidates = [], [], []
+    line_results = []
+    sheet_results = []
+    watch_list_candidates = []
+
     seen_ids = set()
-    print(f"啟動雙軌策略+深度指標掃描 (1000檔)...")
+    print(f"啟動雙軌策略掃描 (1000檔)...")
     
     for _, row in targets.iterrows():
         sid = row['stock_id']
         if sid in seen_ids: continue
         seen_ids.add(sid)
-        suffix = ".TWO" if m_col in row and ('上櫃' in str(row[m_col]) or 'OTC' in str(row[m_col])) else ".TW"
         
-        l_res, s_res, rec_obj = analyze_v14(f"{sid}{suffix}", row['stock_name'])
+        if m_col and m_col in row:
+            suffix = ".TWO" if '上櫃' in str(row[m_col]) or 'OTC' in str(row[m_col]) else ".TW"
+        else:
+            suffix = ".TWO" if int(sid) >= 8000 else ".TW"
+            
+        t = f"{sid}{suffix}"
+        l_res, s_res, rec_obj = analyze_v14(t, row['stock_name'])
+        
         if l_res:
             line_results.append(l_res)
             sheet_results.append(s_res)
+        
         if rec_obj:
             watch_list_candidates.append(rec_obj)
+
         time.sleep(0.4)
 
     if sheet_results:
         sync_to_sheets(sheet_results)
+
     if watch_list_candidates:
         update_watch_list_sheet(watch_list_candidates)
+
     if line_results:
         msg = f"🔍 【{datetime.date.today()} 法人精選(1000檔)】\n\n" + "\n".join(line_results)
         send_line(msg)
+    else:
+        print("今日無符合標的。")
 
 if __name__ == "__main__":
     main()
