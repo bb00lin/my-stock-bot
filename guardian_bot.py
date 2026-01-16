@@ -8,7 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 
 # ================= 設定區 =================
 SHEET_NAME = 'Guardian_Price_Check'
@@ -19,10 +19,12 @@ URL = "https://guardian.com.sg/"
 def clean_price(price_text):
     if not price_text:
         return "N/A"
+    # 移除常見貨幣符號與逗號
     return price_text.replace("SGD", "").replace("$", "").replace(",", "").strip()
 
 def init_driver():
     options = webdriver.ChromeOptions()
+    # === GitHub Actions 設定 ===
     options.add_argument('--headless=new')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
@@ -41,31 +43,79 @@ def connect_google_sheet():
     return sheet
 
 def empty_cart(driver):
+    """ 強力清空購物車模式 """
     print("🧹 正在清空購物車...")
-    max_retries = 3
-    for _ in range(max_retries):
+    max_retries = 10 # 增加重試次數
+    
+    # 強制確保在購物車頁面
+    if "cart" not in driver.current_url:
+        driver.get("https://guardian.com.sg/cart")
+        time.sleep(3)
+
+    for i in range(max_retries):
         try:
-            if "cart" not in driver.current_url:
-                driver.get("https://guardian.com.sg/cart")
-                time.sleep(3)
+            # 策略1: 找 aria-label
+            # 策略2: 找 class 包含 remove 的按鈕
+            # 策略3: 找 icon 包含 close/remove 的元素
+            remove_btns = driver.find_elements(By.CSS_SELECTOR, 
+                "button[aria-label='remove from cart'], button[aria-label='Remove item'], button.remove, button.action-delete")
             
-            # 使用通用的移除按鈕定位
-            remove_btns = driver.find_elements(By.CSS_SELECTOR, "button[aria-label='remove from cart']")
             if not remove_btns:
-                print("   ✅ 購物車已清空")
-                break
+                # 再次確認是否真的空了 (檢查是否有 item-qty 元素)
+                items = driver.find_elements(By.CSS_SELECTOR, "input.item-qty")
+                if not items:
+                    print("   ✅ 購物車已確認清空")
+                    break
+                else:
+                    print("   ⚠️ 找不到移除按鈕，但購物車內仍有商品...")
+                    # 嘗試重新整理
+                    driver.refresh()
+                    time.sleep(3)
+                    continue
             
-            print(f"   🗑️ 發現 {len(remove_btns)} 個商品，正在移除...")
-            remove_btns[0].click()
+            print(f"   🗑️ 發現 {len(remove_btns)} 個移除按鈕，正在點擊第 1 個...")
+            # 點擊第一個
+            driver.execute_script("arguments[0].click();", remove_btns[0])
+            
+            # 等待讀取轉圈圈消失
             time.sleep(2)
             try:
                 WebDriverWait(driver, 5).until_not(EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader")))
             except:
-                time.sleep(1)
-        except Exception:
-            break
+                pass
+            time.sleep(1) # 額外緩衝
+
+        except (StaleElementReferenceException, Exception) as e:
+            print(f"   ⚠️ 移除過程發生小錯誤 (重試中): {str(e)[:50]}")
+            time.sleep(1)
+            continue
 
 # ================= 核心邏輯 =================
+def get_price_safely(driver):
+    """ 多重策略抓取價格 """
+    # 策略清單 (優先順序)
+    xpaths = [
+        # 策略 1: 原本的邏輯 (Div 文字是 Subtotal -> 找隔壁 Span)
+        "//div[contains(text(), 'Subtotal')]/following-sibling::span",
+        # 策略 2: 找包含 Subtotal 的元素的父層 -> 再找裡面包含 SGD 的元素
+        "//*[contains(text(), 'Subtotal')]/..//*[contains(text(), 'SGD')]",
+        # 策略 3: 找包含 Subtotal 的元素的父層 -> 再找裡面包含 $ 的元素
+        "//*[contains(text(), 'Subtotal')]/..//*[contains(text(), '$')]",
+        # 策略 4: 只要是 Cart Summary 區塊裡的任何 Subtotal 關鍵字旁邊的數字
+        "//div[contains(@class, 'summary')]//span[contains(text(), 'Subtotal')]/following::span[1]"
+    ]
+    
+    for xpath in xpaths:
+        try:
+            element = driver.find_element(By.XPATH, xpath)
+            text = element.text.strip()
+            if text:
+                return clean_price(text)
+        except:
+            continue
+            
+    return None # 都找不到
+
 def process_sku(driver, sku):
     print(f"\n🔍 開始搜尋 SKU: {sku}")
     prices = {} 
@@ -118,7 +168,7 @@ def process_sku(driver, sku):
 
         time.sleep(4)
 
-        # 3. 加入購物車 (修正版：點擊後強制前往購物車頁面)
+        # 3. 加入購物車 (強制跳轉版)
         try:
             add_btn = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart']"))
@@ -128,7 +178,6 @@ def process_sku(driver, sku):
             add_btn.click()
             print("🛒 已點擊加入購物車，等待處理...")
             
-            # === 關鍵修改：不等待彈窗，直接睡 5 秒然後跳轉 ===
             time.sleep(5) 
             print("🚀 直接跳轉至購物車頁面...")
             driver.get("https://guardian.com.sg/cart")
@@ -142,29 +191,31 @@ def process_sku(driver, sku):
 
         # 4. 調整數量與抓取價格
         for qty in range(1, 6):
+            # 等待讀取結束
             try:
                 WebDriverWait(driver, 5).until_not(EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader")))
             except:
                 pass
 
-            try:
-                # 抓取 Subtotal
-                subtotal_element = driver.find_element(By.XPATH, "//div[contains(text(), 'Subtotal')]/following-sibling::span")
-                current_price = clean_price(subtotal_element.text)
+            # === 抓取價格 (使用新版多重策略) ===
+            current_price = get_price_safely(driver)
+            
+            if current_price:
                 prices[qty] = current_price
                 print(f"   💰 數量 {qty}: SGD {current_price}")
-            except NoSuchElementException:
-                print("   ⚠️ 找不到價格欄位")
+            else:
+                print("   ⚠️ 找不到價格欄位 (所有策略皆失敗)")
                 prices[qty] = "Error"
-                # 如果連價格都找不到，可能是跳轉失敗，拍張照
                 driver.save_screenshot(f"error_price_{sku}_qty{qty}.png")
 
+            # 增加數量
             if qty < 5:
                 try:
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     plus_btn.click()
                     time.sleep(3)
                     
+                    # 檢查限購
                     try:
                         error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')]")
                         if error_msg.is_displayed():
