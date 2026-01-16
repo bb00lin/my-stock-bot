@@ -1,7 +1,6 @@
 import os, yfinance as yf, pandas as pd, requests, time, datetime, sys
 import gspread
 import logging
-# 使用 Google GenAI 新版 SDK
 from google import genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
@@ -26,7 +25,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"❌ Gemini Client 初始化失敗: {e}")
 
-# 模型清單 (優先使用 2.0 與 1.5 Flash)
+# 模型清單 (優先順序)
 MODEL_CANDIDATES = [
     "gemini-2.0-flash-exp", 
     "gemini-1.5-flash",
@@ -49,31 +48,66 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. AI 策略生成器 (Gemini)
+# 2. 輔助數據獲取 (新增籌碼與計算)
+# ==========================================
+def get_streak_only(sid_clean):
+    """獲取外資與投信連買天數"""
+    try:
+        dl = DataLoader()
+        start = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+        # 修正: 確保 sid 是純數字
+        clean_id = ''.join(filter(str.isdigit, str(sid_clean)))
+        df = dl.taiwan_stock_institutional_investors(stock_id=clean_id, start_date=start)
+        
+        if df is None or df.empty: return 0, 0
+        
+        def count_s(name):
+            d = df[df['name'] == name].sort_values('date', ascending=False)
+            c = 0
+            for _, r in d.iterrows():
+                if (r['buy'] - r['sell']) > 0: c += 1
+                else: break
+            return c
+        return count_s('Foreign_Investor'), count_s('Investment_Trust')
+    except: return 0, 0
+
+def get_vol_status_str(ratio):
+    """量能狀態文字化"""
+    if ratio > 1.8: return f"🔥爆量({ratio:.1f}x)"
+    elif ratio > 1.2: return f"📈溫和({ratio:.1f}x)"
+    elif ratio < 0.7: return f"⚠️縮量({ratio:.1f}x)"
+    else: return f"☁️量平({ratio:.1f}x)"
+
+# ==========================================
+# 3. AI 策略生成器 (深度綜合評估)
 # ==========================================
 def get_gemini_strategy(data):
-    """
-    呼叫 Gemini 生成操盤建議
-    """
     if not ai_client: return "AI 未啟動 (Init Fail)"
     
-    hold_txt = f"目前持有 (成本 {data['cost']})" if data['is_hold'] else "目前空手觀望"
-    
-    prompt = f"""
-    角色：專業台股操盤手。
-    任務：分析個股 {data['name']} ({data['id']}) 並給出約 80 字的操作建議。
-    
-    【技術數據】
-    - 收盤：{data['p']} (漲跌幅 {data['d1']:.2%})
-    - 均線支撐：5日線 {data['ma5']} | 10日線 {data['ma10']} | 20日線 {data['ma20']}
-    - 指標：RSI {data['rsi']} | 量比 {data['vol_r']}x
-    - 系統訊號：{data['hint']} ({data['risk']})
-    - 狀態：{hold_txt}
+    # 計算盈虧狀態
+    profit_info = "目前無庫存，純觀察"
+    if data['is_hold']:
+        roi = ((data['p'] - data['cost']) / data['cost']) * 100
+        profit_info = f"🔴庫存持有中 (成本:{data['cost']} | 現價:{data['p']} | 損益:{roi:+.2f}%)"
 
-    【請模仿以下語氣撰寫】
-    1. "如果明日開盤維持在 {data['p']} 以上..."
-    2. "監控量能：若持續出量則..."
-    3. "最佳買點：等待回測 5日線({data['ma5']}) 縮量佈局。"
+    prompt = f"""
+    角色：頂尖台股操盤手。
+    任務：針對個股 {data['name']} ({data['id']}) 進行全方位診斷，並給出下一步具體操作建議。
+    
+    【核心籌碼與技術數據】
+    - 價格：{data['p']} (日漲跌 {data['d1']:.2%}) | 乖離率：{data['bias_str']}
+    - 籌碼：外資連買 {data['fs']} 天 | 投信連買 {data['ss']} 天
+    - 量能：{data['vol_str']}
+    - 指標：RSI {data['rsi']} | 評分 {data['score']}分
+    - 系統訊號：{data['risk']} | {data['hint']}
+    
+    【使用者資產狀態】
+    - {profit_info}
+
+    【請依照上述數據，給出約 80 字的綜合操作建議】
+    1. 針對「庫存」或「觀察」身分，直接給出：續抱、加碼、減碼、止損 或 觀望、切入。
+    2. 結合「損益%」與「乖離/量能」，例如：「獲利已達10%且爆量乖離過大，建議分批獲利」或「投信連買3天，拉回五日線可佈局」。
+    3. 給出一個關鍵防守價位或目標價。
     """
 
     last_error = ""
@@ -98,7 +132,7 @@ def get_gemini_strategy(data):
     return f"❌ AI 失敗: {last_error}"
 
 # ==========================================
-# 3. 讀取 WATCH_LIST
+# 4. 讀取 WATCH_LIST
 # ==========================================
 def get_watch_list_from_sheet():
     try:
@@ -135,7 +169,7 @@ def get_watch_list_from_sheet():
         return []
 
 # ==========================================
-# 4. 技術指標運算
+# 5. 技術指標運算
 # ==========================================
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -161,62 +195,39 @@ def get_tw_stock(sid):
     return None, None
 
 # ==========================================
-# 5. 核心診斷引擎 (已更新為您的詳細邏輯)
+# 6. 核心數據抓取與計算
 # ==========================================
 def generate_auto_analysis(r, is_hold, cost):
-    """
-    根據當下數據與庫存狀態，生成動態操作建議
-    """
-    # --- A. 風控評級 (RSI 狀態) ---
-    if r['rsi'] >= 80: 
-        risk = "🚨 極度過熱"
-    elif r['rsi'] >= 70:
-        risk = "🚩 高檔警戒"
-    elif 40 <= r['rsi'] <= 60 and r['d1'] > 0:
-        risk = "✅ 趨勢穩健"
-    elif r['rsi'] <= 30:
-        risk = "🛡️ 超跌打底"
-    else:
-        risk = "正常波動"
+    # 邏輯判斷保持不變，直接沿用
+    if r['rsi'] >= 80: risk = "🚨極度過熱"
+    elif r['rsi'] >= 70: risk = "🚩高檔警戒"
+    elif 40 <= r['rsi'] <= 60 and r['d1'] > 0: risk = "✅趨勢穩健"
+    elif r['rsi'] <= 30: risk = "🛡️超跌打底"
+    else: risk = "正常波動"
 
-    # --- B. 動向判斷 (量價關係) ---
     trends = []
-    if r['vol_r'] > 2.0 and r['d1'] > 0: trends.append("🔥 主力強攻")
-    elif r['vol_r'] > 1.2 and r['d1'] > 0: trends.append("📈 有效放量")
-    elif r['vol_r'] < 0.7 and r['d1'] > 0.01: trends.append("⚠️ 縮量背離")
-    if r['amt_t'] > 30: trends.append("💰 熱錢中心")
+    if r['vol_r'] > 2.0 and r['d1'] > 0: trends.append("🔥主力強攻")
+    elif r['vol_r'] > 1.2: trends.append("📈有效放量")
+    elif r['vol_r'] < 0.7: trends.append("⚠️縮量")
     trend_status = " | ".join(trends) if trends else "動能平淡"
-
-    # --- C. 綜合提示 (操作指令) ---
+    
     hint = ""
     profit_pct = ((r['p'] - cost) / cost * 100) if (is_hold and cost > 0) else 0
     profit_str = f"({profit_pct:+.1f}%)" if (is_hold and cost > 0) else ""
 
     if is_hold:
-        if r['rsi'] >= 80:
-            hint = f"❗指令：分批止盈 {profit_str}"
-        elif r['d1'] <= -0.04: # 單日大跌
-            hint = f"📢警示：急跌守5日線 {profit_str}"
-        elif r['rsi'] < 45 and r['d5'] < -0.05:
-            hint = f"🛑指令：停損審視 {profit_str}"
-        elif r['m6'] > 0.1 and r['d1'] > -0.02:
-            hint = f"💎指令：波段續抱 {profit_str}"
-        else:
-            hint = f"📦指令：持股觀察 {profit_str}"
-    
-    else: # 觀察股邏輯
-        if r['score'] >= 9:
-            hint = "⭐⭐ 優先佈局：指標極強"
-        elif r['score'] >= 8 and r['vol_r'] > 1.5:
-            hint = "🚀 進場訊號：放量轉強"
-        elif r['rsi'] <= 30 and r['d1'] > 0:
-            hint = "💡 進場訊號：跌深反彈"
-        elif r['rsi'] >= 75:
-            hint = "🚫 指令：高位，禁止追價"
-        elif r['m1'] > 0.1 and r['d1'] < -0.02:
-            hint = "📉 觀察：拉回找支撐"
-        else:
-            hint = "持續追蹤"
+        if r['rsi'] >= 80: hint = f"❗分批止盈 {profit_str}"
+        elif r['d1'] <= -0.04: hint = f"📢急跌守5日線 {profit_str}"
+        elif r['rsi'] < 45 and r['d5'] < -0.05: hint = f"🛑停損審視 {profit_str}"
+        elif r['m6'] > 0.1 and r['d1'] > -0.02: hint = f"💎波段續抱 {profit_str}"
+        else: hint = f"📦持股觀察 {profit_str}"
+    else:
+        if r['score'] >= 9: hint = "⭐⭐優先佈局"
+        elif r['score'] >= 8 and r['vol_r'] > 1.5: hint = "🚀放量轉強"
+        elif r['rsi'] <= 30 and r['d1'] > 0: hint = "💡跌深反彈"
+        elif r['rsi'] >= 75: hint = "🚫高位禁追"
+        elif r['m1'] > 0.1 and r['d1'] < -0.02: hint = "📉拉回找撐"
+        else: hint = "持續追蹤"
 
     return risk, trend_status, hint
 
@@ -228,7 +239,6 @@ def fetch_pro_metrics(stock_data):
     stock, full_id = get_tw_stock(sid)
     if not stock: return None
     try:
-        # [更新] 改為 8mo 以符合您的運算邏輯
         df_hist = stock.history(period="8mo")
         if len(df_hist) < 120: return None
         
@@ -240,19 +250,26 @@ def fetch_pro_metrics(stock_data):
         rsi_series = calculate_rsi(df_hist['Close'])
         clean_rsi = 0.0 if pd.isna(rsi_series.iloc[-1]) else round(rsi_series.iloc[-1], 1)
         
-        # 均線 (給 AI 用)
+        # 均線與乖離率計算
         ma5 = df_hist['Close'].rolling(5).mean().iloc[-1]
-        ma10 = df_hist['Close'].rolling(10).mean().iloc[-1]
         ma20 = df_hist['Close'].rolling(20).mean().iloc[-1]
+        ma60 = df_hist['Close'].rolling(60).mean().iloc[-1]
+        
+        # 乖離率 (以季線為基準，可代表波段位階)
+        bias_60 = ((curr_p - ma60) / ma60) * 100
         
         raw_yield = info.get('dividendYield', 0) or 0
         d1 = (curr_p / df_hist['Close'].iloc[-2]) - 1
         d5 = (curr_p / df_hist['Close'].iloc[-6]) - 1
         m1 = (curr_p / df_hist['Close'].iloc[-21]) - 1
         m6 = (curr_p / df_hist['Close'].iloc[-121]) - 1
-        vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
+        vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean() if df_hist['Volume'].iloc[-6:-1].mean() > 0 else 0
 
-        # [更新] 計分邏輯同步您的版本
+        # 新增籌碼與量能狀態
+        pure_id = ''.join(filter(str.isdigit, sid))
+        fs, ss = get_streak_only(pure_id) # 外資/投信連買
+        vol_str = get_vol_status_str(vol_ratio)
+
         score = 0
         if (info.get('profitMargins', 0) or 0) > 0: score += 2
         if curr_p > df_hist['Close'].iloc[0]: score += 3
@@ -260,6 +277,7 @@ def fetch_pro_metrics(stock_data):
         if 40 < clean_rsi < 70: score += 1
         if today_amount > 10: score += 1
         if vol_ratio > 1.5: score += 1
+        if fs >= 3 or ss >= 2: score += 1.5 # 籌碼加分
         if is_hold: score += 0.5 
 
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
@@ -272,14 +290,18 @@ def fetch_pro_metrics(stock_data):
             "yield": raw_yield, "amt_t": round(today_amount, 1),
             "d1": d1, "d5": d5, "m1": m1, "m6": m6,
             "is_hold": is_hold, "cost": cost,
-            "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2)
+            # 新增欄位數據
+            "bias_str": f"{bias_60:+.1f}%",
+            "vol_str": vol_str,
+            "fs": fs, "ss": ss,
+            # 輔助AI用
+            "ma5": round(ma5, 2), "ma10": round(ma20, 2), "ma20": round(ma20, 2)
         }
 
-        # 生成規則判斷
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
-        # 呼叫 AI (將規則判斷結果餵給 AI)
+        # 呼叫 AI
         ai_strategy = get_gemini_strategy(res)
         res['ai_strategy'] = ai_strategy
         
@@ -298,7 +320,8 @@ def sync_to_sheets(data_list):
         print(f"⚠️ Google Sheets 同步失敗: {e}")
 
 def main():
-    current_date = datetime.date.today().strftime('%Y-%m-%d')
+    # [更新] 時間格式顯示到分鐘
+    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     results_line, results_sheet = [], []
 
     watch_data_list = get_watch_list_from_sheet()
@@ -316,10 +339,13 @@ def main():
             
             hold_mark = "📦庫存" if res['is_hold'] else "👀觀察"
             
+            # [更新] Sheet 欄位順序調整 (移除籌碼，加入乖離/量能/法人)
+            # 對應: 時間, 代號, 名稱, 庫存, 評分, RSI, 產業, 乖離, 量能, 外資, 投信, 現價...
             results_sheet.append([
-                current_date, res['id'], res['name'], hold_mark, 
+                current_time, res['id'], res['name'], hold_mark, 
                 res['score'], res['rsi'], res['industry'], 
-                "🟢觀望", res['vol_r'], res['p'], res['yield'], res['amt_t'], 
+                res['bias_str'], res['vol_str'], res['fs'], res['ss'], # 新增的4個欄位
+                res['p'], res['yield'], res['amt_t'], 
                 res['d1'], res['d5'], res['m1'], res['m6'],
                 res['risk'], res['trend'], res['hint'],
                 res['ai_strategy']
@@ -329,7 +355,7 @@ def main():
     
     results_line.sort(key=lambda x: x['score'], reverse=True)
     if results_line:
-        msg = f"📊 【{current_date} 庫存與 AI 診斷】\n"
+        msg = f"📊 【{current_time} 庫存與 AI 診斷】\n"
         
         holdings = [r for r in results_line if r['is_hold']]
         if holdings:
