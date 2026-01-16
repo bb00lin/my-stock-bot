@@ -1,6 +1,7 @@
 import os, yfinance as yf, pandas as pd, requests, time, datetime, sys
 import gspread
 import logging
+# [核心升級] 使用 Google GenAI 新版 SDK
 from google import genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
@@ -21,16 +22,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ai_client = None
 if GEMINI_API_KEY:
     try:
+        # 使用新版 SDK 初始化
         ai_client = genai.Client(api_key=GEMINI_API_KEY)
     except Exception as e:
         print(f"❌ Gemini Client 初始化失敗: {e}")
 
 # 定義模型優先順序 (包含各種變體名稱以防 404)
-# 移除 2.0-flash-exp 因為您的帳號似乎無權限 (limit: 0)
+# 程式會依序嘗試，直到成功為止
 MODEL_CANDIDATES = [
     "gemini-1.5-flash",
     "gemini-1.5-flash-latest",
-    "gemini-1.5-flash-001",
     "gemini-1.5-pro",
     "gemini-1.0-pro",
     "gemini-pro"
@@ -109,10 +110,10 @@ def get_gemini_strategy(data):
             
             # 情境 B: 找不到模型 (404) -> 換下一個名字試試
             elif "404" in error_msg or "not found" in error_msg.lower():
-                # print(f"   ⚠️ 模型 {model_name} 不存在，嘗試下一個...")
+                # 默默跳過，嘗試下一個模型
                 continue
             
-            # 情境 C: 其他錯誤 (如 400, 403)
+            # 情境 C: 其他錯誤
             else:
                 print(f"   ❌ 模型 {model_name} 發生錯誤: {error_msg[:30]}...")
                 continue
@@ -121,12 +122,13 @@ def get_gemini_strategy(data):
     return "AI 暫時無法服務 (全線忙碌)"
 
 # ==========================================
-# 3. 讀取 WATCH_LIST
+# 3. 讀取 WATCH_LIST (含容錯與補零)
 # ==========================================
 def get_watch_list_from_sheet():
     try:
         client = get_gspread_client()
         try:
+            # 嘗試開啟指定分頁
             sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
         except:
             print("⚠️ 找不到 'WATCH_LIST' 分頁，自動切換讀取『第一個分頁』...")
@@ -140,6 +142,7 @@ def get_watch_list_from_sheet():
             raw_sid = str(row.get('股票代號', '')).strip()
             if not raw_sid: continue
             
+            # 自動補零 (946 -> 00946)
             if raw_sid.isdigit():
                 if len(raw_sid) == 3: sid = "00" + raw_sid
                 elif len(raw_sid) < 4: sid = raw_sid.zfill(4)
@@ -170,6 +173,7 @@ def calculate_rsi(series, period=14):
 
 def get_tw_stock(sid):
     clean_id = str(sid).strip().upper()
+    # 智能後綴判斷
     if clean_id.startswith(('3', '4', '5', '6', '8')):
         suffixes = [".TWO", ".TW"]
     else:
@@ -220,9 +224,7 @@ def fetch_pro_metrics(stock_data):
     cost = stock_data['cost']
 
     stock, full_id = get_tw_stock(sid)
-    if not stock: 
-        print(f"⚠️ 找不到數據: {sid}")
-        return None
+    if not stock: return None
     try:
         df_hist = stock.history(period="6mo")
         if len(df_hist) < 60: return None
@@ -296,7 +298,7 @@ def main():
         return
 
     # [關鍵] 將間隔拉長到 15 秒，這是免費版最安全的節奏
-    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 15 秒，確保不被封鎖)...")
+    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 15 秒，確保 AI 不中斷)...")
 
     for stock_data in watch_data_list:
         res = fetch_pro_metrics(stock_data)
