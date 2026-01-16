@@ -42,64 +42,29 @@ def connect_google_sheet():
     return sheet
 
 def empty_cart(driver):
-    """ 強力清空購物車模式 (三道防線版) """
-    print("🧹 正在清空購物車...")
-    
-    # 確保在購物車頁面
-    if "cart" not in driver.current_url:
-        driver.get("https://guardian.com.sg/cart")
-        time.sleep(3)
+    """ 核彈級清空：直接刪除 Cookies 與 LocalStorage """
+    print("🧹 正在執行核彈級清空 (刪除 Cookies)...")
+    try:
+        # 確保在網域內才能刪除 Cookies
+        if "guardian.com.sg" not in driver.current_url:
+             driver.get("https://guardian.com.sg/cart")
+             time.sleep(2)
 
-    max_retries = 3
-    for i in range(max_retries):
-        try:
-            # === 檢查是否已經空了 ===
-            # 判斷標準：找不到 input.item-qty 或是 頁面顯示 "Shopping Cart is Empty"
-            items = driver.find_elements(By.CSS_SELECTOR, "input.item-qty")
-            empty_msg = driver.find_elements(By.XPATH, "//*[contains(text(), 'Shopping Cart is Empty') or contains(text(), 'You have no items')]")
-            
-            if not items or empty_msg:
-                print("   ✅ 購物車已確認清空")
-                return
-
-            # === 防線 1: 點擊移除按鈕 ===
-            remove_btns = driver.find_elements(By.CSS_SELECTOR, 
-                "button[aria-label='remove from cart'], button[aria-label='Remove item'], button.remove, button.action-delete, a.action-delete")
-            
-            if remove_btns:
-                print(f"   🗑️ (策略1) 發現 {len(remove_btns)} 個移除按鈕，點擊中...")
-                driver.execute_script("arguments[0].click();", remove_btns[0])
-                time.sleep(3)
-                continue
-
-            # === 防線 2: 將數量設為 0 ===
-            if items:
-                print("   🔢 (策略2) 嘗試將數量設為 0...")
-                qty_input = items[0]
-                driver.execute_script("arguments[0].value = '0';", qty_input)
-                qty_input.send_keys(Keys.ENTER)
-                
-                # 有些網站改數量後需要點 Update 按鈕
-                try:
-                    update_btn = driver.find_element(By.CSS_SELECTOR, "button.update-cart, button[name='update_cart_action']")
-                    update_btn.click()
-                except:
-                    pass
-                time.sleep(3)
-                continue
-            
-        except Exception as e:
-            print(f"   ⚠️ 清空過程重試中: {e}")
-            time.sleep(2)
-            continue
-            
-    # === 防線 3: 核彈級重置 (Delete Cookies) ===
-    # 如果上面嘗試多次後，購物車還是有東西，直接刪除 Cookies
-    print("   ☢️ (最終策略) UI 清除失敗，執行 Cookie 重置...")
-    driver.delete_all_cookies()
-    driver.refresh()
-    time.sleep(4)
-    print("   ✅ Cookie 已清除，購物車應已重置")
+        # 1. 刪除所有 Cookies (讓網站忘記購物車)
+        driver.delete_all_cookies()
+        
+        # 2. 清除 Local Storage 與 Session Storage (雙重保險)
+        driver.execute_script("window.localStorage.clear();")
+        driver.execute_script("window.sessionStorage.clear();")
+        
+        # 3. 重新整理頁面以生效
+        driver.refresh()
+        time.sleep(4) # 等待頁面載入完成
+        
+        print("   ✅ 瀏覽器記憶已清除，購物車已歸零")
+        
+    except Exception as e:
+        print(f"   ⚠️ 清空過程發生小錯誤 (但不影響執行): {e}")
 
 # ================= 核心邏輯 =================
 def get_price_safely(driver):
@@ -268,7 +233,7 @@ def main():
         driver = init_driver()
         
         print("--- 初始化檢查 ---")
-        empty_cart(driver)
+        empty_cart(driver) # 程式開始前先洗白一次
         
         records = sheet.get_all_records()
         print(f"📋 共有 {len(records)} 筆 SKU 待處理")
