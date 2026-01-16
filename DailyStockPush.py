@@ -18,55 +18,48 @@ LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ==========================================
-# [關鍵修正] 模型自動偵測與選擇邏輯
+# [核心修正] AI 模型握手測試 (Handshake)
 # ==========================================
 ai_client = None
 ACTIVE_MODEL_NAME = None
 
 if GEMINI_API_KEY:
     try:
-        # 1. 建立客戶端
+        print("🔌 正在初始化 Gemini Client...")
         ai_client = genai.Client(api_key=GEMINI_API_KEY)
         
-        # 2. 詢問 Google 有哪些模型可用
-        print("🔍 正在偵測可用模型列表...")
-        try:
-            # 新版 SDK 列出模型的方法
-            available_models = []
-            for m in ai_client.models.list():
-                # 只找支援內容生成的模型
-                if "generateContent" in m.supported_generation_methods:
-                    available_models.append(m.name)
-            
-            print(f"📋 您的 API Key 可用模型: {available_models}")
-
-            # 3. 智慧選擇策略
-            # 優先順序：Flash 1.5 -> Pro 1.5 -> Pro 1.0 -> 隨便一個
-            if not available_models:
-                print("⚠️ 警告: 模型列表為空，將嘗試盲測 'gemini-1.5-flash'")
-                ACTIVE_MODEL_NAME = 'gemini-1.5-flash'
-            else:
-                # 尋找最佳匹配
-                if any("gemini-1.5-flash" in m for m in available_models):
-                    # 抓取清單中包含 gemini-1.5-flash 的那個完整名稱
-                    ACTIVE_MODEL_NAME = next(m for m in available_models if "gemini-1.5-flash" in m)
-                elif any("gemini-1.5-pro" in m for m in available_models):
-                    ACTIVE_MODEL_NAME = next(m for m in available_models if "gemini-1.5-pro" in m)
-                elif any("gemini-1.0-pro" in m for m in available_models):
-                    ACTIVE_MODEL_NAME = next(m for m in available_models if "gemini-1.0-pro" in m)
-                elif any("gemini-pro" in m for m in available_models):
-                    ACTIVE_MODEL_NAME = next(m for m in available_models if "gemini-pro" in m)
-                else:
-                    ACTIVE_MODEL_NAME = available_models[0] # 沒魚蝦也好，選第一個
-
-            print(f"✅ AI 系統就緒，已鎖定模型: 【{ACTIVE_MODEL_NAME}】")
-
-        except Exception as list_err:
-            print(f"⚠️ 無法列出模型 ({list_err})，將使用預設值 'gemini-1.5-flash'...")
-            ACTIVE_MODEL_NAME = 'gemini-1.5-flash'
+        # 候選模型清單 (優先順序)
+        # 新版 SDK 有時不需要 'models/' 前綴，有時需要，這裡混合測試
+        CANDIDATES = [
+            "gemini-1.5-flash", 
+            "gemini-1.5-pro", 
+            "gemini-2.0-flash-exp",
+            "gemini-1.0-pro",
+            "models/gemini-1.5-flash"
+        ]
+        
+        print("🔍 開始進行模型連線測試 (Health Check)...")
+        for model in CANDIDATES:
+            try:
+                # 嘗試發送一個極短的請求
+                response = ai_client.models.generate_content(
+                    model=model, 
+                    contents="Hi"
+                )
+                if response.text:
+                    ACTIVE_MODEL_NAME = model
+                    print(f"✅ 成功鎖定模型: 【{ACTIVE_MODEL_NAME}】 (測試回應: {response.text.strip()})")
+                    break
+            except Exception as e:
+                print(f"   ❌ 測試 {model} 失敗: {str(e)[:50]}...")
+                continue
+        
+        if not ACTIVE_MODEL_NAME:
+            print("⚠️ 警告: 所有候選模型皆測試失敗，將強制使用 'gemini-1.5-flash' 嘗試運行。")
+            ACTIVE_MODEL_NAME = "gemini-1.5-flash"
 
     except Exception as e:
-        print(f"❌ Gemini Client 初始化失敗: {e}")
+        print(f"❌ Gemini Client 初始化嚴重失敗: {e}")
 
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -83,7 +76,7 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. AI 策略生成器 (使用偵測到的 ACTIVE_MODEL_NAME)
+# 2. AI 策略生成器
 # ==========================================
 def get_gemini_strategy(data):
     if not ai_client or not ACTIVE_MODEL_NAME: return "AI 未啟動 (Init Fail)"
@@ -106,7 +99,6 @@ def get_gemini_strategy(data):
     3. "最佳買點：等待回測 5日線({data['ma5']}) 縮量佈局。"
     """
     try:
-        # [使用自動偵測到的模型名稱]
         response = ai_client.models.generate_content(
             model=ACTIVE_MODEL_NAME, 
             contents=prompt
@@ -115,7 +107,6 @@ def get_gemini_strategy(data):
     except Exception as e:
         error_msg = str(e)
         if "429" in error_msg: return "AI 忙線 (429)"
-        if "404" in error_msg: return f"模型失效 ({ACTIVE_MODEL_NAME})"
         return f"AI 異常: {error_msg[:15]}..."
 
 # ==========================================
@@ -218,7 +209,9 @@ def fetch_pro_metrics(stock_data):
     cost = stock_data['cost']
 
     stock, full_id = get_tw_stock(sid)
-    if not stock: return None
+    if not stock: 
+        print(f"⚠️ 找不到數據: {sid}")
+        return None
     try:
         df_hist = stock.history(period="6mo")
         if len(df_hist) < 60: return None
@@ -263,7 +256,7 @@ def fetch_pro_metrics(stock_data):
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
-        # 使用偵測到的模型名稱
+        # 使用鎖定的 ACTIVE_MODEL_NAME
         ai_strategy = get_gemini_strategy(res)
         res['ai_strategy'] = ai_strategy
         
