@@ -1,7 +1,8 @@
 import time
 import gspread
-import re 
-import os # 用來處理檔案路徑
+import re
+import os
+from datetime import datetime, timedelta, timezone
 from oauth2client.service_account import ServiceAccountCredentials
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -10,7 +11,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # ================= 設定區 =================
 SHEET_NAME = 'Guardian_Price_Check'
@@ -19,9 +20,63 @@ URL = "https://guardian.com.sg/"
 
 # ================= 輔助功能 =================
 def clean_price(price_text):
+    """ 清理價格字串，移除貨幣符號、逗號、空格，只留數字 """
     if not price_text:
-        return "N/A"
-    return price_text.replace("SGD", "").replace("$", "").replace(",", "").replace("\n", "").replace(" ", "").strip()
+        return ""
+    # 將所有非數字和小數點的字元都移除 (包含 SGD, $, \n, 空格)
+    cleaned = str(price_text).replace("SGD", "").replace("$", "").replace(",", "").replace("\n", "").replace(" ", "").strip()
+    return cleaned
+
+def get_taiwan_time():
+    """ 取得台灣時間 (UTC+8) 的字串，格式 YYYY-MM-DD HH:MM """
+    tz = timezone(timedelta(hours=8))
+    now = datetime.now(tz)
+    return now.strftime("%Y-%m-%d %H:%M")
+
+def compare_prices(user_prices, web_prices):
+    """ 比對使用者輸入價格與網頁抓取價格 """
+    mismatches = []
+    match_count = 0
+    valid_comparison_count = 0
+
+    for i in range(5):
+        # 取得第 i 個數量的價格 (索引從 0 開始，對應 Qty 1~5)
+        u_raw = user_prices[i]
+        w_raw = web_prices[i]
+
+        # 清理數據以便比對
+        u_val = clean_price(u_raw)
+        w_val = clean_price(w_raw)
+
+        # 如果使用者該欄位是空的，則跳過比對
+        if not u_val:
+            continue
+            
+        valid_comparison_count += 1
+
+        # 嘗試將字串轉為浮點數進行數值比對 (避免 64.00 != 64 的字串誤差)
+        try:
+            u_num = float(u_val)
+            w_num = float(w_val) if w_val and w_val != "Error" and w_val != "N/A" else -999
+            
+            if abs(u_num - w_num) < 0.01: # 視為相等
+                match_count += 1
+            else:
+                mismatches.append(f"Qty{i+1}:User({u_val})!=Web({w_val})")
+        except:
+            # 如果無法轉成數字 (例如寫了 'Error' 或中文)，直接比對字串
+            if u_val == w_val:
+                match_count += 1
+            else:
+                mismatches.append(f"Qty{i+1}:Diff")
+
+    # 產出結論
+    if valid_comparison_count == 0:
+        return "無使用者數據"
+    if not mismatches:
+        return "均相符"
+    else:
+        return "; ".join(mismatches)
 
 def init_driver():
     options = webdriver.ChromeOptions()
@@ -87,7 +142,7 @@ def get_price_safely(driver):
 
 def process_sku(driver, sku):
     print(f"\n🔍 開始搜尋 SKU: {sku}")
-    prices = {} 
+    prices = [] # 改用 List 依序存 1~5 的價格
     
     try:
         driver.get(URL)
@@ -167,11 +222,11 @@ def process_sku(driver, sku):
             current_price = get_price_safely(driver)
             
             if current_price:
-                prices[qty] = current_price
+                prices.append(current_price)
                 print(f"   💰 數量 {qty}: SGD {current_price}")
             else:
                 print("   ⚠️ 找不到價格欄位")
-                prices[qty] = "Error"
+                prices.append("Error")
 
             if qty < 5:
                 try:
@@ -183,25 +238,28 @@ def process_sku(driver, sku):
                         error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')]")
                         if error_msg.is_displayed():
                             print("   🛑 達到購買上限")
-                            for r in range(qty + 1, 6):
-                                prices[r] = "Limit Reached"
+                            # 剩下的填入 Limit Reached
+                            for _ in range(qty, 5):
+                                prices.append("Limit Reached")
                             break
                     except:
                         pass
                 except Exception:
                     print("   ⚠️ 無法點擊 + 按鈕")
                     break
+        
+        # 補齊價格列表 (如果有中斷)
+        while len(prices) < 5:
+            prices.append("Error")
 
-        # === 📸 新增：成功抓完價格後，拍張照存證 ===
+        # 成功抓完後截圖
         print(f"📸 正在儲存 SKU {sku} 的價格截圖...")
         driver.save_screenshot(f"proof_{sku}.png")
-        # ==========================================
 
         empty_cart(driver)
 
     except Exception as e:
         print(f"❌ 發生錯誤: {e}")
-        # 發生錯誤也要截圖
         driver.save_screenshot(f"error_{sku}.png")
         try:
             empty_cart(driver)
@@ -209,7 +267,7 @@ def process_sku(driver, sku):
             pass
         return ["Error"] * 5
 
-    return [prices.get(i, "N/A") for i in range(1, 6)]
+    return prices # 回傳包含5個價格的List
 
 # ================= 主程式 =================
 def main():
@@ -223,17 +281,42 @@ def main():
         records = sheet.get_all_records()
         print(f"📋 共有 {len(records)} 筆 SKU 待處理")
 
+        # 從第 2 行開始 (假設第 1 行是標題)
         for i, row in enumerate(records, start=2):
             sku = str(row.get('SKU', '')).strip()
             if not sku:
                 continue
             
-            price_data = process_sku(driver, sku)
+            # 1. 讀取使用者設定的價格 (User Qty 1~5 Price)
+            # 根據您的表格截圖，這些欄位應該是 C, D, E, F, G
+            user_prices = [
+                row.get('User Qty 1 Price', ''),
+                row.get('User Qty 2 Price', ''),
+                row.get('User Qty 3 Price', ''),
+                row.get('User Qty 4 Price', ''),
+                row.get('User Qty 5 Price', '')
+            ]
+
+            # 2. 執行爬蟲，取得最新價格 (List of 5)
+            web_prices = process_sku(driver, sku)
             
-            cell_range = f"C{i}:G{i}"
-            sheet.update(values=[price_data], range_name=cell_range)
+            # 3. 取得目前時間 (台灣時間)
+            update_time = get_taiwan_time()
+
+            # 4. 執行比對
+            comparison_result = compare_prices(user_prices, web_prices)
             
-            print(f"✅ SKU {sku} 更新完畢: {price_data}")
+            # 5. 準備寫入資料 (H~N 欄)
+            # H~L: 機器人抓到的 Qty 1~5 Price
+            # M: 更新日期時間
+            # N: 比對結果
+            data_to_write = web_prices + [update_time, comparison_result]
+            
+            # 6. 寫入 Google Sheet (H欄到N欄)
+            cell_range = f"H{i}:N{i}"
+            sheet.update(values=[data_to_write], range_name=cell_range)
+            
+            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result}")
             print("-" * 30)
 
         print("🎉 所有任務完成！")
