@@ -20,7 +20,6 @@ URL = "https://guardian.com.sg/"
 def clean_price(price_text):
     if not price_text:
         return "N/A"
-    # 移除 SGD, $, 逗號, 換行符號, 空格
     return price_text.replace("SGD", "").replace("$", "").replace(",", "").replace("\n", "").replace(" ", "").strip()
 
 def init_driver():
@@ -43,60 +42,64 @@ def connect_google_sheet():
     return sheet
 
 def empty_cart(driver):
-    """ 強力清空購物車模式 (修正版：檢查金額是否歸零) """
+    """ 強力清空購物車模式 (三道防線版) """
     print("🧹 正在清空購物車...")
-    max_retries = 6 # 增加重試次數
     
+    # 確保在購物車頁面
     if "cart" not in driver.current_url:
         driver.get("https://guardian.com.sg/cart")
         time.sleep(3)
 
+    max_retries = 3
     for i in range(max_retries):
         try:
-            # 1. 嘗試尋找並點擊移除按鈕
+            # === 檢查是否已經空了 ===
+            # 判斷標準：找不到 input.item-qty 或是 頁面顯示 "Shopping Cart is Empty"
+            items = driver.find_elements(By.CSS_SELECTOR, "input.item-qty")
+            empty_msg = driver.find_elements(By.XPATH, "//*[contains(text(), 'Shopping Cart is Empty') or contains(text(), 'You have no items')]")
+            
+            if not items or empty_msg:
+                print("   ✅ 購物車已確認清空")
+                return
+
+            # === 防線 1: 點擊移除按鈕 ===
             remove_btns = driver.find_elements(By.CSS_SELECTOR, 
-                "button[aria-label='remove from cart'], button[aria-label='Remove item'], button.remove, button.action-delete")
+                "button[aria-label='remove from cart'], button[aria-label='Remove item'], button.remove, button.action-delete, a.action-delete")
             
             if remove_btns:
-                print(f"   🗑️ 發現 {len(remove_btns)} 個移除按鈕，正在點擊第 1 個...")
-                # 使用 JS 點擊避免被擋住
+                print(f"   🗑️ (策略1) 發現 {len(remove_btns)} 個移除按鈕，點擊中...")
                 driver.execute_script("arguments[0].click();", remove_btns[0])
                 time.sleep(3)
-                # 刪除後，直接進入下一次迴圈檢查
                 continue
 
-            # 2. 如果沒按鈕，檢查 Subtotal 金額是否真的為 0
-            # (避免因為網頁延遲，按鈕還沒跑出來就以為空了)
-            try:
-                # 嘗試抓取 Cart Summary 文字
-                summary_box = driver.find_element(By.CSS_SELECTOR, "div.cart-summary, div.cart-totals, div[class*='summary']")
-                summary_text = summary_box.text
+            # === 防線 2: 將數量設為 0 ===
+            if items:
+                print("   🔢 (策略2) 嘗試將數量設為 0...")
+                qty_input = items[0]
+                driver.execute_script("arguments[0].value = '0';", qty_input)
+                qty_input.send_keys(Keys.ENTER)
                 
-                # 如果還看得到 "Subtotal"，且金額不是 0.00
-                if "Subtotal" in summary_text and "SGD 0.00" not in summary_text and "SGD 0 " not in summary_text:
-                    print("   ⚠️ 偵測到金額不為 0，但找不到移除按鈕，嘗試刷新頁面...")
-                    driver.refresh()
-                    time.sleep(5)
-                    continue
-            except:
-                # 如果找不到 Summary 區塊，通常代表購物車是全空的 (顯示 Empty Cart 圖片)
-                pass
-
-            # 3. 雙重檢查：確認是否有商品數量輸入框
-            items = driver.find_elements(By.CSS_SELECTOR, "input.item-qty")
-            if not items:
-                print("   ✅ 購物車已確認清空")
-                break
-            else:
-                print("   ⚠️ 仍偵測到商品輸入框，重試中...")
-                driver.refresh()
+                # 有些網站改數量後需要點 Update 按鈕
+                try:
+                    update_btn = driver.find_element(By.CSS_SELECTOR, "button.update-cart, button[name='update_cart_action']")
+                    update_btn.click()
+                except:
+                    pass
                 time.sleep(3)
                 continue
-
+            
         except Exception as e:
             print(f"   ⚠️ 清空過程重試中: {e}")
             time.sleep(2)
             continue
+            
+    # === 防線 3: 核彈級重置 (Delete Cookies) ===
+    # 如果上面嘗試多次後，購物車還是有東西，直接刪除 Cookies
+    print("   ☢️ (最終策略) UI 清除失敗，執行 Cookie 重置...")
+    driver.delete_all_cookies()
+    driver.refresh()
+    time.sleep(4)
+    print("   ✅ Cookie 已清除，購物車應已重置")
 
 # ================= 核心邏輯 =================
 def get_price_safely(driver):
@@ -106,8 +109,6 @@ def get_price_safely(driver):
     try:
         summary_box = driver.find_element(By.CSS_SELECTOR, "div.cart-summary, div.cart-totals, div[class*='summary']")
         box_text = summary_box.text.replace("\n", " ") 
-        
-        # 搜尋 "Subtotal" 附近是否有數字
         match = re.search(r'Subtotal.*?SGD\s*([\d\.]+)', box_text, re.IGNORECASE)
         if match:
             return clean_price(match.group(1))
