@@ -11,40 +11,30 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 
 # ================= 設定區 =================
-# Google Sheet 名稱 (必須與您的試算表檔名完全一致)
 SHEET_NAME = 'Guardian_Price_Check'
-# 金鑰檔名 (對應 GitHub Actions workflow 產生的檔案)
 CREDENTIALS_FILE = 'google_key.json'
-# Guardian 網站網址
 URL = "https://guardian.com.sg/"
 
 # ================= 輔助功能 =================
 def clean_price(price_text):
-    """ 清理價格字串，移除 'SGD'、'$' 和空格，只留數字 """
     if not price_text:
         return "N/A"
-    # 移除 SGD, $, 以及逗號，讓 Excel/Sheet 更好運算
     return price_text.replace("SGD", "").replace("$", "").replace(",", "").strip()
 
 def init_driver():
-    """ 啟動 Chrome 瀏覽器 (GitHub Actions 專用設定) """
     options = webdriver.ChromeOptions()
-    
-    # === GitHub Actions 關鍵設定 (無頭模式) ===
-    options.add_argument('--headless=new') # 啟用無頭模式
+    # === GitHub Actions 設定 ===
+    options.add_argument('--headless=new')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
-    options.add_argument('--window-size=1920,1080') # 設定解析度避免跑版
-    # ========================================
-    
+    options.add_argument('--window-size=1920,1080')
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
     
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
 
 def connect_google_sheet():
-    """ 連線到 Google Sheet """
     print("📊 正在連線 Google Sheet...")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
@@ -53,56 +43,42 @@ def connect_google_sheet():
     return sheet
 
 def empty_cart(driver):
-    """ 專門用來清空購物車的函式 """
     print("🧹 正在清空購物車...")
-    max_retries = 10 
+    max_retries = 5 # 減少重試次數加快速度
     
     for _ in range(max_retries):
         try:
-            # 1. 確保在購物車頁面
             if "cart" not in driver.current_url:
                 driver.get("https://guardian.com.sg/cart")
                 time.sleep(3)
 
-            # 2. 尋找移除按鈕 (使用 aria-label="remove from cart")
             remove_btns = driver.find_elements(By.CSS_SELECTOR, "button[aria-label='remove from cart']")
-            
             if not remove_btns:
                 print("   ✅ 購物車已清空")
                 break
             
-            # 3. 點擊第一個移除按鈕
             print(f"   🗑️ 發現 {len(remove_btns)} 個商品，正在移除...")
             remove_btns[0].click()
-            
-            # 4. 等待讀取畫面消失
             time.sleep(2)
             try:
-                WebDriverWait(driver, 5).until_not(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader"))
-                )
+                WebDriverWait(driver, 5).until_not(EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader")))
             except:
                 time.sleep(2)
-
-        except (StaleElementReferenceException, TimeoutException):
-            continue 
-        except Exception as e:
-            print(f"   ⚠️ 清空購物車時發生小錯誤: {e}")
+        except Exception:
             break
 
 # ================= 核心邏輯 =================
 def process_sku(driver, sku):
-    """ 針對單一 SKU 執行完整流程 """
     print(f"\n🔍 開始搜尋 SKU: {sku}")
     prices = {} 
     
     try:
         driver.get(URL)
-        time.sleep(2)
+        time.sleep(3)
 
         # 1. 搜尋商品
         try:
-            search_box = WebDriverWait(driver, 10).until(
+            search_box = WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "input[placeholder='Search for a products or brand']"))
             )
             search_box.clear()
@@ -110,24 +86,47 @@ def process_sku(driver, sku):
             search_box.send_keys(Keys.RETURN)
         except TimeoutException:
             print("❌ 搜尋框載入超時")
+            driver.save_screenshot(f"error_search_{sku}.png")
             return ["Search Fail"] * 5
 
-        time.sleep(4) 
+        time.sleep(5) # 給多一點時間載入搜尋結果
 
-        # 2. 點擊商品進入內頁
+        # 2. 點擊商品進入內頁 (修正版：更通用的抓取邏輯)
         try:
-            first_product = driver.find_element(By.CSS_SELECTOR, "div.product-item a, a.product-item-link")
-            first_product.click()
-            print("👉 進入商品頁面")
+            # 嘗試抓取搜尋結果區域中的第一個連結
+            # 邏輯：找任何包含圖片的連結，或是商品卡片連結
+            xpath_selectors = [
+                "(//div[contains(@class, 'product')]//a)[1]", # 嘗試找商品區塊的連結
+                "(//main//a[.//img])[1]", # 嘗試找主內容區第一個有圖片的連結
+                "//div[data-testid='product-card']//a" # 嘗試 data-testid
+            ]
+            
+            first_product = None
+            for xpath in xpath_selectors:
+                try:
+                    first_product = driver.find_element(By.XPATH, xpath)
+                    break
+                except:
+                    continue
+            
+            if first_product:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", first_product)
+                first_product.click()
+                print("👉 成功點擊商品，進入內頁")
+            else:
+                raise NoSuchElementException("無法找到任何商品連結")
+
         except NoSuchElementException:
-            print(f"⚠️ 搜尋不到 SKU {sku}")
+            print(f"⚠️ 搜尋不到 SKU {sku} (或找不到連結)")
+            # === 關鍵：拍下截圖以便除錯 ===
+            driver.save_screenshot(f"debug_not_found_{sku}.png")
+            print(f"📸 已儲存截圖: debug_not_found_{sku}.png")
             return ["Not Found"] * 5
 
-        time.sleep(3)
+        time.sleep(4)
 
-        # 3. 加入購物車 (兩段式)
+        # 3. 加入購物車
         try:
-            # 3-1. 點擊 Add to Cart
             add_btn = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart']"))
             )
@@ -136,7 +135,6 @@ def process_sku(driver, sku):
             add_btn.click()
             print("🛒 已點擊加入購物車")
 
-            # 3-2. 點擊 GO TO CART
             go_cart_btn = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='GO TO CART']"))
             )
@@ -145,23 +143,20 @@ def process_sku(driver, sku):
             
         except TimeoutException:
             print("❌ 加入購物車失敗")
+            driver.save_screenshot(f"error_cart_{sku}.png")
             return ["Add Fail"] * 5
 
-        time.sleep(5) # 等待購物車載入
+        time.sleep(5)
 
-        # 4. 在購物車頁面：調整數量並抓價格
+        # 4. 調整數量與抓取價格
         for qty in range(1, 6):
-            # 等待讀取轉圈圈消失
             try:
-                WebDriverWait(driver, 5).until_not(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader"))
-                )
+                WebDriverWait(driver, 5).until_not(EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader")))
             except:
                 pass
 
-            # 4-1. 抓取 Subtotal (主要抓取目標)
             try:
-                # 依據截圖抓取 Subtotal 數字
+                # 抓取 Subtotal
                 subtotal_element = driver.find_element(By.XPATH, "//div[contains(text(), 'Subtotal')]/following-sibling::span")
                 current_price = clean_price(subtotal_element.text)
                 prices[qty] = current_price
@@ -170,14 +165,12 @@ def process_sku(driver, sku):
                 print("   ⚠️ 找不到價格欄位")
                 prices[qty] = "Error"
 
-            # 4-2. 增加數量 (1->5)
             if qty < 5:
                 try:
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     plus_btn.click()
-                    time.sleep(3) # 等待價格更新
+                    time.sleep(3)
                     
-                    # 檢查限購訊息
                     try:
                         error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')]")
                         if error_msg.is_displayed():
@@ -187,16 +180,14 @@ def process_sku(driver, sku):
                             break
                     except:
                         pass
-                except Exception as e:
-                    print(f"   ⚠️ 無法增加數量: {e}")
+                except Exception:
                     break
 
-        # 5. 執行清空購物車
         empty_cart(driver)
 
     except Exception as e:
         print(f"❌ 發生錯誤: {e}")
-        # 即使出錯也要嘗試清空購物車，確保下一次執行乾淨
+        driver.save_screenshot(f"error_exception_{sku}.png")
         try:
             empty_cart(driver)
         except:
@@ -205,35 +196,28 @@ def process_sku(driver, sku):
 
     return [prices.get(i, "N/A") for i in range(1, 6)]
 
-# ================= 主程式執行 =================
+# ================= 主程式 =================
 def main():
     try:
         sheet = connect_google_sheet()
         driver = init_driver()
         
-        # 確保一開始購物車是空的
         print("--- 初始化檢查 ---")
-        driver.get("https://guardian.com.sg/cart")
-        time.sleep(3)
         empty_cart(driver)
         
-        # 讀取 Sheet 資料
         records = sheet.get_all_records()
         print(f"📋 共有 {len(records)} 筆 SKU 待處理")
 
-        # 從第 2 行開始 (視您的 Sheet 標題列而定)
         for i, row in enumerate(records, start=2):
             sku = str(row.get('SKU', '')).strip()
             if not sku:
                 continue
             
-            # 執行爬蟲，取得 [價1, 價2, 價3, 價4, 價5]
             price_data = process_sku(driver, sku)
             
-            # 寫回 Google Sheet
-            # 根據截圖，您希望填入 C 欄 (Qty 1) 到 G 欄 (Qty 5)
+            # === 修正後的 gspread 寫法 (解決黃色警告) ===
             cell_range = f"C{i}:G{i}"
-            sheet.update(cell_range, [price_data])
+            sheet.update(values=[price_data], range_name=cell_range)
             
             print(f"✅ SKU {sku} 更新完畢: {price_data}")
             print("-" * 30)
