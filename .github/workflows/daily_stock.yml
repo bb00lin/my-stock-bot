@@ -12,7 +12,7 @@ permissions:
 jobs:
   run_job:
     runs-on: ubuntu-latest
-    timeout-minutes: 45 # 增加超時，確保跑完所有股票
+    timeout-minutes: 45
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -24,8 +24,9 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          # 強制更新到最新版 SDK
-          pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-generativeai
+          # [關鍵] 安裝 google-genai (新版 SDK) 
+          # 同時保留 google-generativeai (舊版) 以防 DailyStockBot 還需要它
+          pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-genai google-generativeai
 
       - name: Create Key File
         run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
