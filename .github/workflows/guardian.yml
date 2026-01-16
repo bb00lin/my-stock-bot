@@ -1,35 +1,42 @@
 name: Guardian Price Check Bot
 
 on:
-  workflow_dispatch: # 允許手動點擊按鈕執行
+  workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *' # 每天台灣時間早上 10 點自動執行 (UTC 02:00)
+    - cron: '0 2 * * *'
 
 jobs:
   run_scraper:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code (下載程式碼)
+      - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up Python (安裝 Python 環境)
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.11'
 
-      - name: Install dependencies (安裝套件)
-        # 這裡會直接安裝需要的套件，省去您上傳 requirements.txt 的麻煩
+      - name: Install dependencies
         run: |
           pip install selenium gspread oauth2client webdriver-manager
 
-      - name: Create JSON Key (製作金鑰檔案)
+      - name: Create JSON Key
         env:
-          # 這裡會抓取您在第一步設定的 Secret
-          GOOGLE_KEY: ${{ secrets.GOOGLE_KEY_JSON }}
+          # === 關鍵修改：這裡改成您截圖中的名稱 ===
+          GOOGLE_KEY: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: |
-          # 將 Secret 的內容寫入 google_key.json
+          # 將 Secret 內容寫入 Python 指定要讀取的檔名 (google_key.json)
           echo "$GOOGLE_KEY" > google_key.json
+          
+          # 檢查是否成功建立
+          if [ ! -s google_key.json ] || [ "$(cat google_key.json)" == "" ]; then
+            echo "❌ 錯誤：google_key.json 是空的！請確認 Secret 名稱是否為 GOOGLE_SHEETS_JSON。"
+            exit 1
+          else
+            echo "✅ 金鑰檔案建立成功！"
+          fi
 
-      - name: Run Python Script (執行程式)
+      - name: Run Python Script
         run: python guardian_bot.py
