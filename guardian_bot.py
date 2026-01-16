@@ -8,7 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # ================= 設定區 =================
 SHEET_NAME = 'Guardian_Price_Check'
@@ -23,14 +23,12 @@ def clean_price(price_text):
 
 def init_driver():
     options = webdriver.ChromeOptions()
-    # === GitHub Actions 設定 ===
     options.add_argument('--headless=new')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
-    
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
 
@@ -44,14 +42,14 @@ def connect_google_sheet():
 
 def empty_cart(driver):
     print("🧹 正在清空購物車...")
-    max_retries = 5 # 減少重試次數加快速度
-    
+    max_retries = 3
     for _ in range(max_retries):
         try:
             if "cart" not in driver.current_url:
                 driver.get("https://guardian.com.sg/cart")
                 time.sleep(3)
-
+            
+            # 使用通用的移除按鈕定位
             remove_btns = driver.find_elements(By.CSS_SELECTOR, "button[aria-label='remove from cart']")
             if not remove_btns:
                 print("   ✅ 購物車已清空")
@@ -63,7 +61,7 @@ def empty_cart(driver):
             try:
                 WebDriverWait(driver, 5).until_not(EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader")))
             except:
-                time.sleep(2)
+                time.sleep(1)
         except Exception:
             break
 
@@ -89,18 +87,15 @@ def process_sku(driver, sku):
             driver.save_screenshot(f"error_search_{sku}.png")
             return ["Search Fail"] * 5
 
-        time.sleep(5) # 給多一點時間載入搜尋結果
+        time.sleep(5)
 
-        # 2. 點擊商品進入內頁 (修正版：更通用的抓取邏輯)
+        # 2. 點擊商品進入內頁
         try:
-            # 嘗試抓取搜尋結果區域中的第一個連結
-            # 邏輯：找任何包含圖片的連結，或是商品卡片連結
             xpath_selectors = [
-                "(//div[contains(@class, 'product')]//a)[1]", # 嘗試找商品區塊的連結
-                "(//main//a[.//img])[1]", # 嘗試找主內容區第一個有圖片的連結
-                "//div[data-testid='product-card']//a" # 嘗試 data-testid
+                "(//div[contains(@class, 'product')]//a)[1]", 
+                "(//main//a[.//img])[1]", 
+                "//div[data-testid='product-card']//a"
             ]
-            
             first_product = None
             for xpath in xpath_selectors:
                 try:
@@ -117,15 +112,13 @@ def process_sku(driver, sku):
                 raise NoSuchElementException("無法找到任何商品連結")
 
         except NoSuchElementException:
-            print(f"⚠️ 搜尋不到 SKU {sku} (或找不到連結)")
-            # === 關鍵：拍下截圖以便除錯 ===
+            print(f"⚠️ 搜尋不到 SKU {sku}")
             driver.save_screenshot(f"debug_not_found_{sku}.png")
-            print(f"📸 已儲存截圖: debug_not_found_{sku}.png")
             return ["Not Found"] * 5
 
         time.sleep(4)
 
-        # 3. 加入購物車
+        # 3. 加入購物車 (修正版：點擊後強制前往購物車頁面)
         try:
             add_btn = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart']"))
@@ -133,16 +126,15 @@ def process_sku(driver, sku):
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", add_btn)
             time.sleep(1)
             add_btn.click()
-            print("🛒 已點擊加入購物車")
-
-            go_cart_btn = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='GO TO CART']"))
-            )
-            go_cart_btn.click()
-            print("🚀 前往結帳頁面...")
+            print("🛒 已點擊加入購物車，等待處理...")
+            
+            # === 關鍵修改：不等待彈窗，直接睡 5 秒然後跳轉 ===
+            time.sleep(5) 
+            print("🚀 直接跳轉至購物車頁面...")
+            driver.get("https://guardian.com.sg/cart")
             
         except TimeoutException:
-            print("❌ 加入購物車失敗")
+            print("❌ 加入購物車按鈕找不到")
             driver.save_screenshot(f"error_cart_{sku}.png")
             return ["Add Fail"] * 5
 
@@ -164,6 +156,8 @@ def process_sku(driver, sku):
             except NoSuchElementException:
                 print("   ⚠️ 找不到價格欄位")
                 prices[qty] = "Error"
+                # 如果連價格都找不到，可能是跳轉失敗，拍張照
+                driver.save_screenshot(f"error_price_{sku}_qty{qty}.png")
 
             if qty < 5:
                 try:
@@ -181,6 +175,7 @@ def process_sku(driver, sku):
                     except:
                         pass
                 except Exception:
+                    print("   ⚠️ 無法點擊 + 按鈕")
                     break
 
         empty_cart(driver)
@@ -215,7 +210,7 @@ def main():
             
             price_data = process_sku(driver, sku)
             
-            # === 修正後的 gspread 寫法 (解決黃色警告) ===
+            # 寫回 Google Sheet
             cell_range = f"C{i}:G{i}"
             sheet.update(values=[price_data], range_name=cell_range)
             
