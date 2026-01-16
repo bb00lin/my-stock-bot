@@ -18,7 +18,7 @@ LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ==========================================
-# [核心修正] AI 模型握手測試 (Handshake)
+# [關鍵修正] 模型自動偵測 (含 429 重試機制)
 # ==========================================
 ai_client = None
 ACTIVE_MODEL_NAME = None
@@ -28,35 +28,51 @@ if GEMINI_API_KEY:
         print("🔌 正在初始化 Gemini Client...")
         ai_client = genai.Client(api_key=GEMINI_API_KEY)
         
-        # 候選模型清單 (優先順序)
-        # 新版 SDK 有時不需要 'models/' 前綴，有時需要，這裡混合測試
+        # 根據您的 LOG，2.0 是唯一有反應(429)的模型，所以放第一位
+        # 同時加入 1.5-flash 的其他變體
         CANDIDATES = [
-            "gemini-1.5-flash", 
-            "gemini-1.5-pro", 
-            "gemini-2.0-flash-exp",
-            "gemini-1.0-pro",
+            "gemini-2.0-flash-exp", 
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-flash-latest",
             "models/gemini-1.5-flash"
         ]
         
         print("🔍 開始進行模型連線測試 (Health Check)...")
         for model in CANDIDATES:
             try:
-                # 嘗試發送一個極短的請求
+                # 測試請求
                 response = ai_client.models.generate_content(
                     model=model, 
                     contents="Hi"
                 )
                 if response.text:
                     ACTIVE_MODEL_NAME = model
-                    print(f"✅ 成功鎖定模型: 【{ACTIVE_MODEL_NAME}】 (測試回應: {response.text.strip()})")
+                    print(f"✅ 秒殺鎖定: 【{ACTIVE_MODEL_NAME}】")
                     break
             except Exception as e:
-                print(f"   ❌ 測試 {model} 失敗: {str(e)[:50]}...")
+                error_msg = str(e)
+                # [核心修正] 如果遇到 429 (忙線)，代表模型存在！給它一次機會！
+                if "429" in error_msg:
+                    print(f"   ⚠️ 發現模型 {model} 但忙線中 (429)，等待 5 秒重試...")
+                    time.sleep(5)
+                    try:
+                        response = ai_client.models.generate_content(
+                            model=model, 
+                            contents="Hi"
+                        )
+                        ACTIVE_MODEL_NAME = model
+                        print(f"✅ 重試成功! 已鎖定: 【{ACTIVE_MODEL_NAME}】")
+                        break
+                    except Exception as e2:
+                        print(f"   ❌ 重試仍失敗: {e2}")
+                else:
+                    print(f"   ❌ 測試 {model} 無效 (404/Other)...")
                 continue
         
         if not ACTIVE_MODEL_NAME:
-            print("⚠️ 警告: 所有候選模型皆測試失敗，將強制使用 'gemini-1.5-flash' 嘗試運行。")
-            ACTIVE_MODEL_NAME = "gemini-1.5-flash"
+            print("⚠️ 嚴重警告: 所有模型皆無法連線，將強制使用 'gemini-2.0-flash-exp' 碰運氣。")
+            ACTIVE_MODEL_NAME = "gemini-2.0-flash-exp"
 
     except Exception as e:
         print(f"❌ Gemini Client 初始化嚴重失敗: {e}")
@@ -99,9 +115,11 @@ def get_gemini_strategy(data):
     3. "最佳買點：等待回測 5日線({data['ma5']}) 縮量佈局。"
     """
     try:
+        # [加強] 增加 request timeout 到 60秒
         response = ai_client.models.generate_content(
             model=ACTIVE_MODEL_NAME, 
-            contents=prompt
+            contents=prompt,
+            config={'response_mime_type': 'text/plain'} # 確保格式穩定
         )
         return response.text.replace('\n', ' ').strip()
     except Exception as e:
@@ -209,9 +227,7 @@ def fetch_pro_metrics(stock_data):
     cost = stock_data['cost']
 
     stock, full_id = get_tw_stock(sid)
-    if not stock: 
-        print(f"⚠️ 找不到數據: {sid}")
-        return None
+    if not stock: return None
     try:
         df_hist = stock.history(period="6mo")
         if len(df_hist) < 60: return None
@@ -256,7 +272,6 @@ def fetch_pro_metrics(stock_data):
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
-        # 使用鎖定的 ACTIVE_MODEL_NAME
         ai_strategy = get_gemini_strategy(res)
         res['ai_strategy'] = ai_strategy
         
@@ -284,7 +299,7 @@ def main():
         print("❌ 中止：觀察名單讀取失敗。")
         return
 
-    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 10 秒)...")
+    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 10 秒，確保 AI 不中斷)...")
 
     for stock_data in watch_data_list:
         res = fetch_pro_metrics(stock_data)
@@ -302,6 +317,7 @@ def main():
                 res['ai_strategy']
             ])
             
+        # 10秒是 429 的解藥
         time.sleep(10.0) 
     
     results_line.sort(key=lambda x: x['score'], reverse=True)
