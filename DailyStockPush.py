@@ -25,14 +25,13 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"❌ Gemini Client 初始化失敗: {e}")
 
-# 精簡且精準的模型清單 (含前綴變體)
+# [關鍵調整] 根據您的測試紀錄，2.0 是唯一活著的，放第一位
+# 1.5-flash 備用
 MODEL_CANDIDATES = [
+    "gemini-2.0-flash-exp", 
     "gemini-1.5-flash",
-    "models/gemini-1.5-flash",
-    "gemini-2.0-flash-exp",
-    "models/gemini-2.0-flash-exp",
-    "gemini-1.5-pro",
-    "gemini-1.0-pro"
+    "gemini-1.5-flash-latest",
+    "gemini-pro"
 ]
 
 def get_gspread_client():
@@ -50,7 +49,7 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. AI 策略生成器 (錯誤回填版)
+# 2. AI 策略生成器 (精準錯誤回報)
 # ==========================================
 def get_gemini_strategy(data):
     if not ai_client: return "AI 未啟動 (Init Fail)"
@@ -75,7 +74,7 @@ def get_gemini_strategy(data):
 
     last_error = ""
 
-    # 遍歷嘗試所有模型
+    # 遍歷嘗試模型
     for model_name in MODEL_CANDIDATES:
         try:
             response = ai_client.models.generate_content(
@@ -87,30 +86,23 @@ def get_gemini_strategy(data):
         except Exception as e:
             error_msg = str(e)
             
-            # 如果是忙線 (429)，嘗試休息重試一次
+            # [核心修正] 如果遇到 429，這代表模型是對的，只是沒額度了
+            # 不用再試別的了，直接回傳這個錯誤，讓使用者知道要休息
             if "429" in error_msg:
-                print(f"   ⏳ {model_name} 忙線 (429)，休息 20 秒重試...")
-                time.sleep(20) 
-                try:
-                    response = ai_client.models.generate_content(
-                        model=model_name, 
-                        contents=prompt
-                    )
-                    return response.text.replace('\n', ' ').strip()
-                except Exception as retry_e:
-                    last_error = f"429 Limit: {str(retry_e)[:20]}"
-                    continue
+                print(f"   ⏳ {model_name} 額度已滿 (429)，停止嘗試。")
+                return "❌ 今日額度用盡 (429)"
             
+            # 如果是 404 (找不到)，才繼續試下一個
             elif "404" in error_msg:
-                last_error = f"404 Not Found: {model_name}"
+                # print(f"   ⚠️ {model_name} 404, 換下一個...")
+                last_error = f"404 ({model_name})"
                 continue
             
             else:
-                last_error = f"Err: {error_msg[:30]}"
+                last_error = f"Err: {error_msg[:10]}"
                 continue
 
-    # [關鍵] 如果全部失敗，回傳最後一次的具體錯誤訊息到 Sheet
-    # 這樣您打開報表就知道是 Quota 爆了還是模型名稱錯了
+    # 如果全部試完都是 404
     return f"❌ AI 失敗: {last_error}"
 
 # ==========================================
@@ -285,8 +277,8 @@ def main():
         print("❌ 中止：觀察名單讀取失敗。")
         return
 
-    # [關鍵] 增加到 20 秒間隔，避免 429
-    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 20 秒)...")
+    # [關鍵] 15 秒間隔
+    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 15 秒)...")
 
     for stock_data in watch_data_list:
         res = fetch_pro_metrics(stock_data)
@@ -304,7 +296,7 @@ def main():
                 res['ai_strategy']
             ])
             
-        time.sleep(20.0) 
+        time.sleep(15.0) 
     
     results_line.sort(key=lambda x: x['score'], reverse=True)
     if results_line:
