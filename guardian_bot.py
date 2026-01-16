@@ -20,26 +20,27 @@ URL = "https://guardian.com.sg/"
 
 # ================= 輔助功能 =================
 def clean_price(price_text):
-    """ 清理價格字串，移除貨幣符號、逗號、空格，只留數字 """
+    """ 清理價格字串，只留數字 """
     if not price_text:
         return ""
+    # 移除貨幣符號、逗號、換行、空格
     cleaned = str(price_text).replace("SGD", "").replace("$", "").replace(",", "").replace("\n", "").replace(" ", "").strip()
     return cleaned
 
 def get_taiwan_time():
-    """ 取得台灣時間 (UTC+8) 的字串 """
+    """ 取得台灣時間 (UTC+8) 格式: YYYY-MM-DD HH:MM """
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz)
     return now.strftime("%Y-%m-%d %H:%M")
 
 def safe_get(row_list, index):
-    """ 安全取得 List 中的值，防止 Index 超出範圍 """
+    """ 安全取得 List 中的值 """
     if index < len(row_list):
         return str(row_list[index])
     return ""
 
 def compare_prices(user_prices, web_prices):
-    """ 比對使用者輸入價格與網頁抓取價格 """
+    """ 比對 User 輸入價格與 Web 抓取價格 """
     mismatches = []
     match_count = 0
     valid_comparison_count = 0
@@ -51,27 +52,30 @@ def compare_prices(user_prices, web_prices):
         u_val = clean_price(u_raw)
         w_val = clean_price(w_raw)
 
+        # 如果 User 欄位是空的，跳過比對
         if not u_val:
             continue
             
         valid_comparison_count += 1
 
+        # 嘗試數值比對 (避免 64.00 != 64 的文字誤差)
         try:
             u_num = float(u_val)
-            w_num = float(w_val) if w_val and w_val != "Error" and w_val != "N/A" and w_val != "Limit Reached" else -999
+            w_num = float(w_val) if w_val and w_val not in ["Error", "N/A", "Limit Reached"] else -999
             
             if abs(u_num - w_num) < 0.01: 
                 match_count += 1
             else:
-                mismatches.append(f"Q{i+1}:User({u_val})!=Web({w_val})")
+                mismatches.append(f"Qty{i+1}:User({u_val})!=Web({w_val})")
         except:
+            # 如果無法轉數字，進行文字比對
             if u_val == w_val:
                 match_count += 1
             else:
-                mismatches.append(f"Q{i+1}:Diff")
+                mismatches.append(f"Qty{i+1}:Diff")
 
     if valid_comparison_count == 0:
-        return "無使用者數據"
+        return "" # 無資料比對
     if not mismatches:
         return "均相符"
     else:
@@ -107,7 +111,6 @@ def empty_cart(driver):
         driver.execute_script("window.sessionStorage.clear();")
         driver.refresh()
         time.sleep(4) 
-        print("   ✅ 瀏覽器記憶已清除，購物車已歸零")
     except Exception as e:
         print(f"   ⚠️ 清空過程發生小錯誤: {e}")
 
@@ -140,6 +143,11 @@ def get_price_safely(driver):
 def process_sku(driver, sku):
     print(f"\n🔍 開始搜尋 SKU: {sku}")
     prices = [] 
+    
+    # === 建立該 SKU 的截圖資料夾 ===
+    sku_folder = str(sku)
+    if not os.path.exists(sku_folder):
+        os.makedirs(sku_folder)
     
     try:
         driver.get(URL)
@@ -221,9 +229,18 @@ def process_sku(driver, sku):
             if current_price:
                 prices.append(current_price)
                 print(f"   💰 數量 {qty}: SGD {current_price}")
+                
+                # === 📸 截圖: 成功抓到價格後立即截圖 ===
+                # 檔名格式: SKU/SKU_qtyX.png
+                screenshot_path = f"{sku_folder}/{sku}_qty{qty}.png"
+                driver.save_screenshot(screenshot_path)
+                # ========================================
+                
             else:
                 print("   ⚠️ 找不到價格欄位")
                 prices.append("Error")
+                # 失敗也要截圖存證
+                driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}_error.png")
 
             if qty < 5:
                 try:
@@ -247,15 +264,14 @@ def process_sku(driver, sku):
         while len(prices) < 5:
             prices.append("Error")
 
-        print(f"📸 正在儲存 SKU {sku} 的價格截圖...")
-        driver.save_screenshot(f"proof_{sku}.png")
-
         empty_cart(driver)
 
     except Exception as e:
         print(f"❌ 發生錯誤: {e}")
-        driver.save_screenshot(f"error_{sku}.png")
         try:
+            # 發生錯誤時的截圖
+            if 'sku_folder' in locals():
+                driver.save_screenshot(f"{sku_folder}/{sku}_exception.png")
             empty_cart(driver)
         except:
             pass
@@ -272,18 +288,17 @@ def main():
         print("--- 初始化檢查 ---")
         empty_cart(driver)
         
-        # === 關鍵修改：改用 get_all_values() 避免標題重複錯誤 ===
+        # 改用 get_all_values 以避免標題錯誤
         all_values = sheet.get_all_values()
         print(f"📋 共有 {len(all_values)-1} 筆資料待處理")
 
-        # 從索引 1 開始（即第 2 列），all_values[0] 是標題列
+        # 從 Index 1 (第2列) 開始
         for i, row_data in enumerate(all_values[1:], start=2):
-            # A欄是 SKU (Index 0)
-            sku = safe_get(row_data, 0).strip()
+            sku = safe_get(row_data, 0).strip() # A欄 (Index 0)
             if not sku:
                 continue
             
-            # C~G欄是 User Price (Index 2~6)
+            # 讀取 C~G 欄 (User Prices)
             user_prices = [
                 safe_get(row_data, 2), # C
                 safe_get(row_data, 3), # D
@@ -292,16 +307,16 @@ def main():
                 safe_get(row_data, 6)  # G
             ]
 
-            # 執行爬蟲
+            # 執行爬蟲，回傳 5 個價格
             web_prices = process_sku(driver, sku)
             
-            # 時間
+            # 取得更新時間
             update_time = get_taiwan_time()
 
-            # 比對
+            # 執行比對
             comparison_result = compare_prices(user_prices, web_prices)
             
-            # 寫入 H~N 欄
+            # 寫入資料: H~L (Web Price) + M (Time) + N (Result)
             data_to_write = web_prices + [update_time, comparison_result]
             
             cell_range = f"H{i}:N{i}"
