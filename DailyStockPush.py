@@ -1,7 +1,6 @@
 import os, yfinance as yf, pandas as pd, requests, time, datetime, sys
 import gspread
 import logging
-# [核心升級] 使用 Google GenAI 新版 SDK
 from google import genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
@@ -22,19 +21,18 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ai_client = None
 if GEMINI_API_KEY:
     try:
-        # 使用新版 SDK 初始化
         ai_client = genai.Client(api_key=GEMINI_API_KEY)
     except Exception as e:
         print(f"❌ Gemini Client 初始化失敗: {e}")
 
-# 定義模型優先順序 (包含各種變體名稱以防 404)
-# 程式會依序嘗試，直到成功為止
+# 精簡且精準的模型清單 (含前綴變體)
 MODEL_CANDIDATES = [
     "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
+    "models/gemini-1.5-flash",
+    "gemini-2.0-flash-exp",
+    "models/gemini-2.0-flash-exp",
     "gemini-1.5-pro",
-    "gemini-1.0-pro",
-    "gemini-pro"
+    "gemini-1.0-pro"
 ]
 
 def get_gspread_client():
@@ -52,12 +50,9 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. AI 策略生成器 (智慧重試邏輯)
+# 2. AI 策略生成器 (錯誤回填版)
 # ==========================================
 def get_gemini_strategy(data):
-    """
-    逐一嘗試模型，遇到 429 則等待重試
-    """
     if not ai_client: return "AI 未啟動 (Init Fail)"
     
     hold_txt = f"目前持有 (成本 {data['cost']})" if data['is_hold'] else "目前空手觀望"
@@ -78,24 +73,23 @@ def get_gemini_strategy(data):
     3. "最佳買點：等待回測 5日線({data['ma5']}) 縮量佈局。"
     """
 
-    # --- 核心邏輯：遍歷模型清單 ---
+    last_error = ""
+
+    # 遍歷嘗試所有模型
     for model_name in MODEL_CANDIDATES:
         try:
-            # 嘗試生成
             response = ai_client.models.generate_content(
                 model=model_name, 
                 contents=prompt
             )
-            # 成功則直接回傳
             return response.text.replace('\n', ' ').strip()
 
         except Exception as e:
             error_msg = str(e)
             
-            # 情境 A: 忙線中 (429) -> 這是好消息，代表模型存在！
-            # 策略：原地休息 20 秒，然後用同一個模型再試一次
+            # 如果是忙線 (429)，嘗試休息重試一次
             if "429" in error_msg:
-                print(f"   ⏳ AI 忙線 (429) - 模型 {model_name} 休息 20 秒後重試...")
+                print(f"   ⏳ {model_name} 忙線 (429)，休息 20 秒重試...")
                 time.sleep(20) 
                 try:
                     response = ai_client.models.generate_content(
@@ -104,31 +98,28 @@ def get_gemini_strategy(data):
                     )
                     return response.text.replace('\n', ' ').strip()
                 except Exception as retry_e:
-                    print(f"   ❌ 重試失敗: {retry_e}")
-                    # 如果重試還是失敗，換下一個模型試試
+                    last_error = f"429 Limit: {str(retry_e)[:20]}"
                     continue
             
-            # 情境 B: 找不到模型 (404) -> 換下一個名字試試
-            elif "404" in error_msg or "not found" in error_msg.lower():
-                # 默默跳過，嘗試下一個模型
+            elif "404" in error_msg:
+                last_error = f"404 Not Found: {model_name}"
                 continue
             
-            # 情境 C: 其他錯誤
             else:
-                print(f"   ❌ 模型 {model_name} 發生錯誤: {error_msg[:30]}...")
+                last_error = f"Err: {error_msg[:30]}"
                 continue
 
-    # 如果所有模型都試過了還是失敗
-    return "AI 暫時無法服務 (全線忙碌)"
+    # [關鍵] 如果全部失敗，回傳最後一次的具體錯誤訊息到 Sheet
+    # 這樣您打開報表就知道是 Quota 爆了還是模型名稱錯了
+    return f"❌ AI 失敗: {last_error}"
 
 # ==========================================
-# 3. 讀取 WATCH_LIST (含容錯與補零)
+# 3. 讀取 WATCH_LIST
 # ==========================================
 def get_watch_list_from_sheet():
     try:
         client = get_gspread_client()
         try:
-            # 嘗試開啟指定分頁
             sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
         except:
             print("⚠️ 找不到 'WATCH_LIST' 分頁，自動切換讀取『第一個分頁』...")
@@ -142,7 +133,6 @@ def get_watch_list_from_sheet():
             raw_sid = str(row.get('股票代號', '')).strip()
             if not raw_sid: continue
             
-            # 自動補零 (946 -> 00946)
             if raw_sid.isdigit():
                 if len(raw_sid) == 3: sid = "00" + raw_sid
                 elif len(raw_sid) < 4: sid = raw_sid.zfill(4)
@@ -173,7 +163,6 @@ def calculate_rsi(series, period=14):
 
 def get_tw_stock(sid):
     clean_id = str(sid).strip().upper()
-    # 智能後綴判斷
     if clean_id.startswith(('3', '4', '5', '6', '8')):
         suffixes = [".TWO", ".TW"]
     else:
@@ -269,7 +258,6 @@ def fetch_pro_metrics(stock_data):
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
-        # 呼叫 AI (現在會自動重試和切換模型)
         ai_strategy = get_gemini_strategy(res)
         res['ai_strategy'] = ai_strategy
         
@@ -297,8 +285,8 @@ def main():
         print("❌ 中止：觀察名單讀取失敗。")
         return
 
-    # [關鍵] 將間隔拉長到 15 秒，這是免費版最安全的節奏
-    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 15 秒，確保 AI 不中斷)...")
+    # [關鍵] 增加到 20 秒間隔，避免 429
+    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 20 秒)...")
 
     for stock_data in watch_data_list:
         res = fetch_pro_metrics(stock_data)
@@ -316,7 +304,7 @@ def main():
                 res['ai_strategy']
             ])
             
-        time.sleep(15.0) 
+        time.sleep(20.0) 
     
     results_line.sort(key=lambda x: x['score'], reverse=True)
     if results_line:
