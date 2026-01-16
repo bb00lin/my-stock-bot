@@ -48,14 +48,13 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. 輔助數據獲取 (新增籌碼與計算)
+# 2. 輔助數據獲取 (籌碼、量能、MA偵測)
 # ==========================================
 def get_streak_only(sid_clean):
     """獲取外資與投信連買天數"""
     try:
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
-        # 修正: 確保 sid 是純數字
         clean_id = ''.join(filter(str.isdigit, str(sid_clean)))
         df = dl.taiwan_stock_institutional_investors(stock_id=clean_id, start_date=start)
         
@@ -78,6 +77,39 @@ def get_vol_status_str(ratio):
     elif ratio < 0.7: return f"⚠️縮量({ratio:.1f}x)"
     else: return f"☁️量平({ratio:.1f}x)"
 
+def check_ma_status(p, ma5, ma10, ma20, ma60):
+    """
+    [新增] 自動偵測股價與均線的互動狀態
+    設定閾值為 1.5% 內視為「回測」或「面臨」
+    """
+    alerts = []
+    THRESHOLD = 0.015 
+    
+    # 1. 檢測 5日線 (短線攻防)
+    if ma5 > 0:
+        gap_ma5 = (p - ma5) / ma5
+        if 0 < gap_ma5 <= THRESHOLD:
+            alerts.append(f"⚡回測5日線(剩{gap_ma5:.1%})")
+        elif -THRESHOLD <= gap_ma5 < 0:
+            alerts.append(f"⚠️跌破5日線({gap_ma5:.1%})")
+
+    # 2. 檢測 20日線 (月線支撐)
+    if ma20 > 0:
+        gap_ma20 = (p - ma20) / ma20
+        if 0 < gap_ma20 <= THRESHOLD:
+            alerts.append(f"🛡️回測月線(剩{gap_ma20:.1%})")
+        elif -THRESHOLD <= gap_ma20 < 0:
+            alerts.append(f"☠️跌破月線({gap_ma20:.1%})")
+
+    # 3. 檢測 60日線 (乖離率過大警示)
+    if ma60 > 0:
+        gap_ma60 = (p - ma60) / ma60
+        if abs(gap_ma60) > 0.15: 
+            bias_status = "🔥乖離過大" if gap_ma60 > 0 else "❄️嚴重超跌"
+            alerts.append(bias_status)
+
+    return " | ".join(alerts) if alerts else ""
+
 # ==========================================
 # 3. AI 策略生成器 (深度綜合評估)
 # ==========================================
@@ -94,20 +126,24 @@ def get_gemini_strategy(data):
     角色：頂尖台股操盤手。
     任務：針對個股 {data['name']} ({data['id']}) 進行全方位診斷，並給出下一步具體操作建議。
     
+    【關鍵均線警示 (最優先處理)】
+    - **觸發訊號：{data['ma_alert']}** (若有內容，代表股價正位於關鍵均線附近，請務必針對此點位給出操作建議)
+    - 5日線：{data['ma5']} | 20日線：{data['ma20']} | 60日線：{data['ma60']}
+
     【核心籌碼與技術數據】
     - 價格：{data['p']} (日漲跌 {data['d1']:.2%}) | 乖離率：{data['bias_str']}
     - 籌碼：外資連買 {data['fs']} 天 | 投信連買 {data['ss']} 天
     - 量能：{data['vol_str']}
-    - 指標：RSI {data['rsi']} | 評分 {data['score']}分
+    - 指標：RSI {data['rsi']}
     - 系統訊號：{data['risk']} | {data['hint']}
     
     【使用者資產狀態】
     - {profit_info}
 
     【請依照上述數據，給出約 80 字的綜合操作建議】
-    1. 針對「庫存」或「觀察」身分，直接給出：續抱、加碼、減碼、止損 或 觀望、切入。
-    2. 結合「損益%」與「乖離/量能」，例如：「獲利已達10%且爆量乖離過大，建議分批獲利」或「投信連買3天，拉回五日線可佈局」。
-    3. 給出一個關鍵防守價位或目標價。
+    1. **若有「觸發訊號」，請明確指出該均線價格**。例如：「目前回測 5日線({data['ma5']})，若量縮不破可佈局」。
+    2. 針對「庫存」或「觀察」身分，直接給出：續抱、加碼、減碼、止損 或 觀望、切入。
+    3. 結合「損益%」與「乖離/量能/籌碼」給出防守價位或目標價。
     """
 
     last_error = ""
@@ -198,7 +234,7 @@ def get_tw_stock(sid):
 # 6. 核心數據抓取與計算
 # ==========================================
 def generate_auto_analysis(r, is_hold, cost):
-    # 邏輯判斷保持不變，直接沿用
+    # 邏輯判斷
     if r['rsi'] >= 80: risk = "🚨極度過熱"
     elif r['rsi'] >= 70: risk = "🚩高檔警戒"
     elif 40 <= r['rsi'] <= 60 and r['d1'] > 0: risk = "✅趨勢穩健"
@@ -215,7 +251,10 @@ def generate_auto_analysis(r, is_hold, cost):
     profit_pct = ((r['p'] - cost) / cost * 100) if (is_hold and cost > 0) else 0
     profit_str = f"({profit_pct:+.1f}%)" if (is_hold and cost > 0) else ""
 
-    if is_hold:
+    # [關鍵修改] 優先顯示 MA 警示
+    if r['ma_alert']:
+        hint = r['ma_alert'] # 直接使用回測警示作為主要提示
+    elif is_hold:
         if r['rsi'] >= 80: hint = f"❗分批止盈 {profit_str}"
         elif r['d1'] <= -0.04: hint = f"📢急跌守5日線 {profit_str}"
         elif r['rsi'] < 45 and r['d5'] < -0.05: hint = f"🛑停損審視 {profit_str}"
@@ -250,13 +289,16 @@ def fetch_pro_metrics(stock_data):
         rsi_series = calculate_rsi(df_hist['Close'])
         clean_rsi = 0.0 if pd.isna(rsi_series.iloc[-1]) else round(rsi_series.iloc[-1], 1)
         
-        # 均線與乖離率計算
+        # 均線計算
         ma5 = df_hist['Close'].rolling(5).mean().iloc[-1]
         ma20 = df_hist['Close'].rolling(20).mean().iloc[-1]
         ma60 = df_hist['Close'].rolling(60).mean().iloc[-1]
         
-        # 乖離率 (以季線為基準，可代表波段位階)
+        # 乖離率
         bias_60 = ((curr_p - ma60) / ma60) * 100
+        
+        # [新增] 自動偵測 MA 警示
+        ma_alert_str = check_ma_status(curr_p, ma5, 0, ma20, ma60)
         
         raw_yield = info.get('dividendYield', 0) or 0
         d1 = (curr_p / df_hist['Close'].iloc[-2]) - 1
@@ -265,7 +307,7 @@ def fetch_pro_metrics(stock_data):
         m6 = (curr_p / df_hist['Close'].iloc[-121]) - 1
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean() if df_hist['Volume'].iloc[-6:-1].mean() > 0 else 0
 
-        # 新增籌碼與量能狀態
+        # 籌碼與量能
         pure_id = ''.join(filter(str.isdigit, sid))
         fs, ss = get_streak_only(pure_id) # 外資/投信連買
         vol_str = get_vol_status_str(vol_ratio)
@@ -294,8 +336,9 @@ def fetch_pro_metrics(stock_data):
             "bias_str": f"{bias_60:+.1f}%",
             "vol_str": vol_str,
             "fs": fs, "ss": ss,
-            # 輔助AI用
-            "ma5": round(ma5, 2), "ma10": round(ma20, 2), "ma20": round(ma20, 2)
+            # MA 數據與警示
+            "ma5": round(ma5, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2),
+            "ma_alert": ma_alert_str
         }
 
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
@@ -320,7 +363,7 @@ def sync_to_sheets(data_list):
         print(f"⚠️ Google Sheets 同步失敗: {e}")
 
 def main():
-    # [更新] 時間格式顯示到分鐘
+    # 時間顯示到分鐘
     current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     results_line, results_sheet = [], []
 
@@ -339,12 +382,11 @@ def main():
             
             hold_mark = "📦庫存" if res['is_hold'] else "👀觀察"
             
-            # [更新] Sheet 欄位順序調整 (移除籌碼，加入乖離/量能/法人)
             # 對應: 時間, 代號, 名稱, 庫存, 評分, RSI, 產業, 乖離, 量能, 外資, 投信, 現價...
             results_sheet.append([
                 current_time, res['id'], res['name'], hold_mark, 
                 res['score'], res['rsi'], res['industry'], 
-                res['bias_str'], res['vol_str'], res['fs'], res['ss'], # 新增的4個欄位
+                res['bias_str'], res['vol_str'], res['fs'], res['ss'],
                 res['p'], res['yield'], res['amt_t'], 
                 res['d1'], res['d5'], res['m1'], res['m6'],
                 res['risk'], res['trend'], res['hint'],
