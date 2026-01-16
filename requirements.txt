@@ -3,3 +3,7 @@ pandas
 pandas-ta
 FinMind
 requests
+selenium
+gspread
+oauth2client
+webdriver-manager
