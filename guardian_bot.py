@@ -1,6 +1,7 @@
 import time
 import gspread
 import re 
+import os # 用來處理檔案路徑
 from oauth2client.service_account import ServiceAccountCredentials
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -42,35 +43,23 @@ def connect_google_sheet():
     return sheet
 
 def empty_cart(driver):
-    """ 核彈級清空：直接刪除 Cookies 與 LocalStorage """
+    """ 核彈級清空：直接刪除 Cookies """
     print("🧹 正在執行核彈級清空 (刪除 Cookies)...")
     try:
-        # 確保在網域內才能刪除 Cookies
         if "guardian.com.sg" not in driver.current_url:
              driver.get("https://guardian.com.sg/cart")
              time.sleep(2)
-
-        # 1. 刪除所有 Cookies (讓網站忘記購物車)
         driver.delete_all_cookies()
-        
-        # 2. 清除 Local Storage 與 Session Storage (雙重保險)
         driver.execute_script("window.localStorage.clear();")
         driver.execute_script("window.sessionStorage.clear();")
-        
-        # 3. 重新整理頁面以生效
         driver.refresh()
-        time.sleep(4) # 等待頁面載入完成
-        
+        time.sleep(4) 
         print("   ✅ 瀏覽器記憶已清除，購物車已歸零")
-        
     except Exception as e:
-        print(f"   ⚠️ 清空過程發生小錯誤 (但不影響執行): {e}")
+        print(f"   ⚠️ 清空過程發生小錯誤: {e}")
 
-# ================= 核心邏輯 =================
 def get_price_safely(driver):
     """ 使用 Regex 與多重策略抓取價格 """
-    
-    # === 策略 1: Regex 暴力搜尋 (最強) ===
     try:
         summary_box = driver.find_element(By.CSS_SELECTOR, "div.cart-summary, div.cart-totals, div[class*='summary']")
         box_text = summary_box.text.replace("\n", " ") 
@@ -80,13 +69,11 @@ def get_price_safely(driver):
     except:
         pass
 
-    # === 策略 2: XPath 精準定位 (備用) ===
     xpaths = [
         "//div[contains(text(), 'Subtotal')]/following-sibling::span",
         "//*[contains(text(), 'Subtotal')]/..//*[contains(text(), 'SGD')]",
         "//span[contains(@class, 'price')][contains(text(), '.')]"
     ]
-    
     for xpath in xpaths:
         try:
             element = driver.find_element(By.XPATH, xpath)
@@ -96,7 +83,6 @@ def get_price_safely(driver):
                 return cleaned
         except:
             continue
-            
     return None
 
 def process_sku(driver, sku):
@@ -107,7 +93,7 @@ def process_sku(driver, sku):
         driver.get(URL)
         time.sleep(3)
 
-        # 1. 搜尋商品
+        # 1. 搜尋
         try:
             search_box = WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "input[placeholder='Search for a products or brand']"))
@@ -117,12 +103,11 @@ def process_sku(driver, sku):
             search_box.send_keys(Keys.RETURN)
         except TimeoutException:
             print("❌ 搜尋框載入超時")
-            driver.save_screenshot(f"error_search_{sku}.png")
             return ["Search Fail"] * 5
 
         time.sleep(5)
 
-        # 2. 點擊商品進入內頁 (JS 強制點擊)
+        # 2. 點擊商品 (JS 強制點擊)
         try:
             xpath_selectors = [
                 "(//div[contains(@class, 'product')]//a)[1]", 
@@ -147,7 +132,6 @@ def process_sku(driver, sku):
 
         except NoSuchElementException:
             print(f"⚠️ 搜尋不到 SKU {sku}")
-            driver.save_screenshot(f"debug_not_found_{sku}.png")
             return ["Not Found"] * 5
 
         time.sleep(4)
@@ -168,7 +152,6 @@ def process_sku(driver, sku):
             
         except TimeoutException:
             print("❌ 加入購物車按鈕找不到")
-            driver.save_screenshot(f"error_cart_{sku}.png")
             return ["Add Fail"] * 5
 
         time.sleep(5)
@@ -179,10 +162,8 @@ def process_sku(driver, sku):
                 WebDriverWait(driver, 5).until_not(EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader")))
             except:
                 pass
-            
             time.sleep(2)
 
-            # === 抓取價格 ===
             current_price = get_price_safely(driver)
             
             if current_price:
@@ -191,9 +172,7 @@ def process_sku(driver, sku):
             else:
                 print("   ⚠️ 找不到價格欄位")
                 prices[qty] = "Error"
-                driver.save_screenshot(f"error_price_{sku}_qty{qty}.png")
 
-            # 增加數量
             if qty < 5:
                 try:
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
@@ -213,11 +192,17 @@ def process_sku(driver, sku):
                     print("   ⚠️ 無法點擊 + 按鈕")
                     break
 
+        # === 📸 新增：成功抓完價格後，拍張照存證 ===
+        print(f"📸 正在儲存 SKU {sku} 的價格截圖...")
+        driver.save_screenshot(f"proof_{sku}.png")
+        # ==========================================
+
         empty_cart(driver)
 
     except Exception as e:
         print(f"❌ 發生錯誤: {e}")
-        driver.save_screenshot(f"error_exception_{sku}.png")
+        # 發生錯誤也要截圖
+        driver.save_screenshot(f"error_{sku}.png")
         try:
             empty_cart(driver)
         except:
@@ -233,7 +218,7 @@ def main():
         driver = init_driver()
         
         print("--- 初始化檢查 ---")
-        empty_cart(driver) # 程式開始前先洗白一次
+        empty_cart(driver)
         
         records = sheet.get_all_records()
         print(f"📋 共有 {len(records)} 筆 SKU 待處理")
