@@ -10,11 +10,11 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 
-# ================= 設定區 (請確認這裡) =================
-# 您的 Google Sheet 名稱
-SHEET_NAME = 'Guardian_Price_Check' 
-# JSON 金鑰檔名
-CREDENTIALS_FILE = 'credentials.json'
+# ================= 設定區 =================
+# Google Sheet 名稱 (必須與您的試算表檔名完全一致)
+SHEET_NAME = 'Guardian_Price_Check'
+# 金鑰檔名 (對應 GitHub Actions workflow 產生的檔案)
+CREDENTIALS_FILE = 'google_key.json'
 # Guardian 網站網址
 URL = "https://guardian.com.sg/"
 
@@ -23,12 +23,21 @@ def clean_price(price_text):
     """ 清理價格字串，移除 'SGD'、'$' 和空格，只留數字 """
     if not price_text:
         return "N/A"
+    # 移除 SGD, $, 以及逗號，讓 Excel/Sheet 更好運算
     return price_text.replace("SGD", "").replace("$", "").replace(",", "").strip()
 
 def init_driver():
-    """ 啟動 Chrome 瀏覽器 """
+    """ 啟動 Chrome 瀏覽器 (GitHub Actions 專用設定) """
     options = webdriver.ChromeOptions()
-    options.add_argument('--start-maximized') # 視窗最大化
+    
+    # === GitHub Actions 關鍵設定 (無頭模式) ===
+    options.add_argument('--headless=new') # 啟用無頭模式
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080') # 設定解析度避免跑版
+    # ========================================
+    
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
     
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
@@ -44,9 +53,9 @@ def connect_google_sheet():
     return sheet
 
 def empty_cart(driver):
-    """ 專門用來清空購物車的函式 (基於您的最新截圖) """
+    """ 專門用來清空購物車的函式 """
     print("🧹 正在清空購物車...")
-    max_retries = 10 # 避免無窮迴圈
+    max_retries = 10 
     
     for _ in range(max_retries):
         try:
@@ -66,17 +75,17 @@ def empty_cart(driver):
             print(f"   🗑️ 發現 {len(remove_btns)} 個商品，正在移除...")
             remove_btns[0].click()
             
-            # 4. 等待讀取畫面消失 (Loading Spinner)
+            # 4. 等待讀取畫面消失
             time.sleep(2)
             try:
                 WebDriverWait(driver, 5).until_not(
                     EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader"))
                 )
             except:
-                time.sleep(2) # 如果沒抓到 spinner 就硬等一下
+                time.sleep(2)
 
         except (StaleElementReferenceException, TimeoutException):
-            continue # 頁面刷新了，重跑迴圈再找一次
+            continue 
         except Exception as e:
             print(f"   ⚠️ 清空購物車時發生小錯誤: {e}")
             break
@@ -150,7 +159,7 @@ def process_sku(driver, sku):
             except:
                 pass
 
-            # 4-1. 抓取 Subtotal
+            # 4-1. 抓取 Subtotal (主要抓取目標)
             try:
                 # 依據截圖抓取 Subtotal 數字
                 subtotal_element = driver.find_element(By.XPATH, "//div[contains(text(), 'Subtotal')]/following-sibling::span")
@@ -182,12 +191,12 @@ def process_sku(driver, sku):
                     print(f"   ⚠️ 無法增加數量: {e}")
                     break
 
-        # 5. 執行清空購物車 (使用新截圖邏輯)
+        # 5. 執行清空購物車
         empty_cart(driver)
 
     except Exception as e:
         print(f"❌ 發生錯誤: {e}")
-        # 即使出錯也要嘗試清空購物車，以免影響下一個
+        # 即使出錯也要嘗試清空購物車，確保下一次執行乾淨
         try:
             empty_cart(driver)
         except:
@@ -198,34 +207,44 @@ def process_sku(driver, sku):
 
 # ================= 主程式執行 =================
 def main():
-    sheet = connect_google_sheet()
-    driver = init_driver()
-    
-    # 確保一開始購物車是空的
-    driver.get("https://guardian.com.sg/cart")
-    time.sleep(3)
-    empty_cart(driver)
-    
-    records = sheet.get_all_records()
-    print(f"📋 共有 {len(records)} 筆 SKU 待處理")
+    try:
+        sheet = connect_google_sheet()
+        driver = init_driver()
+        
+        # 確保一開始購物車是空的
+        print("--- 初始化檢查 ---")
+        driver.get("https://guardian.com.sg/cart")
+        time.sleep(3)
+        empty_cart(driver)
+        
+        # 讀取 Sheet 資料
+        records = sheet.get_all_records()
+        print(f"📋 共有 {len(records)} 筆 SKU 待處理")
 
-    # 從第 2 行開始 (視您的 Sheet 標題列而定)
-    for i, row in enumerate(records, start=2):
-        sku = str(row.get('SKU', '')).strip()
-        if not sku:
-            continue
+        # 從第 2 行開始 (視您的 Sheet 標題列而定)
+        for i, row in enumerate(records, start=2):
+            sku = str(row.get('SKU', '')).strip()
+            if not sku:
+                continue
             
-        price_data = process_sku(driver, sku)
-        
-        # 寫回 Google Sheet (C 到 G 欄)
-        cell_range = f"C{i}:G{i}"
-        sheet.update(cell_range, [price_data])
-        
-        print(f"✅ SKU {sku} 更新完畢")
-        print("-" * 30)
+            # 執行爬蟲，取得 [價1, 價2, 價3, 價4, 價5]
+            price_data = process_sku(driver, sku)
+            
+            # 寫回 Google Sheet
+            # 根據截圖，您希望填入 C 欄 (Qty 1) 到 G 欄 (Qty 5)
+            cell_range = f"C{i}:G{i}"
+            sheet.update(cell_range, [price_data])
+            
+            print(f"✅ SKU {sku} 更新完畢: {price_data}")
+            print("-" * 30)
 
-    print("🎉 所有任務完成！")
-    driver.quit()
+        print("🎉 所有任務完成！")
+        driver.quit()
+        
+    except Exception as main_e:
+        print(f"💥 程式執行發生重大錯誤: {main_e}")
+        if 'driver' in locals():
+            driver.quit()
 
 if __name__ == "__main__":
     main()
