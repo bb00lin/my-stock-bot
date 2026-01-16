@@ -1,0 +1,35 @@
+name: Guardian Price Check Bot
+
+on:
+  workflow_dispatch: # 允許手動點擊按鈕執行
+  schedule:
+    - cron: '0 2 * * *' # 每天台灣時間早上 10 點自動執行 (UTC 02:00)
+
+jobs:
+  run_scraper:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code (下載程式碼)
+        uses: actions/checkout@v3
+
+      - name: Set up Python (安裝 Python 環境)
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies (安裝套件)
+        # 這裡會直接安裝需要的套件，省去您上傳 requirements.txt 的麻煩
+        run: |
+          pip install selenium gspread oauth2client webdriver-manager
+
+      - name: Create JSON Key (製作金鑰檔案)
+        env:
+          # 這裡會抓取您在第一步設定的 Secret
+          GOOGLE_KEY: ${{ secrets.GOOGLE_KEY_JSON }}
+        run: |
+          # 將 Secret 的內容寫入 google_key.json
+          echo "$GOOGLE_KEY" > google_key.json
+
+      - name: Run Python Script (執行程式)
+        run: python guardian_bot.py
