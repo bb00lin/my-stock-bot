@@ -1,6 +1,7 @@
 import os, yfinance as yf, pandas as pd, requests, time, datetime, sys
 import gspread
 import logging
+# 使用 Google GenAI 新版 SDK
 from google import genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
@@ -25,8 +26,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"❌ Gemini Client 初始化失敗: {e}")
 
-# [關鍵調整] 根據您的測試紀錄，2.0 是唯一活著的，放第一位
-# 1.5-flash 備用
+# 模型清單 (優先使用 2.0 與 1.5 Flash)
 MODEL_CANDIDATES = [
     "gemini-2.0-flash-exp", 
     "gemini-1.5-flash",
@@ -49,9 +49,12 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. AI 策略生成器 (精準錯誤回報)
+# 2. AI 策略生成器 (Gemini)
 # ==========================================
 def get_gemini_strategy(data):
+    """
+    呼叫 Gemini 生成操盤建議
+    """
     if not ai_client: return "AI 未啟動 (Init Fail)"
     
     hold_txt = f"目前持有 (成本 {data['cost']})" if data['is_hold'] else "目前空手觀望"
@@ -64,7 +67,8 @@ def get_gemini_strategy(data):
     - 收盤：{data['p']} (漲跌幅 {data['d1']:.2%})
     - 均線支撐：5日線 {data['ma5']} | 10日線 {data['ma10']} | 20日線 {data['ma20']}
     - 指標：RSI {data['rsi']} | 量比 {data['vol_r']}x
-    - 狀態：{data['risk']} | {hold_txt}
+    - 系統訊號：{data['hint']} ({data['risk']})
+    - 狀態：{hold_txt}
 
     【請模仿以下語氣撰寫】
     1. "如果明日開盤維持在 {data['p']} 以上..."
@@ -73,8 +77,6 @@ def get_gemini_strategy(data):
     """
 
     last_error = ""
-
-    # 遍歷嘗試模型
     for model_name in MODEL_CANDIDATES:
         try:
             response = ai_client.models.generate_content(
@@ -82,27 +84,17 @@ def get_gemini_strategy(data):
                 contents=prompt
             )
             return response.text.replace('\n', ' ').strip()
-
         except Exception as e:
             error_msg = str(e)
-            
-            # [核心修正] 如果遇到 429，這代表模型是對的，只是沒額度了
-            # 不用再試別的了，直接回傳這個錯誤，讓使用者知道要休息
             if "429" in error_msg:
                 print(f"   ⏳ {model_name} 額度已滿 (429)，停止嘗試。")
                 return "❌ 今日額度用盡 (429)"
-            
-            # 如果是 404 (找不到)，才繼續試下一個
             elif "404" in error_msg:
-                # print(f"   ⚠️ {model_name} 404, 換下一個...")
                 last_error = f"404 ({model_name})"
                 continue
-            
             else:
                 last_error = f"Err: {error_msg[:10]}"
                 continue
-
-    # 如果全部試完都是 404
     return f"❌ AI 失敗: {last_error}"
 
 # ==========================================
@@ -169,33 +161,62 @@ def get_tw_stock(sid):
     return None, None
 
 # ==========================================
-# 5. 核心數據抓取
+# 5. 核心診斷引擎 (已更新為您的詳細邏輯)
 # ==========================================
 def generate_auto_analysis(r, is_hold, cost):
-    if r['rsi'] >= 80: risk = "🚨極度過熱"
-    elif r['rsi'] >= 70: risk = "🚩高檔警戒"
-    elif 40 <= r['rsi'] <= 60 and r['d1'] > 0: risk = "✅趨勢穩健"
-    elif r['rsi'] <= 30: risk = "🛡️超跌打底"
-    else: risk = "正常波動"
+    """
+    根據當下數據與庫存狀態，生成動態操作建議
+    """
+    # --- A. 風控評級 (RSI 狀態) ---
+    if r['rsi'] >= 80: 
+        risk = "🚨 極度過熱"
+    elif r['rsi'] >= 70:
+        risk = "🚩 高檔警戒"
+    elif 40 <= r['rsi'] <= 60 and r['d1'] > 0:
+        risk = "✅ 趨勢穩健"
+    elif r['rsi'] <= 30:
+        risk = "🛡️ 超跌打底"
+    else:
+        risk = "正常波動"
 
+    # --- B. 動向判斷 (量價關係) ---
     trends = []
-    if r['vol_r'] > 2.0 and r['d1'] > 0: trends.append("🔥主力強攻")
-    elif r['vol_r'] > 1.2: trends.append("📈有效放量")
-    elif r['vol_r'] < 0.7: trends.append("⚠️縮量")
-    
+    if r['vol_r'] > 2.0 and r['d1'] > 0: trends.append("🔥 主力強攻")
+    elif r['vol_r'] > 1.2 and r['d1'] > 0: trends.append("📈 有效放量")
+    elif r['vol_r'] < 0.7 and r['d1'] > 0.01: trends.append("⚠️ 縮量背離")
+    if r['amt_t'] > 30: trends.append("💰 熱錢中心")
     trend_status = " | ".join(trends) if trends else "動能平淡"
-    
+
+    # --- C. 綜合提示 (操作指令) ---
     hint = ""
     profit_pct = ((r['p'] - cost) / cost * 100) if (is_hold and cost > 0) else 0
     profit_str = f"({profit_pct:+.1f}%)" if (is_hold and cost > 0) else ""
 
     if is_hold:
-        if r['rsi'] >= 80: hint = f"❗分批止盈 {profit_str}"
-        elif r['d1'] <= -0.04: hint = f"📢急跌守5日線 {profit_str}"
-        else: hint = f"📦續抱觀察 {profit_str}"
-    else:
-        if r['score'] >= 8: hint = "🚀AI推薦關注"
-        else: hint = "持續追蹤"
+        if r['rsi'] >= 80:
+            hint = f"❗指令：分批止盈 {profit_str}"
+        elif r['d1'] <= -0.04: # 單日大跌
+            hint = f"📢警示：急跌守5日線 {profit_str}"
+        elif r['rsi'] < 45 and r['d5'] < -0.05:
+            hint = f"🛑指令：停損審視 {profit_str}"
+        elif r['m6'] > 0.1 and r['d1'] > -0.02:
+            hint = f"💎指令：波段續抱 {profit_str}"
+        else:
+            hint = f"📦指令：持股觀察 {profit_str}"
+    
+    else: # 觀察股邏輯
+        if r['score'] >= 9:
+            hint = "⭐⭐ 優先佈局：指標極強"
+        elif r['score'] >= 8 and r['vol_r'] > 1.5:
+            hint = "🚀 進場訊號：放量轉強"
+        elif r['rsi'] <= 30 and r['d1'] > 0:
+            hint = "💡 進場訊號：跌深反彈"
+        elif r['rsi'] >= 75:
+            hint = "🚫 指令：高位，禁止追價"
+        elif r['m1'] > 0.1 and r['d1'] < -0.02:
+            hint = "📉 觀察：拉回找支撐"
+        else:
+            hint = "持續追蹤"
 
     return risk, trend_status, hint
 
@@ -207,9 +228,11 @@ def fetch_pro_metrics(stock_data):
     stock, full_id = get_tw_stock(sid)
     if not stock: return None
     try:
-        df_hist = stock.history(period="6mo")
-        if len(df_hist) < 60: return None
+        # [更新] 改為 8mo 以符合您的運算邏輯
+        df_hist = stock.history(period="8mo")
+        if len(df_hist) < 120: return None
         
+        info = stock.info
         latest = df_hist.iloc[-1]
         curr_p, curr_vol = latest['Close'], latest['Volume']
         today_amount = (curr_vol * curr_p) / 100_000_000
@@ -217,22 +240,27 @@ def fetch_pro_metrics(stock_data):
         rsi_series = calculate_rsi(df_hist['Close'])
         clean_rsi = 0.0 if pd.isna(rsi_series.iloc[-1]) else round(rsi_series.iloc[-1], 1)
         
+        # 均線 (給 AI 用)
         ma5 = df_hist['Close'].rolling(5).mean().iloc[-1]
         ma10 = df_hist['Close'].rolling(10).mean().iloc[-1]
         ma20 = df_hist['Close'].rolling(20).mean().iloc[-1]
         
-        raw_yield = stock.info.get('dividendYield', 0) or 0
+        raw_yield = info.get('dividendYield', 0) or 0
         d1 = (curr_p / df_hist['Close'].iloc[-2]) - 1
         d5 = (curr_p / df_hist['Close'].iloc[-6]) - 1
         m1 = (curr_p / df_hist['Close'].iloc[-21]) - 1
-        m6 = (curr_p / df_hist['Close'].iloc[-121]) if len(df_hist) >= 121 else 0
+        m6 = (curr_p / df_hist['Close'].iloc[-121]) - 1
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean()
 
+        # [更新] 計分邏輯同步您的版本
         score = 0
+        if (info.get('profitMargins', 0) or 0) > 0: score += 2
         if curr_p > df_hist['Close'].iloc[0]: score += 3
-        if 40 < clean_rsi < 70: score += 2
-        if vol_ratio > 1.5: score += 2
-        if is_hold: score += 1
+        if 0.03 < raw_yield < 0.15: score += 2
+        if 40 < clean_rsi < 70: score += 1
+        if today_amount > 10: score += 1
+        if vol_ratio > 1.5: score += 1
+        if is_hold: score += 0.5 
 
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
         market_label = '櫃' if '.TWO' in full_id else '市'
@@ -247,9 +275,11 @@ def fetch_pro_metrics(stock_data):
             "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2)
         }
 
+        # 生成規則判斷
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
+        # 呼叫 AI (將規則判斷結果餵給 AI)
         ai_strategy = get_gemini_strategy(res)
         res['ai_strategy'] = ai_strategy
         
@@ -277,7 +307,6 @@ def main():
         print("❌ 中止：觀察名單讀取失敗。")
         return
 
-    # [關鍵] 15 秒間隔
     print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 15 秒)...")
 
     for stock_data in watch_data_list:
