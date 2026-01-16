@@ -24,13 +24,9 @@ jobs:
 
       - name: Create JSON Key
         env:
-          # === 關鍵修改：這裡改成您截圖中的名稱 ===
           GOOGLE_KEY: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: |
-          # 將 Secret 內容寫入 Python 指定要讀取的檔名 (google_key.json)
           echo "$GOOGLE_KEY" > google_key.json
-          
-          # 檢查是否成功建立
           if [ ! -s google_key.json ] || [ "$(cat google_key.json)" == "" ]; then
             echo "❌ 錯誤：google_key.json 是空的！請確認 Secret 名稱是否為 GOOGLE_SHEETS_JSON。"
             exit 1
@@ -40,3 +36,12 @@ jobs:
 
       - name: Run Python Script
         run: python guardian_bot.py
+
+      # === 這是您原本缺少的關鍵步驟 ===
+      - name: Upload Artifacts (上傳截圖)
+        if: always() # 無論程式成功或失敗都會執行
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: "*.png" # 把所有 png 圖片打包上傳
+          retention-days: 5
