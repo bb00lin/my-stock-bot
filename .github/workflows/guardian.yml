@@ -45,3 +45,12 @@ jobs:
           name: screenshots
           path: "*.png" # 把所有 png 圖片打包上傳
           retention-days: 5
+
+          # (在 YAML 檔的最下方)
+      - name: Upload Artifacts (上傳截圖)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: "**/*.png"  # <--- 請修改這一行，才能抓到資料夾內的圖片
+          retention-days: 5
