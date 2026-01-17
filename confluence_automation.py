@@ -69,23 +69,22 @@ def inject_cookies(driver):
     time.sleep(8)
 
 def find_element_omnibus(driver, wait, description, locators):
-    """廣域搜尋元素的通用函式"""
     print(f"正在搜尋: {description}...")
     for method, query in locators:
         try:
             element = wait.until(EC.presence_of_element_located((method, query)))
-            # 嘗試捲動到元素確保可見
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
             print(f"--> 成功定位: {description} (策略: {query})")
             return element
         except: continue
-    raise Exception(f"找不到元素: {description}")
+    return None # 改為回傳 None 讓呼叫端處理
 
 def ensure_editor_active(driver):
     """點擊頁面空白處以喚醒編輯器工具列"""
     try:
-        body = driver.find_element(By.TAG_NAME, "body")
-        body.click()
+        # 點擊 body 背景
+        driver.find_element(By.TAG_NAME, "body").click()
+        # 嘗試關閉彈窗
         webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
     except: pass
 
@@ -118,17 +117,18 @@ def navigate_and_copy_latest(driver):
         print(f"跳轉至複製頁面: {copy_url}")
         driver.get(copy_url)
         
-        # 等待編輯器載入 (檢查標題框)
         wait_long = WebDriverWait(driver, 60)
-        webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform() # 關閉彈窗
-        
-        # 【修正點】恢復使用 Omnibus 搜尋，且優先尋找 content-title
-        find_element_omnibus(driver, wait_long, "標題輸入框", [
-            (By.ID, "content-title"), # v7.0 證明這個有效
+        # 這裡我們信任 Omnibus 的結果
+        title_box = find_element_omnibus(driver, wait_long, "標題輸入框", [
+            (By.ID, "content-title"),
             (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']"),
             (By.CSS_SELECTOR, "textarea[placeholder='Page title']"),
             (By.CSS_SELECTOR, "textarea[placeholder='頁面標題']")
         ])
+        
+        if not title_box:
+            raise Exception("嚴重錯誤：編輯器無法載入 (找不到標題框)")
+            
         print("編輯器就緒！")
         
     except TimeoutException:
@@ -154,54 +154,46 @@ def rename_page(driver, new_filename):
     title_area.send_keys(f"WeeklyReport_{new_filename}")
     time.sleep(2)
 
-def scroll_to_wake_content(driver):
-    """【關鍵】上下捲動頁面以觸發懶加載內容"""
-    print("正在捲動頁面以載入內容 (Wake up lazy loading)...")
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(2)
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
-    time.sleep(1)
-    driver.execute_script("window.scrollTo(0, 0);")
-    time.sleep(2)
-
 def update_jira_macros(driver, date_info):
     wait = WebDriverWait(driver, 30)
-    
-    # 先執行捲動喚醒
-    scroll_to_wake_content(driver)
+    print("正在捲動頁面以載入內容...")
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(2)
+    driver.execute_script("window.scrollTo(0, 0);")
     ensure_editor_active(driver)
     
     print("開始搜尋 Jira 表格...")
-    # 增加一個備用定位器
+    # 使用更寬鬆的 XPath 來尋找
     macro_locators = [
+        (By.CSS_SELECTOR, "div.datasourceView-content-wrap"),
         (By.CSS_SELECTOR, "div[data-prosemirror-node-name='blockCard']"),
-        (By.CSS_SELECTOR, "div.datasourceView-content-wrap")
+        (By.XPATH, "//*[contains(@class, 'datasourceView-content-wrap')]")
     ]
     
     macros = []
-    # 嘗試等待任意一種定位器出現
-    start_time = time.time()
-    while time.time() - start_time < 30:
+    # 嘗試多次尋找
+    for _ in range(3):
         for locator in macro_locators:
             found = driver.find_elements(*locator)
             if found:
                 macros = found
-                print(f"使用定位器 {locator[1]} 找到 {len(found)} 個表格")
+                print(f"找到 {len(found)} 個表格 (策略: {locator[1]})")
                 break
         if macros: break
-        time.sleep(2) # 每 2 秒重試一次
+        time.sleep(2)
             
     if not macros:
-        print("警告：找不到任何 Jira 表格。")
+        print("警告：找不到 Jira 表格。可能此頁面無表格，或載入失敗。")
         return
 
     for i, target in enumerate(macros):
         try:
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
             time.sleep(1)
-            # 使用 JS 點擊避免 ElementClickInterceptedException
+            # 使用 JS 強制點擊，因為可能有遮罩
             driver.execute_script("arguments[0].click();", target)
             
+            # 尋找編輯按鈕 (鉛筆)
             edit_btn = wait.until(EC.element_to_be_clickable(
                 (By.XPATH, "//button[@aria-label='編輯'] | //button[@aria-label='Edit'] | //span[text()='編輯'] | //span[text()='Edit']")
             ))
@@ -217,7 +209,7 @@ def update_jira_macros(driver, date_info):
                 new_jql = re.sub(dates_found[0], date_info['monday_str'], old_jql, count=1)
                 new_jql = re.sub(dates_found[1], date_info['sunday_str'], new_jql, count=1)
                 
-                print(f"[{i+1}] 更新: {dates_found[0]}~{dates_found[1]} -> {date_info['monday_str']}~{date_info['sunday_str']}")
+                print(f"[{i+1}] 更新: {dates_found[0]} -> {date_info['monday_str']}")
                 
                 jql_input.click()
                 jql_input.send_keys(Keys.CONTROL + "a")
@@ -229,6 +221,7 @@ def update_jira_macros(driver, date_info):
                 
                 insert_btn = driver.find_element(By.XPATH, "//button[contains(., 'Insert') or contains(., 'Save') or contains(., '插入')]")
                 insert_btn.click()
+                
                 wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
                 time.sleep(2)
             else:
@@ -243,35 +236,40 @@ def publish_page(driver):
     wait = WebDriverWait(driver, 15)
     ensure_editor_active(driver)
     
-    # 定義發布按鈕的多種可能 (包含中文、英文、ID)
+    # 策略 1: 標準 ID
+    # 策略 2: 中文/英文文字
+    # 策略 3: 【暴力法】所有 appearance='primary' 的藍色按鈕
     publish_locators = [
         (By.CSS_SELECTOR, "[data-testid='publish-button']"),
         (By.ID, "publish-button"),
         (By.XPATH, "//button[contains(., '發布')]"),
         (By.XPATH, "//button[contains(., 'Publish')]"),
-        (By.CSS_SELECTOR, "button[aria-label='發布']"),
-        (By.CSS_SELECTOR, "button[aria-label='Publish']")
+        (By.CSS_SELECTOR, "button[appearance='primary']") # Atlassian 藍色按鈕
     ]
     
-    try:
-        btn = find_element_omnibus(driver, wait, "發布按鈕", publish_locators)
-        # 嘗試點擊
+    btn = find_element_omnibus(driver, wait, "發布按鈕", publish_locators)
+    
+    if btn:
         try:
             btn.click()
         except ElementClickInterceptedException:
             driver.execute_script("arguments[0].click();", btn)
-            
-        print("頁面發布動作已執行！")
+        print("發布動作已觸發！等待跳轉...")
         time.sleep(10)
-    except Exception as e:
-        print(f"發布失敗: {str(e)}")
-        driver.save_screenshot("publish_error.png")
-        # 非致命錯誤，不 raise
+    else:
+        # 【除錯大絕招】印出頁面上所有按鈕的文字，讓我們知道它看到了什麼
+        print("!!! 找不到發布按鈕，開始傾印頁面按鈕資訊 !!!")
+        buttons = driver.find_elements(By.TAG_NAME, "button")
+        btn_texts = [b.text for b in buttons if b.is_displayed()]
+        print(f"可見按鈕清單: {btn_texts}")
+        
+        # 拋出異常，確保任務標記為失敗
+        raise Exception("發布按鈕搜尋失敗")
 
 def main():
     dates = get_target_dates()
-    print(f"=== Confluence 自動週報腳本 (v10.0 修正回歸版) ===")
-    print(f"日期: {dates['monday_str']} ~ {dates['sunday_str']} | 檔名: {dates['friday_filename']}")
+    print(f"=== Confluence 自動週報腳本 (v11.0 地毯搜索版) ===")
+    print(f"日期: {dates['monday_str']} ~ {dates['sunday_str']}")
     
     driver = init_driver()
     try:
