@@ -3,7 +3,7 @@ name: Guardian Price Check Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *' # 每天台灣時間早上 10:00 自動執行
+    - cron: '0 2 * * *' # 每天台灣時間早上 10:00
 
 jobs:
   run_scraper:
@@ -35,20 +35,21 @@ jobs:
           fi
 
       - name: Run Python Script
+        env:
+          # 傳遞 Email 帳密給 Python (請確保已在 GitHub Secrets 設定)
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
         run: python guardian_bot.py
 
-      # === 新增步驟：設定動態檔名 (台灣時間) ===
       - name: Generate Timestamp
         if: always()
         run: |
-          # 設定時區為台北，格式為：Screenshots_年月日_時分 (例如 Screenshots_20260117_1030)
           echo "TIMESTAMP=Screenshots_$(TZ='Asia/Taipei' date +'%Y%m%d_%H%M')" >> $GITHUB_ENV
 
-      # === 修改步驟：使用動態檔名 ===
-      - name: Upload Artifacts (上傳截圖壓縮檔)
+      - name: Upload Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.TIMESTAMP }}  # <--- 這裡會自動變成上面的時間字串
+          name: ${{ env.TIMESTAMP }}
           path: "*.zip"
           retention-days: 5
