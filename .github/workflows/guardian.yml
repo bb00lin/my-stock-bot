@@ -1,55 +1,46 @@
-name: Guardian Price Check Bot
+name: Mix Match Check
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *' # 每天台灣時間早上 10:00
+    - cron: '0 2 * * *' 
+  workflow_dispatch:    
 
 jobs:
-  run_scraper:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
 
-      - name: Install dependencies
-        run: |
-          pip install selenium gspread oauth2client webdriver-manager google-api-python-client google-auth-httplib2 google-auth-oauthlib
+    - name: Install Chrome
+      uses: browser-actions/setup-chrome@latest
 
-      - name: Create JSON Key
-        env:
-          GOOGLE_KEY: ${{ secrets.GOOGLE_SHEETS_JSON }}
-        run: |
-          echo "$GOOGLE_KEY" > google_key.json
-          if [ ! -s google_key.json ] || [ "$(cat google_key.json)" == "" ]; then
-            echo "❌ 錯誤：google_key.json 是空的！請確認 Secret 名稱是否為 GOOGLE_SHEETS_JSON。"
-            exit 1
-          else
-            echo "✅ 金鑰檔案建立成功！"
-          fi
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install selenium webdriver-manager gspread oauth2client
 
-      - name: Run Python Script
-        env:
-          # 傳遞 Email 帳密給 Python (請確保已在 GitHub Secrets 設定)
-          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-        run: python guardian_bot.py
+    - name: Create credentials file
+      run: |
+        # === 這裡修正了 Secret 名稱 ===
+        echo "${{ secrets.GOOGLE_SHEETS_JSON }}" > google_key.json
 
-      - name: Generate Timestamp
-        if: always()
-        run: |
-          echo "TIMESTAMP=Screenshots_$(TZ='Asia/Taipei' date +'%Y%m%d_%H%M')" >> $GITHUB_ENV
+    - name: Run Mix Match Bot
+      env:
+        MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+        MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+      run: python mix_guardian_bot.py 
 
-      - name: Upload Artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.TIMESTAMP }}
-          path: "*.zip"
-          retention-days: 5
+    - name: Upload Artifacts (Optional)
+      if: always() 
+      uses: actions/upload-artifact@v4
+      with:
+        name: screenshots
+        path: mix_temp/ 
+        retention-days: 5
