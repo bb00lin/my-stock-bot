@@ -22,7 +22,7 @@ SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
 WORKSHEET_MAIN = '工作表1' 
 WORKSHEET_PROMO = 'promotion'
 
-SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/您的試算表ID/edit"
+SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1vN7v1d8xYJ9S_X3U4qYy0eC4p5a6b7c8d9e0f/edit" # 請確認此ID是否正確
 
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
@@ -57,9 +57,15 @@ def parse_date(date_str):
     except:
         return None
 
-# ================= 資料同步與解析功能 =================
+# ================= 資料同步與解析功能 (邏輯更新) =================
 def parse_promo_string(promo_text):
+    """
+    解析促銷字串，找出所有數量的價格。
+    對於未定義的數量，使用「所有階層中最低的單價」來推算。
+    """
     if not promo_text: return ["", "", "", "", ""]
+    
+    # 1. 抓取所有定義好的價格 (例如 {1: 49.9, 2: 94, 3: 135})
     matches = re.findall(r'(\d+)\s+[Ff]or\s+\$?([\d\.]+)', promo_text)
     price_map = {}
     for qty_str, price_str in matches:
@@ -68,21 +74,37 @@ def parse_promo_string(promo_text):
             price = float(price_str)
             price_map[qty] = price
         except: continue
+        
     if not price_map: return ["", "", "", "", ""]
 
-    calculated_prices = []
-    unit_price_base = 0
-    if 1 in price_map: unit_price_base = price_map[1]
-    else:
-        min_qty = min(price_map.keys())
-        unit_price_base = price_map[min_qty] / min_qty
+    # 2. 找出「最佳單價」(Best Unit Price)
+    # 遍歷所有定義的階層，算出單價，取最小值
+    best_unit_price = float('inf')
+    
+    for q, p in price_map.items():
+        unit_p = p / q
+        if unit_p < best_unit_price:
+            best_unit_price = unit_p
+    
+    # 防止極端狀況 (雖然不太可能發生)
+    if best_unit_price == float('inf'): 
+        return ["", "", "", "", ""]
 
+    calculated_prices = []
+    
+    # 3. 計算 Qty 1~5
     for q in range(1, 6):
-        if q in price_map: calculated_prices.append(str(price_map[q]))
+        if q in price_map:
+            # 如果規則有定義 (例如 3 For 135)，直接用定義值
+            calculated_prices.append(str(price_map[q]))
         else:
-            total = unit_price_base * q
+            # 如果沒定義 (例如 Qty 4)，用「最佳單價」乘以數量
+            # 邏輯更新：例如 135/3 = 45，則 Qty 4 = 45 * 4 = 180
+            total = best_unit_price * q
+            # 格式化去除多餘的 .00
             val_str = "{:.2f}".format(total).rstrip('0').rstrip('.')
             calculated_prices.append(val_str)
+            
     return calculated_prices
 
 def sync_promotion_data(client):
@@ -227,8 +249,6 @@ def validate_user_inputs(user_prices):
             val = float(p)
             valid_numbers.append(val)
         except: return f"異常:User含非數值({p})"
-    # 取消「數值皆相同」的異常檢查，因為單一商品(Qty 1)可能發生，
-    # 且網站限購時也會導致無法比較，交由後續邏輯處理
     return None
 
 def compare_prices(user_prices, web_prices):
@@ -243,11 +263,8 @@ def compare_prices(user_prices, web_prices):
         w_raw = web_prices[i]
         u_val = clean_price(u_raw)
         
-        # 處理 Limit Reached 狀況
         if w_raw == "Limit Reached":
-            # 如果網站限購，但 User 有填價格，顯示提示
-            if u_val: 
-                mismatches.append(f"Q{i+1}:Limit Reached")
+            if u_val: mismatches.append(f"Q{i+1}:Limit Reached")
             continue
 
         w_val = clean_price(w_raw)
@@ -456,22 +473,21 @@ def process_sku(driver, sku):
                     try: WebDriverWait(driver, 2).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')]")))
                     except: pass
             
-            # 如果嘗試 10 次都失敗，可能是因為價格沒變 (被擋了)
-            # 這時我們最後一次檢查是否有 Maximum error
+            # 檢查 Limit Reached (Retry 後)
             if final_price == "Error":
                  try:
                     error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')] | //div[contains(@class, 'message-error')]")
                     if error_msg.is_displayed():
                          print("   🛑 (重試後確認) 達到購買上限")
-                         for _ in range(qty, 6): prices.append("Limit Reached") # 填滿剩下
-                         break # 離開大迴圈
+                         for _ in range(qty, 6): prices.append("Limit Reached")
+                         break 
                  except: pass
 
             if final_price == "Error" and current_price_str:
                 final_price = current_price_str
                 driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}_abnormal.png")
 
-            if len(prices) < qty: # 如果上面沒有 break 掉
+            if len(prices) < qty:
                 prices.append(final_price)
 
             if qty < 5:
@@ -479,21 +495,17 @@ def process_sku(driver, sku):
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     driver.execute_script("arguments[0].click();", plus_btn)
                     
-                    # === 新增：點擊後立即檢查是否出現錯誤訊息 (Maximum limit) ===
                     time.sleep(1)
+                    # 偵測點擊後是否立刻報錯 (Limit Reached)
                     try:
                         error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')] | //div[contains(@class, 'message-error')]")
                         if error_msg.is_displayed():
                             print("   🛑 達到購買上限 (Limit Reached)")
-                            # 填入剩下的數量為 Limit Reached
-                            # 目前是 qty，準備要進入 qty+1
-                            # 例如 qty=1 完成，點+號，發現錯誤，則 qty 2~5 都是 Limit Reached
                             for _ in range(qty, 5): 
                                 prices.append("Limit Reached")
-                            break # 跳出迴圈
+                            break 
                     except: pass
                     
-                    # 正常的等待 Spinner 消失
                     time.sleep(0.5) 
                     try: WebDriverWait(driver, 20).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
                     except TimeoutException: pass
