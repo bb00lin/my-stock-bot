@@ -73,15 +73,15 @@ def inject_cookies(driver):
             
     print(f"成功注入 {added} 個 Cookies，前往目標頁面...")
     driver.get(URL)
-    time.sleep(10) # 等待首頁載入
+    time.sleep(10)
 
 def navigate_and_copy_latest(driver):
-    """在側邊欄找到最新的週報並複製 (雙重保險版)"""
+    """在側邊欄找到最新的週報並複製 (修復版)"""
     print(f"正在搜尋側邊欄的最新週報 (當前頁面: {driver.title})...")
     wait = WebDriverWait(driver, 30)
     
     try:
-        # 1. 尋找連結 (支援中文/英文環境)
+        # 1. 尋找側邊欄連結
         xpath_query = "//a[contains(., 'WeeklyReport_20')]"
         links = wait.until(EC.presence_of_all_elements_located((By.XPATH, xpath_query)))
         
@@ -103,17 +103,17 @@ def navigate_and_copy_latest(driver):
         
         driver.execute_script("arguments[0].click();", latest_link)
         
-        # 【保險一】先等待「編輯」按鈕出現，這代表頂部工具列已經載入完成
-        print("等待頁面載入 (尋找編輯按鈕)...")
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='edit-page-button']")))
-        print("頁面頂部工具列已就緒。")
+        # 【關鍵修改】不再等待「編輯」按鈕，改為等待頁面標題 (h1) 出現
+        print("等待頁面標題載入...")
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "h1")))
+        time.sleep(5) # 多等 5 秒讓頂部導航列載入
+        print("頁面載入完成，準備尋找操作選單。")
         
         # 嘗試點擊「...」按鈕
-        print("嘗試開啟更多動作選單...")
         more_btn_locators = [
             (By.CSS_SELECTOR, "[data-testid='page-metadata-actions-more-button']"),
             (By.XPATH, "//button[@aria-label='更多動作']"),
-            (By.XPATH, "//button//span[@aria-label='更多動作']/.."), # 尋找包著span的按鈕
+            (By.XPATH, "//button//span[@aria-label='更多動作']/.."),
             (By.CSS_SELECTOR, "button[aria-label='More actions']")
         ]
         
@@ -127,42 +127,38 @@ def navigate_and_copy_latest(driver):
                 break
             except: continue
         
-        # 【保險二】如果按鈕點不到，使用鍵盤快捷鍵 "." (句號) 呼叫選單
+        # 【保險方案】如果按鈕點不到，使用鍵盤快捷鍵 "." (句號) 呼叫選單
         if not menu_opened:
-            print("無法點擊按鈕，嘗試使用快捷鍵 '.' (句號) 呼叫選單...")
+            print("按鈕點擊失敗，使用鍵盤快捷鍵 '.' (句號) 呼叫選單...")
             webdriver.ActionChains(driver).send_keys(".").perform()
-            time.sleep(2) # 等待搜尋框彈出
+            time.sleep(2) # 等待對話框
             
-            # 在搜尋框輸入 "複製"
-            print("正在輸入 '複製' 指令...")
+            # 輸入 "複製" 並按 Enter
+            print("發送 '複製' 指令...")
             webdriver.ActionChains(driver).send_keys("複製").pause(1).send_keys(Keys.ENTER).perform()
-            
-            # 如果是英文介面，可能需要輸入 Copy，這裡做個雙重嘗試
-            # 但通常我們會進入下一步等待編輯器，如果沒反應代表失敗
         
         else:
             # 如果選單成功打開，點擊「複製」
-            print("選單已開，尋找 '複製' 選項...")
+            print("選單已開，點擊 '複製'...")
             try:
-                # 嘗試點擊含有複製文字的元素
                 copy_option = wait.until(EC.element_to_be_clickable(
                     (By.XPATH, "//span[contains(text(), '複製') or contains(text(), 'Copy')]")
                 ))
                 copy_option.click()
             except TimeoutException:
-                # 如果選單開了但找不到複製，可能需要滾動或介面不同
-                print("選單中找不到複製按鈕，嘗試直接發送快捷鍵...")
-                webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform() # 關閉選單
+                # 選單開了但找不到選項，可能是英文介面或需要滾動，嘗試快捷鍵補救
+                print("選單中找不到選項，嘗試快捷鍵補救...")
+                webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
                 webdriver.ActionChains(driver).send_keys(".").pause(1).send_keys("複製").pause(1).send_keys(Keys.ENTER).perform()
 
-        print("已觸發複製動作，等待編輯器載入...")
-        # 編輯器載入比較慢，這裡必須給足時間
-        wait.until(EC.url_contains("copy-page")) # 確保網址變為複製模式
-        time.sleep(10)
+        print("已觸發複製，等待編輯器載入 (網址應包含 copy-page)...")
+        wait.until(EC.url_contains("copy-page"))
+        # 編輯器載入很重，給予充足時間
+        time.sleep(15)
         
     except TimeoutException:
-        print("操作逾時！")
-        driver.save_screenshot("copy_error.png")
+        print("操作逾時！請檢查截圖確認當前畫面狀態。")
+        driver.save_screenshot("nav_error.png")
         raise
 
 def rename_page(driver, new_filename):
@@ -170,16 +166,20 @@ def rename_page(driver, new_filename):
     print(f"正在重命名為: WeeklyReport_{new_filename}")
     wait = WebDriverWait(driver, 20)
     
-    title_area = wait.until(EC.visibility_of_element_located(
-        (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
-    ))
-    
-    title_area.click()
-    title_area.send_keys(Keys.CONTROL + "a")
-    title_area.send_keys(Keys.BACK_SPACE)
-    time.sleep(0.5)
-    title_area.send_keys(f"WeeklyReport_{new_filename}")
-    time.sleep(1)
+    try:
+        title_area = wait.until(EC.visibility_of_element_located(
+            (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
+        ))
+        
+        title_area.click()
+        title_area.send_keys(Keys.CONTROL + "a")
+        title_area.send_keys(Keys.BACK_SPACE)
+        time.sleep(0.5)
+        title_area.send_keys(f"WeeklyReport_{new_filename}")
+        time.sleep(1)
+    except TimeoutException:
+        print("找不到標題輸入框，可能編輯器尚未載入完成。")
+        raise
 
 def update_jira_macros(driver, date_info):
     """迴圈更新所有 Jira 表格的日期"""
@@ -191,7 +191,7 @@ def update_jira_macros(driver, date_info):
     try:
         wait.until(EC.presence_of_element_located(macro_locator))
     except TimeoutException:
-        print("警告：找不到 Jira 表格，可能頁面尚未完全載入。")
+        print("警告：找不到 Jira 表格，可能頁面空白或載入不全。")
         return
 
     macros_count = len(driver.find_elements(*macro_locator))
