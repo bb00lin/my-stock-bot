@@ -11,7 +11,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException, ElementClickInterceptedException
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 設定區 ---
@@ -19,7 +19,6 @@ URL = os.environ.get("CONF_URL")
 COOKIES_JSON = os.environ.get("CONF_COOKIES")
 
 def get_target_dates():
-    """計算本週一、本週日、本週五(檔名用)"""
     today = date.today()
     monday = today - timedelta(days=today.weekday())
     sunday = monday + timedelta(days=6)
@@ -76,15 +75,37 @@ def inject_cookies(driver):
     driver.get(URL)
     time.sleep(8)
 
+def find_title_element(driver, wait):
+    """【廣域搜尋】嘗試多種方式尋找標題輸入框"""
+    print("正在尋找標題輸入框...")
+    
+    # 定義所有可能的標題定位器
+    locators = [
+        (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']"), # Cloud 標準
+        (By.CSS_SELECTOR, "textarea[aria-label='Page title']"),           # 輔助標籤
+        (By.CSS_SELECTOR, "textarea[placeholder='Page title']"),          # 英文 Placeholder
+        (By.CSS_SELECTOR, "textarea[placeholder='頁面標題']"),             # 中文 Placeholder
+        (By.ID, "content-title"),                                         # 舊版 ID
+        (By.CSS_SELECTOR, "h1 textarea")                                  # 結構化定位
+    ]
+    
+    for method, query in locators:
+        try:
+            # 使用 presence (存在即可)，因為 visibility 有時會被彈窗誤判
+            element = wait.until(EC.presence_of_element_located((method, query)))
+            print(f"成功定位標題框！使用策略: {query}")
+            return element
+        except:
+            continue
+            
+    raise Exception("遍歷所有已知策略後，仍找不到標題輸入框。")
+
 def navigate_and_copy_latest(driver):
-    """
-    找到最新週報，解析 URL 取得 Page ID，使用 create?copyPageId 參數直接複製
-    """
-    print(f"正在搜尋側邊欄的最新週報 (當前頁面: {driver.title})...")
+    """網址解析跳轉法 (v7.0)"""
+    print(f"正在搜尋側邊欄 (當前頁面: {driver.title})...")
     wait = WebDriverWait(driver, 30)
     
     try:
-        # 1. 尋找側邊欄連結
         xpath_query = "//a[contains(., 'WeeklyReport_20')]"
         links = wait.until(EC.presence_of_all_elements_located((By.XPATH, xpath_query)))
         
@@ -102,56 +123,70 @@ def navigate_and_copy_latest(driver):
         valid_links.sort(key=lambda x: x.text)
         latest_link = valid_links[-1]
         latest_name = latest_link.text
-        print(f"找到最新週報: {latest_name}，正在進入...")
+        print(f"找到最新週報: {latest_name}，進入中...")
         
-        # 點擊進入頁面
         driver.execute_script("arguments[0].click();", latest_link)
         
-        print("等待頁面跳轉以獲取 Page ID...")
+        print("等待頁面載入以獲取 Page ID...")
         time.sleep(5)
         wait.until(EC.url_contains("pages"))
         
         current_url = driver.current_url
-        print(f"當前週報網址: {current_url}")
-        
-        # 2. 解析 Page ID
         match = re.search(r"/pages/(\d+)", current_url)
         if not match:
-            raise Exception(f"無法從網址中解析出 Page ID: {current_url}")
+            raise Exception(f"無法解析 Page ID: {current_url}")
             
         page_id = match.group(1)
-        print(f"解析成功！Page ID: {page_id}")
+        print(f"Page ID: {page_id}")
         
-        # 3. 建構正確的「複製頁面」網址 (使用 Cloud 版標準參數)
-        # 格式: .../wiki/spaces/SPACE/pages/create?copyPageId=PAGE_ID
+        # 建構複製網址
         url_prefix = current_url.split('/pages/')[0]
         copy_url = f"{url_prefix}/pages/create?copyPageId={page_id}"
         
-        print(f"直接跳轉至複製頁面: {copy_url}")
+        print(f"跳轉至複製頁面: {copy_url}")
         driver.get(copy_url)
         
-        # 4. 等待編輯器載入 (延長至 60 秒)
-        print("等待編輯器載入 (尋找標題輸入框)...")
+        # 延長等待，並嘗試移除遮擋物
+        print("等待編輯器載入...")
         wait_long = WebDriverWait(driver, 60)
         
-        # 嘗試尋找標題輸入框
-        wait_long.until(EC.visibility_of_element_located(
-            (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
-        ))
-        print("編輯器已就緒！")
+        # 嘗試按 ESC 關閉可能存在的「新功能介紹」彈窗
+        webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        time.sleep(1)
+        
+        # 使用廣域搜尋確認編輯器是否就緒
+        find_title_element(driver, wait_long)
+        print("編輯器確認就緒！")
         
     except TimeoutException:
         print(f"導航或載入逾時！當前標題: {driver.title}")
+        # 印出頁面結構幫助除錯
+        try:
+            body = driver.find_element(By.TAG_NAME, "body").get_attribute('innerHTML')
+            print(f"DEBUG: 頁面 HTML 片段 (前 500 字): {body[:500]}")
+        except: pass
         driver.save_screenshot("nav_error.png")
         raise
 
 def rename_page(driver, new_filename):
-    """修改頁面標題"""
+    """修改頁面標題 (使用廣域搜尋)"""
     print(f"正在重命名為: WeeklyReport_{new_filename}")
     wait = WebDriverWait(driver, 20)
     
-    title_area = driver.find_element(By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
-    title_area.click()
+    # 再次尋找標題框
+    title_area = find_title_element(driver, wait)
+    
+    # 確保元素可見並可點擊
+    driver.execute_script("arguments[0].scrollIntoView(true);", title_area)
+    time.sleep(1)
+    
+    try:
+        title_area.click()
+    except ElementClickInterceptedException:
+        print("標題框被遮擋，嘗試用 JS 強制點擊...")
+        driver.execute_script("arguments[0].click();", title_area)
+    
+    # 清空並輸入
     title_area.send_keys(Keys.CONTROL + "a")
     title_area.send_keys(Keys.BACK_SPACE)
     time.sleep(0.5)
@@ -184,13 +219,11 @@ def update_jira_macros(driver, date_info):
             time.sleep(1)
             target.click()
             
-            # 尋找編輯按鈕
             edit_btn = wait.until(EC.element_to_be_clickable(
                 (By.XPATH, "//button[@aria-label='編輯'] | //button[@aria-label='Edit'] | //span[text()='編輯'] | //span[text()='Edit']")
             ))
             edit_btn.click()
             
-            # 等待 JQL 輸入框
             jql_input = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
             
             old_jql = jql_input.text
@@ -202,7 +235,7 @@ def update_jira_macros(driver, date_info):
                 new_jql = re.sub(dates_found[0], date_info['monday_str'], new_jql, count=1)
                 new_jql = re.sub(dates_found[1], date_info['sunday_str'], new_jql, count=1)
                 
-                print(f"[{i+1}/{macros_count}] 更新日期: {dates_found[0]}~{dates_found[1]} -> {date_info['monday_str']}~{date_info['sunday_str']}")
+                print(f"[{i+1}/{macros_count}] 更新: {dates_found[0]}~{dates_found[1]} -> {date_info['monday_str']}~{date_info['sunday_str']}")
                 
                 jql_input.click()
                 jql_input.send_keys(Keys.CONTROL + "a")
@@ -212,7 +245,6 @@ def update_jira_macros(driver, date_info):
                 jql_input.send_keys(Keys.ENTER)
                 time.sleep(2)
                 
-                # 點擊插入/儲存
                 insert_btn = driver.find_element(By.XPATH, "//button[contains(., 'Insert') or contains(., 'Save') or contains(., '插入')]")
                 insert_btn.click()
                 
@@ -245,7 +277,7 @@ def publish_page(driver):
 
 def main():
     dates = get_target_dates()
-    print(f"=== Confluence 自動週報腳本 (v6.0 URL修正版) ===")
+    print(f"=== Confluence 自動週報腳本 (v7.0 廣域搜尋版) ===")
     print(f"本週區間: {dates['monday_str']} ~ {dates['sunday_str']} | 檔名: {dates['friday_filename']}")
     
     driver = init_driver()
