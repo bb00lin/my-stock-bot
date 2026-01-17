@@ -18,14 +18,15 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # ================= 設定區 =================
-# ★★★ 您的 Google Sheet 檔案名稱 (左上角那個大標題) ★★★
+# Google Sheet 檔案名稱
 SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
 
 # 工作表名稱
 WORKSHEET_MAIN = '工作表1' 
 WORKSHEET_PROMO = 'promotion'
 
-# 您的 Google Sheet 網址 (用於 Email 連結)
+# Google Sheet 網址 (用於 Email 連結)
+# ★★★ 請確認此網址是否正確 ★★★
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/您的試算表ID/edit"
 
 CREDENTIALS_FILE = 'google_key.json'
@@ -79,7 +80,7 @@ def parse_promo_string(promo_text):
 
     calculated_prices = []
     
-    # 取得 Qty 1 的單價 (用於計算倍數)
+    # 取得 Qty 1 的單價
     unit_price_base = 0
     if 1 in price_map:
         unit_price_base = price_map[1]
@@ -89,10 +90,8 @@ def parse_promo_string(promo_text):
 
     for q in range(1, 6):
         if q in price_map:
-            # 規則定義的價格
             calculated_prices.append(str(price_map[q]))
         else:
-            # 規則未定義，用單價乘以數量
             total = unit_price_base * q
             val_str = "{:.2f}".format(total).rstrip('0').rstrip('.')
             calculated_prices.append(val_str)
@@ -102,38 +101,35 @@ def parse_promo_string(promo_text):
 def sync_promotion_data(client):
     print("🔄 正在從 promotion 同步資料...")
     try:
-        # === 關鍵修正：先開檔案，再選分頁 ===
         spreadsheet = client.open(SPREADSHEET_FILE_NAME)
-        source_sheet = spreadsheet.worksheet(WORKSHEET_PROMO) # 讀取 'promotion' 分頁
-        target_sheet = spreadsheet.worksheet(WORKSHEET_MAIN)  # 讀取 '工作表1' 分頁
+        source_sheet = spreadsheet.worksheet(WORKSHEET_PROMO)
+        target_sheet = spreadsheet.worksheet(WORKSHEET_MAIN)
     except Exception as e:
-        print(f"❌ 無法開啟工作表 (請確認檔名是否為 '{SPREADSHEET_FILE_NAME}' 且分頁名稱正確): {e}")
+        print(f"❌ 無法開啟工作表: {e}")
         return False
 
     # 1. 讀取 Source 資料
     all_values = source_sheet.get_all_values()
     new_rows = []
     
-    # 假設標題在第 6 列 (index 5)，資料從第 7 列 (index 6) 開始
+    # 假設資料從第 7 列開始 (index 6)
     start_row_index = 6 
     
     for row in all_values[start_row_index:]:
-        raw_sku = safe_get(row, 11) # L欄 (Index 11)
-        prod_name = safe_get(row, 12) # M欄 (Index 12)
-        promo_desc = safe_get(row, 6) # G欄 (Index 6)
+        raw_sku = safe_get(row, 11) # L欄
+        prod_name = safe_get(row, 12) # M欄
+        promo_desc = safe_get(row, 6) # G欄
         
         if not raw_sku:
             continue
             
-        # a. 處理 SKU: 抓末 6 碼
         sku = raw_sku
         if len(raw_sku) > 6:
             sku = raw_sku[-6:]
             
-        # c. 處理價格
         user_prices = parse_promo_string(promo_desc)
         
-        # A:SKU, B:Name, C~G:User Prices, H~O:空
+        # 組合資料: A~G (資料) + H~O (空白) -> 共 15 欄
         row_data = [sku, prod_name] + user_prices + [""] * 8
         new_rows.append(row_data)
 
@@ -141,17 +137,19 @@ def sync_promotion_data(client):
         print("⚠️ Promotion 表格無資料")
         return False
 
-    # 2. 清除 Sheet1 舊資料 (保留標題)
+    # 2. 清除 Sheet1 舊資料
     print("🧹 清除舊資料...")
     current_rows = len(target_sheet.get_all_values())
     if current_rows > 1:
-        # 清除 A2 到 O最後一行
         target_sheet.batch_clear([f"A2:O{current_rows}"])
     
     # 3. 寫入新資料
     print(f"📝 寫入 {len(new_rows)} 筆新資料...")
-    # 寫入範圍 A2:G...
-    target_sheet.update(values=new_rows, range_name=f"A2:G{2 + len(new_rows) - 1}")
+    
+    # === 關鍵修正：範圍改為 A2:O (原本是 G，導致寬度不足報錯) ===
+    end_row = 2 + len(new_rows) - 1
+    target_sheet.update(values=new_rows, range_name=f"A2:O{end_row}")
+    
     print("✅ 資料同步完成")
     return True
 
@@ -290,12 +288,10 @@ def empty_cart(driver):
     except Exception as e: print(f"   ⚠️ 清空過程發生小錯誤: {e}")
 
 def get_price_safely(driver):
-    # 改抓 Total
     try:
         total_element = driver.find_element(By.XPATH, "//span[contains(@class, 'priceSummary-totalPrice')]")
         return clean_price(total_element.text)
     except: pass
-
     try:
         total_element = driver.find_element(By.XPATH, "//*[contains(text(), 'Total')]/ancestor::div[contains(@class, 'priceSummary-totalLineItems')]//span[contains(@class, 'priceSummary-totalPrice')]")
         return clean_price(total_element.text)
@@ -455,7 +451,6 @@ def process_sku(driver, sku):
         while len(prices) < 5: prices.append("Error")
         empty_cart(driver)
 
-        # 打包截圖
         timestamp = get_taiwan_time_str()
         zip_filename = f"{sku}_{timestamp}"
         shutil.make_archive(zip_filename, 'zip', sku_folder)
@@ -477,7 +472,6 @@ def main():
     try:
         client = connect_google_sheet()
         
-        # 1. 先執行資料同步
         sync_success = sync_promotion_data(client)
         if not sync_success:
             print("⚠️ 資料同步失敗，停止執行後續爬蟲")
@@ -487,7 +481,6 @@ def main():
         print("--- 初始化檢查 ---")
         empty_cart(driver)
         
-        # 重新讀取 Sheet1 (因為資料剛被更新)
         spreadsheet = client.open(SPREADSHEET_FILE_NAME)
         sheet = spreadsheet.worksheet(WORKSHEET_MAIN)
         all_values = sheet.get_all_values()
@@ -521,7 +514,6 @@ def main():
         print("🎉 所有任務完成！")
         driver.quit()
         
-        # 寄送通知
         error_text = "\n".join(error_summary_list) if error_summary_list else ""
         send_notification_email(overall_status_match, error_text)
 
