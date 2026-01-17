@@ -24,14 +24,9 @@ URL = "https://guardian.com.sg/"
 def clean_price(price_text):
     if not price_text:
         return ""
+    # 移除 SGD, $, 逗號, 換行, 空格
     cleaned = str(price_text).replace("SGD", "").replace("$", "").replace(",", "").replace("\n", "").replace(" ", "").strip()
     return cleaned
-
-def get_taiwan_time_str():
-    """ 用於檔名，格式 YYYYMMDDHHMM """
-    tz = timezone(timedelta(hours=8))
-    now = datetime.now(tz)
-    return now.strftime("%Y%m%d%H%M")
 
 def get_taiwan_time_display():
     """ 用於表格顯示，格式 YYYY-MM-DD HH:MM """
@@ -39,12 +34,48 @@ def get_taiwan_time_display():
     now = datetime.now(tz)
     return now.strftime("%Y-%m-%d %H:%M")
 
+def get_taiwan_time_str():
+    """ 用於檔名，格式 YYYYMMDDHHMM """
+    tz = timezone(timedelta(hours=8))
+    now = datetime.now(tz)
+    return now.strftime("%Y%m%d%H%M")
+
 def safe_get(row_list, index):
     if index < len(row_list):
         return str(row_list[index])
     return ""
 
+def validate_user_inputs(user_prices):
+    """ 檢查使用者輸入的價格是否有異常 """
+    clean_prices = [clean_price(p) for p in user_prices]
+    
+    # 1. 檢查是否全空
+    if all(not p for p in clean_prices):
+        return "異常:User價格全空"
+    
+    # 2. 檢查是否包含非數值
+    valid_numbers = []
+    for p in clean_prices:
+        if not p: continue 
+        try:
+            val = float(p)
+            valid_numbers.append(val)
+        except:
+            return f"異常:User含非數值({p})"
+            
+    # 3. 檢查數值是否全部相同 (只有在有2個以上有效數值時才檢查)
+    if len(valid_numbers) > 1:
+        if len(set(valid_numbers)) == 1:
+             return "異常:User價格數值皆相同"
+             
+    return None # 檢查通過
+
 def compare_prices(user_prices, web_prices):
+    # 先執行使用者輸入檢查
+    user_validation_error = validate_user_inputs(user_prices)
+    if user_validation_error:
+        return user_validation_error
+
     mismatches = []
     match_count = 0
     valid_comparison_count = 0
@@ -95,35 +126,28 @@ def init_driver():
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
-    # === 升級：反偵測設定 ===
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
     options.add_argument("--disable-blink-features=AutomationControlled") 
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
     
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    
-    # 防止 WebDriver 特徵被偵測
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    
     return driver
 
 def handle_popups(driver):
-    """ 嘗試關閉可能遮擋視線的彈窗 """
     try:
-        # 這裡列出常見的彈窗關閉按鈕選擇器
         popups = [
             "button[aria-label='Close']", 
             "div.close-popup", 
-            "button.align-right.secondary.slidedown-button", # 常見的 Cookie 同意按鈕
-            "#onetrust-accept-btn-handler" # Cookie 同意
+            "button.align-right.secondary.slidedown-button",
+            "#onetrust-accept-btn-handler"
         ]
         for p in popups:
             try:
                 btn = driver.find_element(By.CSS_SELECTOR, p)
                 if btn.is_displayed():
                     driver.execute_script("arguments[0].click();", btn)
-                    print("   👋 已關閉一個阻擋視窗")
                     time.sleep(1)
             except:
                 pass
@@ -133,11 +157,9 @@ def handle_popups(driver):
 def empty_cart(driver):
     print("🧹 正在執行核彈級清空 (刪除 Cookies)...")
     try:
-        # 確保在網域內才能清
         if "guardian.com.sg" not in driver.current_url:
              driver.get("https://guardian.com.sg/")
              time.sleep(2)
-        
         driver.delete_all_cookies()
         driver.execute_script("window.localStorage.clear();")
         driver.execute_script("window.sessionStorage.clear();")
@@ -176,6 +198,7 @@ def process_sku(driver, sku):
     print(f"\n🔍 開始搜尋 SKU: {sku}")
     prices = [] 
     product_url = "" 
+    previous_price_val = -1.0 # 紀錄上一次的價格數值，用於檢查遞增
     
     sku_folder = str(sku)
     if os.path.exists(sku_folder):
@@ -185,88 +208,57 @@ def process_sku(driver, sku):
     try:
         driver.get(URL)
         time.sleep(5)
-        handle_popups(driver) # 嘗試關閉彈窗
+        handle_popups(driver)
 
-        # 1. 搜尋 (增強版選擇器)
+        # 1. 搜尋
         try:
             search_input = None
-            selectors = [
-                "input[placeholder*='Search']", # 模糊比對 placeholder
-                "input[name='q']", 
-                "input[type='search']",
-                "input.search-input"
-            ]
-            
+            selectors = ["input[placeholder*='Search']", "input[name='q']", "input[type='search']", "input.search-input"]
             for selector in selectors:
                 try:
-                    search_input = WebDriverWait(driver, 5).until(
-                        EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
-                    )
-                    if search_input:
-                        break
-                except:
-                    continue
+                    search_input = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, selector)))
+                    if search_input: break
+                except: continue
             
-            if not search_input:
-                raise TimeoutException("找不到搜尋框")
+            if not search_input: raise TimeoutException("找不到搜尋框")
 
             search_input.clear()
             search_input.send_keys(sku)
             time.sleep(1)
             search_input.send_keys(Keys.RETURN)
         except TimeoutException:
-            print("❌ 搜尋框載入超時 (可能網站載入慢或被阻擋)")
+            print("❌ 搜尋框載入超時")
             driver.save_screenshot(f"{sku_folder}/{sku}_search_fail.png")
             return ["Search Fail"] * 5, "URL Not Found"
 
         time.sleep(5)
         handle_popups(driver)
 
-        # 2. 點擊商品 (並確認是否進入內頁)
+        # 2. 點擊商品
         try:
-            xpath_selectors = [
-                f"//a[contains(@href, '{sku}')]", # 最準：連結包含 SKU
-                "(//div[contains(@class, 'product')]//a)[1]", 
-                "(//main//a[.//img])[1]", 
-                "//div[data-testid='product-card']//a"
-            ]
-            
+            xpath_selectors = [f"//a[contains(@href, '{sku}')]", "(//div[contains(@class, 'product')]//a)[1]", "(//main//a[.//img])[1]", "//div[data-testid='product-card']//a"]
             clicked = False
             for xpath in xpath_selectors:
                 try:
                     product_link = driver.find_element(By.XPATH, xpath)
                     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", product_link)
                     time.sleep(1)
-                    # 嘗試一般點擊
-                    try:
-                        product_link.click()
-                    except:
-                        # 失敗則用 JS 點擊
-                        driver.execute_script("arguments[0].click();", product_link)
+                    try: product_link.click()
+                    except: driver.execute_script("arguments[0].click();", product_link)
                     clicked = True
                     break
-                except:
-                    continue
+                except: continue
             
-            if not clicked:
-                raise NoSuchElementException("無法找到任何商品連結")
+            if not clicked: raise NoSuchElementException("無法找到任何商品連結")
             
-            # === 關鍵：等待網址改變，確認離開搜尋頁 ===
-            print("👉 已嘗試點擊商品，驗證跳轉中...")
-            try:
-                WebDriverWait(driver, 10).until(
-                    lambda d: "search.html" not in d.current_url
-                )
-            except:
-                print("   ⚠️ 警告：網址似乎仍停留在搜尋頁，可能點擊失敗")
+            try: WebDriverWait(driver, 10).until(lambda d: "search.html" not in d.current_url)
+            except: print("   ⚠️ 警告：網址似乎仍停留在搜尋頁")
             
             time.sleep(2) 
             product_url = driver.current_url
             print(f"🔗 取得目前連結: {product_url}")
-
-            # 二次確認：如果還在搜尋頁，回傳失敗
             if "search.html" in product_url:
-                print("❌ 點擊後仍停留在搜尋結果頁，視為失敗")
+                print("❌ 點擊後仍停留在搜尋結果頁")
                 driver.save_screenshot(f"{sku_folder}/{sku}_click_fail.png")
                 return ["Click Fail"] * 5, product_url
 
@@ -280,9 +272,7 @@ def process_sku(driver, sku):
 
         # 3. 加入購物車
         try:
-            add_btn = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart'], button.action.tocart"))
-            )
+            add_btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart'], button.action.tocart")))
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", add_btn)
             time.sleep(1)
             driver.execute_script("arguments[0].click();", add_btn)
@@ -290,69 +280,98 @@ def process_sku(driver, sku):
             time.sleep(5) 
             driver.get("https://guardian.com.sg/cart")
         except TimeoutException:
-            print("❌ 加入購物車按鈕找不到 (可能商品缺貨或未正確進入內頁)")
+            print("❌ 加入購物車按鈕找不到")
             driver.save_screenshot(f"{sku_folder}/{sku}_add_fail.png")
             return ["Add Fail"] * 5, product_url
 
         time.sleep(5)
 
-        # 4. 調整數量與抓取價格
+        # 4. 調整數量與抓取價格 (含重試邏輯)
         for qty in range(1, 6):
-            try:
-                WebDriverWait(driver, 15).until_not(
-                    EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
-                )
-            except:
-                pass
+            # 確保頁面穩定 (Loading 消失)
+            try: WebDriverWait(driver, 15).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
+            except: pass
             
-            time.sleep(1) 
-
-            current_price = get_price_safely(driver)
+            # === 重試機制 (最多 10 次) ===
+            final_price = "Error"
+            max_retries = 10
             
-            if current_price:
-                prices.append(current_price)
-                print(f"   💰 數量 {qty}: SGD {current_price}")
-                driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}.png")
-            else:
-                print("   ⚠️ 找不到價格欄位")
-                prices.append("Error")
-                driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}_error.png")
+            for attempt in range(max_retries):
+                current_price_str = get_price_safely(driver)
+                
+                # 判斷價格是否合理
+                is_valid = False
+                current_val = -1.0
 
+                if current_price_str:
+                    try:
+                        current_val = float(current_price_str)
+                        if qty == 1:
+                            is_valid = True # 第一個數量無法比較，假設正確
+                        else:
+                            # 規則：數量變多，價格必須變高 (current > previous)
+                            if current_val > previous_price_val:
+                                is_valid = True
+                            else:
+                                print(f"   ⚠️ 抓取異常 (嘗試 {attempt+1}/{max_retries}): Qty {qty} (${current_val}) <= Qty {qty-1} (${previous_price_val})")
+                                is_valid = False
+                    except:
+                        is_valid = False # 轉數字失敗
+                
+                if is_valid:
+                    final_price = current_price_str
+                    previous_price_val = current_val # 更新基準價格
+                    print(f"   💰 數量 {qty}: SGD {final_price}")
+                    driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}.png")
+                    break # 成功，跳出重試迴圈
+                else:
+                    # 如果不合理，等待並重試
+                    time.sleep(2)
+                    # 再次嘗試等待 Loading 消失 (有時候 Spinner 會閃爍)
+                    try: WebDriverWait(driver, 2).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')]")))
+                    except: pass
+            
+            # 如果 10 次都失敗，還是要填入最後抓到的值 (並標記 Error)
+            if final_price == "Error" and current_price_str:
+                final_price = current_price_str
+                # 雖然失敗但還是更新 previous 以免後面全部錯
+                try: previous_price_val = float(final_price)
+                except: pass
+                print(f"   ❌ 重試 10 次仍異常，強制填入: {final_price}")
+                driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}_abnormal.png")
+
+            prices.append(final_price)
+
+            # 增加數量 (為下一次迴圈準備)
             if qty < 5:
                 try:
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     driver.execute_script("arguments[0].click();", plus_btn)
                     
                     print(f"   ⏳ 正在增加數量 ({qty}->{qty+1})...")
-                    time.sleep(1) 
+                    # 強制等待 Spinner 出現再消失，確保資料交換
+                    time.sleep(0.5) 
                     try:
-                        WebDriverWait(driver, 20).until_not(
-                            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
-                        )
+                        WebDriverWait(driver, 20).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
                     except TimeoutException:
                         print("   ⚠️ 等待價格更新超時，嘗試繼續...")
-
-                    time.sleep(2) 
-
+                    
+                    # 檢查上限
                     try:
                         error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')]")
                         if error_msg.is_displayed():
                             print("   🛑 達到購買上限")
-                            for _ in range(qty, 5):
-                                prices.append("Limit Reached")
+                            for _ in range(qty, 5): prices.append("Limit Reached")
                             break
-                    except:
-                        pass
+                    except: pass
                 except Exception:
                     print("   ⚠️ 無法點擊 + 按鈕")
                     break
         
-        while len(prices) < 5:
-            prices.append("Error")
-        
+        while len(prices) < 5: prices.append("Error")
         empty_cart(driver)
 
-        # === 打包截圖 ===
+        # 打包截圖
         print("📦 正在打包截圖...")
         timestamp = get_taiwan_time_str()
         zip_filename = f"{sku}_{timestamp}"
@@ -367,8 +386,7 @@ def process_sku(driver, sku):
             if 'sku_folder' in locals() and os.path.exists(sku_folder):
                  driver.save_screenshot(f"{sku_folder}/{sku}_exception.png")
             empty_cart(driver)
-        except:
-            pass
+        except: pass
         return ["Error"] * 5, product_url
 
 # ================= 主程式 =================
@@ -385,24 +403,15 @@ def main():
 
         for i, row_data in enumerate(all_values[1:], start=2):
             sku = safe_get(row_data, 0).strip()
-            if not sku:
-                continue
+            if not sku: continue
             
-            user_prices = [
-                safe_get(row_data, 2), # C
-                safe_get(row_data, 3), # D
-                safe_get(row_data, 4), # E
-                safe_get(row_data, 5), # F
-                safe_get(row_data, 6)  # G
-            ]
+            user_prices = [safe_get(row_data, 2), safe_get(row_data, 3), safe_get(row_data, 4), safe_get(row_data, 5), safe_get(row_data, 6)]
 
             web_prices, product_url = process_sku(driver, sku)
-            
             update_time = get_taiwan_time_display()
             comparison_result = compare_prices(user_prices, web_prices)
             
             data_to_write = web_prices + [update_time, comparison_result, product_url]
-            
             cell_range = f"H{i}:O{i}"
             sheet.update(values=[data_to_write], range_name=cell_range)
             
@@ -414,8 +423,7 @@ def main():
         
     except Exception as main_e:
         print(f"💥 程式執行發生重大錯誤: {main_e}")
-        if 'driver' in locals():
-            driver.quit()
+        if 'driver' in locals(): driver.quit()
 
 if __name__ == "__main__":
     main()
