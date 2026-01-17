@@ -24,7 +24,7 @@ WORKSHEET_MAIN = '工作表1'
 WORKSHEET_PROMO = 'promotion'
 
 # 請確認此網址正確
-SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/您的試算表ID/edit" 
+SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgpoiwGE7tO-QSY2-kC_ecf868cY/edit?gid=0#gid=0" 
 
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
