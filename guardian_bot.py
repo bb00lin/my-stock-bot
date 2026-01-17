@@ -21,8 +21,6 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 SHEET_NAME = 'Guardian_Price_Check'
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
-
-# ★★★ 您的 Google Drive 資料夾 ID ★★★
 DRIVE_FOLDER_ID = '19ZAatbWczApRUMVbF0ZB6X-T36YY2w35'
 
 # ================= 輔助功能 =================
@@ -33,13 +31,11 @@ def clean_price(price_text):
     return cleaned
 
 def get_taiwan_time_str():
-    """ 用於檔名，格式 YYYYMMDDHHMM """
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz)
     return now.strftime("%Y%m%d%H%M")
 
 def get_taiwan_time_display():
-    """ 用於表格顯示，格式 YYYY-MM-DD HH:MM """
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz)
     return now.strftime("%Y-%m-%d %H:%M")
@@ -100,11 +96,9 @@ def connect_google_sheet():
     return sheet
 
 def upload_to_drive(file_path, file_name):
-    """ 上傳檔案到 Google Drive 並回傳連結 """
     print(f"☁️ 正在上傳 {file_name} 到 Google Drive...")
     try:
         creds = get_credentials()
-        # 建立 Drive API 服務
         service = build('drive', 'v3', credentials=creds)
         
         file_metadata = {
@@ -265,11 +259,16 @@ def process_sku(driver, sku):
 
         # 4. 調整數量與抓取價格
         for qty in range(1, 6):
+            # === 修正1: 智慧等待 "FETCHING CART" 消失 ===
+            # 在抓取價格前，確保畫面沒有 loading 遮罩
             try:
-                WebDriverWait(driver, 5).until_not(EC.presence_of_element_located((By.CSS_SELECTOR, ".loading-mask, .loader")))
+                WebDriverWait(driver, 15).until_not(
+                    EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
+                )
             except:
-                pass
-            time.sleep(2)
+                pass # 如果沒出現 loading 就繼續
+            
+            time.sleep(1) # 再多等一下確保渲染完成
 
             current_price = get_price_safely(driver)
             
@@ -282,11 +281,27 @@ def process_sku(driver, sku):
                 prices.append("Error")
                 driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}_error.png")
 
+            # 準備增加數量到下一個
             if qty < 5:
                 try:
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     driver.execute_script("arguments[0].click();", plus_btn)
-                    time.sleep(4) 
+                    
+                    # === 修正2: 點擊後，強制等待更新完成 ===
+                    print(f"   ⏳ 正在增加數量 ({qty}->{qty+1})...")
+                    time.sleep(1) # 給它一點時間反應，讓 loading 出現
+                    try:
+                        # 等待 "FETCHING CART" 出現再消失，或者直接等待它消失
+                        # 這裡設定最長等待 20 秒
+                        WebDriverWait(driver, 20).until_not(
+                            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
+                        )
+                    except TimeoutException:
+                        print("   ⚠️ 等待價格更新超時 (網站可能卡頓)，嘗試繼續...")
+
+                    time.sleep(2) # 額外緩衝，確保數字變動
+
+                    # 檢查是否達到上限
                     try:
                         error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')]")
                         if error_msg.is_displayed():
@@ -309,16 +324,12 @@ def process_sku(driver, sku):
         print("📦 正在打包截圖...")
         timestamp = get_taiwan_time_str()
         zip_filename = f"{sku}_{timestamp}"
-        # 製作 zip 檔案 (這會在當前目錄產生 .zip 檔)
         zip_path = shutil.make_archive(zip_filename, 'zip', sku_folder)
         
-        # 上傳到 Google Drive
         drive_link = upload_to_drive(zip_path, f"{zip_filename}.zip")
         
-        # === 關鍵修改：不刪除 zip 檔，也不刪除資料夾 ===
-        # 我們只刪除資料夾，保留 zip 檔給 GitHub Artifacts 上傳
         shutil.rmtree(sku_folder) 
-        # os.remove(zip_path) <--- 這行已經被我移除
+        # os.remove(zip_path) # 保留 ZIP 給 GitHub
 
         return prices, drive_link, product_url
 
