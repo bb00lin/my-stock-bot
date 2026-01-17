@@ -76,71 +76,98 @@ def inject_cookies(driver):
             
     print(f"成功注入 {added} 個 Cookies，前往目標頁面...")
     driver.get(URL)
-    time.sleep(5)
+    # 這裡給更長的等待時間，確保側邊欄載入
+    time.sleep(10)
 
 def navigate_and_copy_latest(driver):
-    """在側邊欄找到最新的週報並複製"""
-    print("正在搜尋側邊欄的最新週報...")
-    wait = WebDriverWait(driver, 15)
+    """在側邊欄找到最新的週報並複製 (增強搜尋版)"""
+    print(f"正在搜尋側邊欄的最新週報 (當前頁面: {driver.title})...")
+    wait = WebDriverWait(driver, 30) # 延長等待至 30 秒
     
-    # 1. 尋找側邊欄連結 (包含 'WeeklyReport_20' 文字的連結)
-    # 使用寬鬆的 XPath 確保能抓到
-    links = wait.until(EC.presence_of_all_elements_located(
-        (By.XPATH, "//a[contains(text(), 'WeeklyReport_20')]")
-    ))
-    
-    # 過濾掉可能是 'Copy of' 的連結，只留原本的日期格式，並排序找最新的
-    valid_links = [l for l in links if "Copy" not in l.text and "副本" not in l.text]
-    valid_links.sort(key=lambda x: x.text)
-    
-    if not valid_links:
-        raise Exception("找不到任何符合 'WeeklyReport_20...' 格式的報告，請確認側邊欄是否展開。")
+    try:
+        # 【關鍵修改】使用 contains(., ...) 抓取所有包含該文字的連結，不管是否被 span 包住
+        # 同時搜尋 data-testid，有些版本的 Confluence 側邊欄是用這個屬性
+        xpath_query = "//a[contains(., 'WeeklyReport_20')]"
         
-    latest_link = valid_links[-1]
-    latest_name = latest_link.text
-    print(f"找到最新週報: {latest_name}，正在進入...")
-    
-    # 點擊進入頁面
-    driver.execute_script("arguments[0].click();", latest_link)
-    time.sleep(5) # 等待頁面載入
-    
-    # 2. 點擊「更多動作 (...)」按鈕
-    print("準備複製頁面...")
-    # 嘗試多種可能的 selector (aria-label 可能是中文或英文)
-    more_btn_locators = [
-        (By.CSS_SELECTOR, "button[aria-label='更多動作']"),
-        (By.CSS_SELECTOR, "button[aria-label='More actions']"),
-        (By.CSS_SELECTOR, "[data-testid='page-metadata-actions-more-button']")
-    ]
-    
-    more_btn = None
-    for loc in more_btn_locators:
-        try:
-            more_btn = wait.until(EC.element_to_be_clickable(loc))
-            break
-        except: continue
+        links = wait.until(EC.presence_of_all_elements_located((By.XPATH, xpath_query)))
+        
+        # 過濾掉雜訊
+        valid_links = []
+        for l in links:
+            # 必須處理 StaleElementReferenceException，因為頁面還在動態載入
+            try:
+                txt = l.text
+                # 排除副本、範本等
+                if "Copy" not in txt and "副本" not in txt and "Template" not in txt:
+                    valid_links.append(l)
+            except StaleElementReferenceException:
+                continue
+                
+        if not valid_links:
+            # 如果一般連結抓不到，嘗試抓取可能是 Tree Item 的結構
+            print("標準連結未找到，嘗試深層搜尋...")
+            links = driver.find_elements(By.XPATH, "//*[contains(text(), 'WeeklyReport_20')]")
+            valid_links = [l for l in links if "Copy" not in l.text]
+
+        if not valid_links:
+            # 列印出頁面上的所有連結文字幫助除錯
+            all_links_text = [a.text for a in driver.find_elements(By.TAG_NAME, 'a') if len(a.text) > 5]
+            print(f"DEBUG: 頁面上可見的連結範例 (前10個): {all_links_text[:10]}")
+            raise Exception("找不到任何符合 'WeeklyReport_20...' 格式的報告連結。")
             
-    if not more_btn:
-        raise Exception("找不到頁面右上角的 '...' (更多動作) 按鈕")
+        # 排序找最新的 (假設檔名日期格式一致，字串排序即可)
+        # 注意：這裡要比較的是 text 內容
+        valid_links.sort(key=lambda x: x.text)
         
-    more_btn.click()
-    
-    # 3. 點擊選單中的「複製」
-    copy_btn = wait.until(EC.element_to_be_clickable(
-        (By.XPATH, "//span[contains(text(), '複製') or contains(text(), 'Copy')]")
-    ))
-    copy_btn.click()
-    
-    print("已點擊複製，正在等待編輯器載入 (這可能需要一點時間)...")
-    # 編輯器載入通常比較久，給它 15 秒
-    time.sleep(15)
+        latest_link = valid_links[-1]
+        latest_name = latest_link.text
+        print(f"找到最新週報: {latest_name}，正在進入...")
+        
+        # 點擊進入頁面 (使用 JS 點擊比較保險)
+        driver.execute_script("arguments[0].click();", latest_link)
+        time.sleep(8) # 等待頁面完全載入
+        
+        # 2. 點擊「更多動作 (...)」按鈕
+        print("準備複製頁面...")
+        more_btn_locators = [
+            (By.CSS_SELECTOR, "button[aria-label='更多動作']"),
+            (By.CSS_SELECTOR, "button[aria-label='More actions']"),
+            (By.CSS_SELECTOR, "[data-testid='page-metadata-actions-more-button']")
+        ]
+        
+        more_btn = None
+        for loc in more_btn_locators:
+            try:
+                more_btn = wait.until(EC.element_to_be_clickable(loc))
+                break
+            except: continue
+                
+        if not more_btn:
+            raise Exception("找不到頁面右上角的 '...' (更多動作) 按鈕")
+            
+        more_btn.click()
+        
+        # 3. 點擊選單中的「複製」
+        copy_btn = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//span[contains(text(), '複製') or contains(text(), 'Copy')]")
+        ))
+        copy_btn.click()
+        
+        print("已點擊複製，正在等待編輯器載入...")
+        time.sleep(15)
+        
+    except TimeoutException:
+        print("搜尋連結逾時！")
+        # 截圖看看到底側邊欄長怎樣
+        driver.save_screenshot("sidebar_error.png")
+        raise
 
 def rename_page(driver, new_filename):
     """修改頁面標題"""
     print(f"正在重命名為: WeeklyReport_{new_filename}")
     wait = WebDriverWait(driver, 20)
     
-    # 定位標題輸入框 (Confluence Cloud 標準 ID)
+    # 定位標題輸入框
     title_area = wait.until(EC.visibility_of_element_located(
         (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
     ))
@@ -160,31 +187,26 @@ def update_jira_macros(driver, date_info):
     
     macro_locator = (By.CSS_SELECTOR, "div[data-prosemirror-node-name='blockCard']")
     
-    # 確保頁面上有表格
     try:
         wait.until(EC.presence_of_element_located(macro_locator))
     except TimeoutException:
-        print("警告：新頁面上找不到任何 Jira 表格，可能還在載入或結構不同。")
+        print("警告：找不到 Jira 表格，這可能是因為新頁面還是空白的或尚未載入完成。")
         return
 
-    # 先計算有幾個表格，然後用 index 迴圈處理 (避免 DOM 更新後元素失效)
     macros_count = len(driver.find_elements(*macro_locator))
     print(f"共發現 {macros_count} 個表格。")
 
     for i in range(macros_count):
         try:
-            # 每次重新抓取列表
             macros = driver.find_elements(*macro_locator)
             if i >= len(macros): break
             
             target = macros[i]
-            # 捲動到該表格
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
             time.sleep(1)
             target.click()
             
-            # 尋找浮動工具列上的「編輯」按鈕 (鉛筆圖示)
-            # 支援中文「編輯」與英文「Edit」
+            # 尋找編輯按鈕
             edit_btn = wait.until(EC.element_to_be_clickable(
                 (By.XPATH, "//button[@aria-label='編輯'] | //button[@aria-label='Edit'] | //span[text()='編輯'] | //span[text()='Edit']")
             ))
@@ -193,33 +215,29 @@ def update_jira_macros(driver, date_info):
             # 等待 JQL 輸入框
             jql_input = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
             
-            # 讀取舊 JQL 並替換日期
             old_jql = jql_input.text
-            date_pattern = r"\d{4}-\d{1,2}-\d{1,2}" # 格式 2026-1-12
+            date_pattern = r"\d{4}-\d{1,2}-\d{1,2}"
             dates_found = re.findall(date_pattern, old_jql)
             
             if len(dates_found) >= 2:
                 new_jql = old_jql
-                # 替換前兩個日期為本週一與本週日
                 new_jql = re.sub(dates_found[0], date_info['monday_str'], new_jql, count=1)
                 new_jql = re.sub(dates_found[1], date_info['sunday_str'], new_jql, count=1)
                 
                 print(f"[{i+1}/{macros_count}] 更新日期: {dates_found[0]}~{dates_found[1]} -> {date_info['monday_str']}~{date_info['sunday_str']}")
                 
-                # 輸入新 JQL
                 jql_input.click()
                 jql_input.send_keys(Keys.CONTROL + "a")
                 jql_input.send_keys(Keys.BACK_SPACE)
                 time.sleep(0.1)
                 jql_input.send_keys(new_jql)
                 jql_input.send_keys(Keys.ENTER)
-                time.sleep(1) # 等待驗證
+                time.sleep(1)
                 
-                # 點擊「Insert / 插入」按鈕 (通常是右下角藍色按鈕)
+                # 點擊「Insert / 插入」
                 insert_btn = driver.find_element(By.XPATH, "//button[contains(., 'Insert') or contains(., 'Save') or contains(., '插入')]")
                 insert_btn.click()
                 
-                # 等待編輯框消失，確保儲存完成
                 wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
                 time.sleep(2)
             else:
@@ -236,18 +254,14 @@ def publish_page(driver):
     print("準備發布頁面...")
     wait = WebDriverWait(driver, 10)
     try:
-        # 發布按鈕 (通常右上角)
         publish_btn = wait.until(EC.element_to_be_clickable(
             (By.CSS_SELECTOR, "[data-testid='publish-button']")
         ))
         publish_btn.click()
-        
-        # 等待發布完成 (通常會跳轉回檢視模式，URL 會變)
         time.sleep(10)
         print("頁面發布成功！")
     except Exception as e:
         print(f"發布失敗: {str(e)}")
-        # 嘗試截圖
         driver.save_screenshot("publish_error.png")
 
 def main():
@@ -257,21 +271,11 @@ def main():
     
     driver = init_driver()
     try:
-        # 1. 登入 (Cookie 注入)
         inject_cookies(driver)
-        
-        # 2. 導航至最新週報並複製
         navigate_and_copy_latest(driver)
-        
-        # 3. 重新命名 (新檔名為本週五)
         rename_page(driver, dates['friday_filename'])
-        
-        # 4. 批量更新 Jira 表格日期
         update_jira_macros(driver, dates)
-        
-        # 5. 發布
         publish_page(driver)
-        
         print("=== 所有任務執行完畢 ===")
         
     except Exception as e:
