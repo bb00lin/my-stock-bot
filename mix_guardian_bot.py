@@ -199,15 +199,12 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
 
 # ================= Task 2: Mix & Match 資料準備 (記憶體運算) =================
 def prepare_mix_match_data(client):
-    """ 
-    只負責讀取 Promo 並在記憶體中生成測試資料列表，
-    不負責寫入 Sheet (寫入動作延後到 run_mix_match_task)
-    """
+    """ 只負責讀取 Promo 並在記憶體中生成測試資料列表 """
     print("🔄 讀取 Mix & Match 設定資料...")
     promo_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_PROMO)
     
     rows = promo_sheet.get_all_values()
-    test_cases = [] # 存放所有要測試的資料物件
+    test_cases = [] 
     today = get_taiwan_time_now().date()
 
     for row in rows[6:]:
@@ -236,7 +233,6 @@ def prepare_mix_match_data(client):
             if matches:
                 rule_text_display = f"{matches[-1][0]} For ${matches[-1][1]}"
 
-            # 非檔期商品也加入列表，但標記狀態
             if not is_valid_date:
                 test_cases.append({
                     "main_sku": main_sku,
@@ -404,7 +400,7 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     time.sleep(5) 
     
     total_price = "Error"
-    # 重試 10 次
+    # 4. 重試 10 次
     for retry in range(10):
         price = get_total_price_safely(driver)
         
@@ -431,7 +427,7 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     return total_price, main_url, zip_path, missing_skus, final_display_str
 
 def run_mix_match_task(client, driver, round_num):
-    # 1. 準備測試資料 (不清除 Sheet，只在記憶體準備)
+    # 1. 準備測試資料
     test_cases = prepare_mix_match_data(client)
     if not test_cases: return
 
@@ -442,18 +438,16 @@ def run_mix_match_task(client, driver, round_num):
         sheet = client.open(SPREADSHEET_FILE_NAME).add_worksheet(title=WORKSHEET_MIX, rows=100, cols=20)
     
     all_values = sheet.get_all_values()
-    start_row = len(all_values) + 1 # 從現有資料的下一行開始
-    
     # 如果是完全空白的 Sheet，先寫標題
-    if start_row == 1:
+    if len(all_values) == 0:
         headers = ["Main SKU", "Product Name", "Promo Rule", "Target Qty", "Mix Strategy", "Expected Price", "Web Total Price", "Result", "Update Time", "Main Link"]
         sheet.append_row(headers)
-        start_row = 2
+        print("📝 初始化標題列")
     else:
-        # 如果不是第一輪，插入一行空白分隔線 (或是標題列)
+        # 每一輪開始前，插入一行分隔線
         separator = [f"--- Round {round_num} Start ---"] + [""]*9
         sheet.append_row(separator)
-        start_row += 1
+        print(f"📝 寫入 Round {round_num} 分隔線")
 
     results_for_mail = []
     attachments = []
@@ -461,9 +455,6 @@ def run_mix_match_task(client, driver, round_num):
     error_summary = []
 
     print(f"🚀 [Task 2] 開始執行混搭測試 (Round {round_num})...")
-
-    # 批次寫入緩存
-    rows_to_append = []
 
     for idx, case in enumerate(test_cases):
         main_sku = case["main_sku"]
@@ -474,7 +465,7 @@ def run_mix_match_task(client, driver, round_num):
             print(f"   ⚠️ {main_sku}: 非上架期間，跳過")
             result_text = case["note"]
             row_data = [main_sku, prod_name, case["rule"], "", "", "", "", result_text, get_taiwan_time_display(), ""]
-            rows_to_append.append(row_data)
+            sheet.append_row(row_data) # [修改] 即時寫入
             results_for_mail.append([main_sku, prod_name, result_text, get_taiwan_time_display()])
             continue
 
@@ -484,7 +475,6 @@ def run_mix_match_task(client, driver, round_num):
         
         print(f"   🧪 測試: {main_sku} Qty:{target_qty} (預期 ${expected})")
         
-        # 執行爬蟲邏輯
         web_total, link, zip_file, missing_list, actual_strategy = process_mix_case_dynamic(driver, original_strategy, target_qty, main_sku)
         
         missing_note = ""
@@ -496,15 +486,12 @@ def run_mix_match_task(client, driver, round_num):
         if web_total == "All Missing":
             result_text = "⚠️全部商品尚未上架"
             is_error = False
-        
         elif web_total == "Main Missing":
             result_text = f"⚠️主商品尚未上架: {main_sku}"
             is_error = False 
-            
         elif web_total == "Only Main":
             result_text = f"⚠️MIX全缺: 只剩主料 (忽略比較)"
             is_error = False
-            
         elif "Fail" in web_total or "Error" in web_total:
             result_text = f"🔥 錯誤 ({web_total}){missing_note}"
             is_error = True
@@ -533,21 +520,24 @@ def run_mix_match_task(client, driver, round_num):
             prod_name, 
             case["rule"], 
             target_qty, 
-            actual_strategy, # 使用實際執行策略
+            actual_strategy, 
             str(expected), 
             web_total, 
             result_text, 
             update_time, 
             link
         ]
-        rows_to_append.append(row_data)
+        
+        # === [修改] 即時寫入 Google Sheet (解決等待問題) ===
+        try:
+            sheet.append_row(row_data)
+            print(f"   📝 結果已寫入 Sheet")
+        except Exception as e:
+            print(f"   ❌ 寫入 Sheet 失敗: {e}")
+
         results_for_mail.append([main_sku, prod_name, result_text, update_time])
 
-    # 一次性寫入 Sheet (增加效率)
-    if rows_to_append:
-        sheet.append_rows(rows_to_append)
-        print(f"✅ Round {round_num} 資料已累加寫入 Sheet")
-
+    # 每一輪結束發送信件通知
     subject_prefix = "✅" if all_match else "🔥"
     date_info = f"{get_taiwan_time_now().strftime('%m/%d(%a) %H:%M')}"
     subject = f"{date_info}{subject_prefix}[壓力測試 R{round_num}]"
@@ -605,7 +595,7 @@ def main():
     client = connect_google_sheet()
     round_count = 1
     
-    print("🔥 壓力測試模式 (無限循環 + 累加記錄)")
+    print("🔥 壓力測試模式 (無限循環 + 即時寫入 + 累加記錄)")
     print("🛑 按下 Ctrl + C 可隨時停止")
     
     try:
