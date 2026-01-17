@@ -155,7 +155,11 @@ def check_item_exists(driver, sku):
         return False
 
 def add_single_item_to_cart(driver, sku, qty_needed=1):
-    print(f"   ➕ 加入商品: {sku} x {qty_needed}")
+    """
+    修改版：為了保證數量正確，這裡強制只加 1 個。
+    如果需要多個，外層迴圈會呼叫多次。這樣最穩。
+    """
+    print(f"   ➕ 加入商品: {sku} (單次加入)")
     try:
         driver.get(URL)
         time.sleep(3)
@@ -185,11 +189,7 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         
         try:
             add_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart'], button.action.tocart")))
-            try:
-                qty_input = driver.find_element(By.CSS_SELECTOR, "input[name='qty']")
-                driver.execute_script("arguments[0].value = arguments[1];", qty_input, str(qty_needed))
-            except: pass
-
+            # 不再嘗試修改 input value，直接點擊加入 (預設為1)
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", add_btn)
             driver.execute_script("arguments[0].click();", add_btn)
             time.sleep(2) 
@@ -202,7 +202,7 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         print(f"      ❌ 加入過程發生錯誤: {e}")
         return False
 
-# ================= Task 2: Mix & Match =================
+# ================= Task 2: Mix & Match (全階層 & 智慧遞補) =================
 def sync_mix_match_data(client):
     print("🔄 [Task 2] 同步 Mix & Match 資料 (擴充 Qty 2~5)...")
     promo_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_PROMO)
@@ -313,13 +313,15 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     
     print(f"   🕵️ 正在檢查商品庫存狀況...")
     
-    main_exists = check_item_exists(driver, main_sku)
-    if main_exists:
-        available_skus.append(main_sku)
-    else:
+    # === 1. 檢查主商品 ===
+    if not check_item_exists(driver, main_sku):
         print(f"   🛑 主商品 {main_sku} 搜尋不到")
+        # 主商品找不到 -> Link 顯示 "URL Not Found"
+        return "Main Missing", "URL Not Found", None, [main_sku]
     
-    # 檢查其他夥伴
+    available_skus.append(main_sku)
+    
+    # === 2. 檢查 MIX 商品 ===
     for sku in unique_skus:
         if sku == main_sku: continue 
         if check_item_exists(driver, sku):
@@ -328,35 +330,29 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
             print(f"   ⚠️ 混搭商品 {sku} 搜尋不到，將移除")
             missing_skus.append(sku)
     
-    # === [關鍵邏輯更新] ===
-    # 1. 什麼都沒剩 (Main 不在 且 MIX 也不在) -> 全部尚未上架
-    if not available_skus:
-        return "All Missing", "", None, []
-
-    # 2. Main 不在，但 MIX 還在 (其實這種情況也不應該混搭，因為主體不在) -> 主商品尚未上架
-    if main_sku not in available_skus:
-        return "Main Missing", "", None, []
-
-    # 3. Main 在，但 MIX 全不在 (只剩主體) -> MIX 全缺
+    # === 3. 判斷是否只剩主商品 ===
     if len(available_skus) == 1 and len(unique_skus) > 1:
         print(f"   🛑 所有 MIX 商品皆從缺，只剩主料，停止比較")
+        # 只剩主料，回傳空連結或主連結皆可，這裡不回傳連結
         return "Only Main", "", None, missing_skus
 
-    # 4. 正常混搭 (Main 在，且至少有一個 MIX 在)
-    final_strategy = {}
+    # === 4. 重組加入清單 (Flatten List) ===
+    # 這裡將策略攤平變成一個清單 [A, B, A] 這樣依序加入，確保數量絕對正確
     pool_cycle = cycle(available_skus)
+    items_to_add = []
     for _ in range(target_total_qty):
-        item = next(pool_cycle)
-        final_strategy[item] = final_strategy.get(item, 0) + 1
+        items_to_add.append(next(pool_cycle))
         
-    print(f"   🔄 調整後策略: {final_strategy}")
+    print(f"   🔄 執行加入序列: {items_to_add}")
     empty_cart(driver)
     
     main_url = ""
     first_sku = available_skus[0] 
     
-    for sku, qty in final_strategy.items():
-        success = add_single_item_to_cart(driver, sku, qty)
+    # === 5. 迴圈執行加入 (穩健模式) ===
+    for sku in items_to_add:
+        # 強制 qty=1，跑多次
+        success = add_single_item_to_cart(driver, sku, 1)
         if not success:
             driver.save_screenshot(f"{folder_name}/Add_Fail_{sku}.png")
             zip_path = create_zip_evidence("Mix_Error", folder_name)
@@ -409,8 +405,8 @@ def run_mix_match_task(client, driver):
 
     for i, row in enumerate(all_values[1:], start=2):
         main_sku = row[0]
-        # 檢查是否為非檔期
         pre_result = safe_get(row, 7)
+        
         if "主商品非上架期間" in pre_result:
             print(f"   ⚠️ {main_sku}: 非上架期間，跳過")
             sheet.update_cell(i, 9, get_taiwan_time_display()) 
@@ -431,17 +427,19 @@ def run_mix_match_task(client, driver):
         is_error = False
         result_text = ""
         
-        # === [狀態判斷優化] ===
+        # === [狀態判斷優化 - 依需求調整文字] ===
         if web_total == "All Missing":
-            result_text = "⚠️全部商品尚未上架" # 主+Mix全缺
+            result_text = "⚠️全部商品尚未上架"
             is_error = False
         
         elif web_total == "Main Missing":
-            result_text = f"⚠️主商品尚未上架: {main_sku}" # 僅主缺
+            # 只有主商品缺，顯示 "主商品尚未上架: SKU"
+            result_text = f"⚠️主商品尚未上架: {main_sku}"
             is_error = False 
             
         elif web_total == "Only Main":
-            result_text = f"⚠️MIX全缺: 只剩主料" # 主在，但Mix全缺 (不顯示後面清單)
+            # MIX全缺，顯示 "MIX全缺: 只剩主料 (忽略比較)"
+            result_text = f"⚠️MIX全缺: 只剩主料 (忽略比較)"
             is_error = False
             
         elif "Fail" in web_total or "Error" in web_total:
@@ -463,8 +461,6 @@ def run_mix_match_task(client, driver):
             all_match = False
             error_summary.append(f"{main_sku} (Qty{target_qty}): {result_text}")
             if zip_file: attachments.append(zip_file)
-        else:
-            pass
 
         update_time = get_taiwan_time_display()
         sheet.update(values=[[web_total, result_text, update_time, link]], range_name=f"G{i}:J{i}")
