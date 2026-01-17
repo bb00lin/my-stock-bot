@@ -20,7 +20,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install selenium gspread oauth2client webdriver-manager
+          # 新增了 google-api-python-client 等套件
+          pip install selenium gspread oauth2client webdriver-manager google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: Create JSON Key
         env:
@@ -37,20 +38,10 @@ jobs:
       - name: Run Python Script
         run: python guardian_bot.py
 
-      # === 這是您原本缺少的關鍵步驟 ===
-      - name: Upload Artifacts (上傳截圖)
-        if: always() # 無論程式成功或失敗都會執行
-        uses: actions/upload-artifact@v4
-        with:
-          name: screenshots
-          path: "*.png" # 把所有 png 圖片打包上傳
-          retention-days: 5
-
-          # (在 YAML 檔的最下方)
-      - name: Upload Artifacts (上傳截圖)
+      - name: Upload Artifacts (上傳截圖備份)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: screenshots
-          path: "**/*.png"  # <--- 請修改這一行，才能抓到資料夾內的圖片
+          path: "**/*.png"
           retention-days: 5
