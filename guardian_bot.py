@@ -18,22 +18,18 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # ================= 設定區 =================
-# Google Sheet 檔案名稱
 SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
-
-# 工作表名稱
 WORKSHEET_MAIN = '工作表1' 
 WORKSHEET_PROMO = 'promotion'
 
-# Google Sheet 網址 (用於 Email 連結)
 # ★★★ 請確認此網址是否正確 ★★★
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/您的試算表ID/edit"
 
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
 
-# Email 設定
-MAIL_SENDER = os.environ.get('MAIL_USERNAME', 'bb00lin@gmail.com')
+# Email 設定 (修正變數名稱以避免 NameError)
+MAIL_USERNAME = os.environ.get('MAIL_USERNAME', 'bb00lin@gmail.com')
 MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
 MAIL_RECEIVER = 'bb00lin@gmail.com' 
 
@@ -79,8 +75,6 @@ def parse_promo_string(promo_text):
         return ["", "", "", "", ""]
 
     calculated_prices = []
-    
-    # 取得 Qty 1 的單價
     unit_price_base = 0
     if 1 in price_map:
         unit_price_base = price_map[1]
@@ -108,28 +102,24 @@ def sync_promotion_data(client):
         print(f"❌ 無法開啟工作表: {e}")
         return False
 
-    # 1. 讀取 Source 資料
     all_values = source_sheet.get_all_values()
     new_rows = []
-    
-    # 假設資料從第 7 列開始 (index 6)
     start_row_index = 6 
     
     for row in all_values[start_row_index:]:
-        raw_sku = safe_get(row, 11) # L欄
-        prod_name = safe_get(row, 12) # M欄
-        promo_desc = safe_get(row, 6) # G欄
+        raw_sku = safe_get(row, 11)
+        prod_name = safe_get(row, 12)
+        promo_desc = safe_get(row, 6)
         
         if not raw_sku:
             continue
             
-        sku = raw_sku
-        if len(raw_sku) > 6:
-            sku = raw_sku[-6:]
+        # === 修正：強力清除 SKU 中的單引號與空白 ===
+        sku = str(raw_sku).replace("'", "").replace('"', '').strip()
+        if len(sku) > 6:
+            sku = sku[-6:] # 取後6碼
             
         user_prices = parse_promo_string(promo_desc)
-        
-        # 組合資料: A~G (資料) + H~O (空白) -> 共 15 欄
         row_data = [sku, prod_name] + user_prices + [""] * 8
         new_rows.append(row_data)
 
@@ -137,16 +127,12 @@ def sync_promotion_data(client):
         print("⚠️ Promotion 表格無資料")
         return False
 
-    # 2. 清除 Sheet1 舊資料
     print("🧹 清除舊資料...")
     current_rows = len(target_sheet.get_all_values())
     if current_rows > 1:
         target_sheet.batch_clear([f"A2:O{current_rows}"])
     
-    # 3. 寫入新資料
     print(f"📝 寫入 {len(new_rows)} 筆新資料...")
-    
-    # === 關鍵修正：範圍改為 A2:O (原本是 G，導致寬度不足報錯) ===
     end_row = 2 + len(new_rows) - 1
     target_sheet.update(values=new_rows, range_name=f"A2:O{end_row}")
     
@@ -155,6 +141,7 @@ def sync_promotion_data(client):
 
 # ================= 郵件通知功能 =================
 def send_notification_email(all_match, error_summary):
+    # 這裡修正了變數名稱，確保與上方定義一致
     if not MAIL_USERNAME or not MAIL_PASSWORD:
         print("⚠️ 未設定 Email 帳密，跳過寄信")
         return
@@ -171,7 +158,7 @@ def send_notification_email(all_match, error_summary):
         color = "red"
 
     msg = MIMEMultipart()
-    msg['From'] = MAIL_SENDER
+    msg['From'] = MAIL_USERNAME
     msg['To'] = MAIL_RECEIVER
     msg['Subject'] = subject
 
@@ -313,25 +300,36 @@ def process_sku(driver, sku):
         time.sleep(5)
         handle_popups(driver)
 
-        # 1. 搜尋
-        try:
-            search_input = None
-            selectors = ["input[placeholder*='Search']", "input[name='q']", "input[type='search']", "input.search-input"]
-            for selector in selectors:
-                try:
-                    search_input = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, selector)))
-                    if search_input: break
-                except: continue
-            
-            if not search_input: raise TimeoutException("找不到搜尋框")
-
-            search_input.clear()
-            search_input.send_keys(sku)
-            time.sleep(1)
-            search_input.send_keys(Keys.RETURN)
-        except TimeoutException:
-            print("❌ 搜尋框載入超時")
+        # 1. 搜尋 (新增重試機制)
+        search_input = None
+        selectors = ["input[placeholder*='Search']", "input[name='q']", "input[type='search']", "input.search-input"]
+        
+        # 嘗試找搜尋框，如果找不到就重整一次頁面
+        for attempt in range(2): 
+            try:
+                for selector in selectors:
+                    try:
+                        search_input = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, selector)))
+                        if search_input: break
+                    except: continue
+                
+                if search_input: break # 找到了
+                
+                if attempt == 0: # 第一次失敗，嘗試重整
+                    print("   ⚠️ 第一次找不到搜尋框，嘗試重整頁面...")
+                    driver.refresh()
+                    time.sleep(5)
+                    handle_popups(driver)
+            except: pass
+        
+        if not search_input:
+            print("❌ 搜尋框載入超時 (重試後仍失敗)")
             return ["Search Fail"] * 5, "URL Not Found"
+
+        search_input.clear()
+        search_input.send_keys(sku)
+        time.sleep(1)
+        search_input.send_keys(Keys.RETURN)
 
         time.sleep(5)
         handle_popups(driver)
@@ -492,6 +490,8 @@ def main():
 
         for i, row_data in enumerate(all_values[1:], start=2):
             sku = safe_get(row_data, 0).strip()
+            # === 修正：這裡也要過濾 SKU ===
+            sku = sku.replace("'", "").replace('"', '').strip() 
             if not sku: continue
             
             user_prices = [safe_get(row_data, 2), safe_get(row_data, 3), safe_get(row_data, 4), safe_get(row_data, 5), safe_get(row_data, 6)]
