@@ -117,16 +117,15 @@ def upload_to_drive(file_path, file_name):
             body=file_metadata,
             media_body=media,
             fields='id, webViewLink',
-            supportsAllDrives=True # 嘗試支援共享雲端硬碟
+            supportsAllDrives=True 
         ).execute()
         
         print(f"   ✅ 上傳成功! File ID: {file.get('id')}")
         return file.get('webViewLink')
         
     except HttpError as error:
-        # 特別處理空間不足的錯誤 (Error 403 reason: storageQuotaExceeded)
         if error.resp.status == 403 and 'storageQuotaExceeded' in str(error):
-            print("   ⚠️ 上傳失敗：Service Account 儲存空間不足 (Google 限制)。請改用 GitHub Artifacts 下載。")
+            print("   ⚠️ 上傳失敗：Service Account 儲存空間不足 (Google 限制)。將保留 ZIP 檔供 GitHub 下載。")
             return "上傳失敗(空間不足)"
         else:
             print(f"   ❌ 上傳 Google Drive 失敗: {error}")
@@ -190,9 +189,8 @@ def get_price_safely(driver):
 def process_sku(driver, sku):
     print(f"\n🔍 開始搜尋 SKU: {sku}")
     prices = [] 
-    product_url = "" # 初始化商品連結
+    product_url = "" 
     
-    # === 建立暫存資料夾 ===
     sku_folder = str(sku)
     if os.path.exists(sku_folder):
         shutil.rmtree(sku_folder) 
@@ -236,12 +234,9 @@ def process_sku(driver, sku):
                 time.sleep(1)
                 driver.execute_script("arguments[0].click();", first_product)
                 print("👉 (JS強制) 成功點擊商品，進入內頁")
-                
-                # === 新增：抓取商品連結 ===
-                time.sleep(2) # 等待網址跳轉
+                time.sleep(2) 
                 product_url = driver.current_url
                 print(f"🔗 取得商品連結: {product_url}")
-                # ========================
             else:
                 raise NoSuchElementException("無法找到任何商品連結")
 
@@ -314,14 +309,16 @@ def process_sku(driver, sku):
         print("📦 正在打包截圖...")
         timestamp = get_taiwan_time_str()
         zip_filename = f"{sku}_{timestamp}"
+        # 製作 zip 檔案 (這會在當前目錄產生 .zip 檔)
         zip_path = shutil.make_archive(zip_filename, 'zip', sku_folder)
         
         # 上傳到 Google Drive
         drive_link = upload_to_drive(zip_path, f"{zip_filename}.zip")
         
-        # 清理暫存檔
-        shutil.rmtree(sku_folder)
-        os.remove(zip_path)
+        # === 關鍵修改：不刪除 zip 檔，也不刪除資料夾 ===
+        # 我們只刪除資料夾，保留 zip 檔給 GitHub Artifacts 上傳
+        shutil.rmtree(sku_folder) 
+        # os.remove(zip_path) <--- 這行已經被我移除
 
         return prices, drive_link, product_url
 
@@ -347,7 +344,6 @@ def main():
         all_values = sheet.get_all_values()
         print(f"📋 共有 {len(all_values)-1} 筆資料待處理")
 
-        # 從第 2 列開始
         for i, row_data in enumerate(all_values[1:], start=2):
             sku = safe_get(row_data, 0).strip()
             if not sku:
@@ -361,16 +357,13 @@ def main():
                 safe_get(row_data, 6)  # G
             ]
 
-            # 執行爬蟲，回傳 (價格, 雲端連結, 商品網址)
             web_prices, drive_link, product_url = process_sku(driver, sku)
             
             update_time = get_taiwan_time_display()
             comparison_result = compare_prices(user_prices, web_prices)
             
-            # 寫入: H~L (Prices) + M (Time) + N (Result) + O (Drive Link) + P (Product URL)
             data_to_write = web_prices + [update_time, comparison_result, drive_link, product_url]
             
-            # 寫入到 P 欄 (第16欄)
             cell_range = f"H{i}:P{i}"
             sheet.update(values=[data_to_write], range_name=cell_range)
             
