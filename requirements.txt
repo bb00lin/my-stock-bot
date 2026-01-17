@@ -1,6 +1,6 @@
 yfinance
 pandas
-https://github.com/twopirllc/pandas-ta/archive/development.zip
+https://github.com/xgboosted/pandas-ta-classic/archive/master.zip
 FinMind
 requests
 selenium
