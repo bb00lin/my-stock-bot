@@ -5,9 +5,6 @@ import os
 import shutil
 from datetime import datetime, timedelta, timezone
 from oauth2client.service_account import ServiceAccountCredentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from googleapiclient.errors import HttpError
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -21,7 +18,6 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 SHEET_NAME = 'Guardian_Price_Check'
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
-DRIVE_FOLDER_ID = '19ZAatbWczApRUMVbF0ZB6X-T36YY2w35'
 
 # ================= 輔助功能 =================
 def clean_price(price_text):
@@ -31,11 +27,13 @@ def clean_price(price_text):
     return cleaned
 
 def get_taiwan_time_str():
+    """ 用於檔名，格式 YYYYMMDDHHMM """
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz)
     return now.strftime("%Y%m%d%H%M")
 
 def get_taiwan_time_display():
+    """ 用於表格顯示，格式 YYYY-MM-DD HH:MM """
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz)
     return now.strftime("%Y-%m-%d %H:%M")
@@ -80,53 +78,13 @@ def compare_prices(user_prices, web_prices):
     else:
         return "; ".join(mismatches)
 
-# ================= Google Service 連線 =================
-def get_credentials():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    return ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
-
 def connect_google_sheet():
     print("📊 正在連線 Google Sheet...")
-    creds = get_credentials()
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
     client = gspread.authorize(creds)
     sheet = client.open(SHEET_NAME).sheet1
     return sheet
-
-def upload_to_drive(file_path, file_name):
-    print(f"☁️ 正在上傳 {file_name} 到 Google Drive...")
-    try:
-        creds = get_credentials()
-        service = build('drive', 'v3', credentials=creds)
-        
-        file_metadata = {
-            'name': file_name,
-            'parents': [DRIVE_FOLDER_ID]
-        }
-        media = MediaFileUpload(file_path, mimetype='application/zip')
-        
-        file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webViewLink',
-            supportsAllDrives=True 
-        ).execute()
-        
-        print(f"   ✅ 上傳成功! File ID: {file.get('id')}")
-        return file.get('webViewLink')
-        
-    except HttpError as error:
-        if error.resp.status == 403 and 'storageQuotaExceeded' in str(error):
-            print("   ⚠️ 上傳失敗：Service Account 儲存空間不足 (Google 限制)。將保留 ZIP 檔供 GitHub 下載。")
-            return "上傳失敗(空間不足)"
-        else:
-            print(f"   ❌ 上傳 Google Drive 失敗: {error}")
-            return "上傳失敗"
-    except Exception as e:
-        print(f"   ❌ 發生未預期錯誤: {e}")
-        return "上傳失敗"
 
 # ================= Selenium 功能 =================
 def init_driver():
@@ -204,7 +162,7 @@ def process_sku(driver, sku):
             search_box.send_keys(Keys.RETURN)
         except TimeoutException:
             print("❌ 搜尋框載入超時")
-            return ["Search Fail"] * 5, "", "URL Not Found"
+            return ["Search Fail"] * 5, "URL Not Found"
 
         time.sleep(5)
 
@@ -236,7 +194,7 @@ def process_sku(driver, sku):
 
         except NoSuchElementException:
             print(f"⚠️ 搜尋不到 SKU {sku}")
-            return ["Not Found"] * 5, "", "URL Not Found"
+            return ["Not Found"] * 5, "URL Not Found"
 
         time.sleep(4)
 
@@ -253,22 +211,21 @@ def process_sku(driver, sku):
             driver.get("https://guardian.com.sg/cart")
         except TimeoutException:
             print("❌ 加入購物車按鈕找不到")
-            return ["Add Fail"] * 5, "", product_url
+            return ["Add Fail"] * 5, product_url
 
         time.sleep(5)
 
         # 4. 調整數量與抓取價格
         for qty in range(1, 6):
-            # === 修正1: 智慧等待 "FETCHING CART" 消失 ===
-            # 在抓取價格前，確保畫面沒有 loading 遮罩
+            # 智慧等待 Loading 消失
             try:
                 WebDriverWait(driver, 15).until_not(
                     EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
                 )
             except:
-                pass # 如果沒出現 loading 就繼續
+                pass
             
-            time.sleep(1) # 再多等一下確保渲染完成
+            time.sleep(1) 
 
             current_price = get_price_safely(driver)
             
@@ -281,27 +238,22 @@ def process_sku(driver, sku):
                 prices.append("Error")
                 driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}_error.png")
 
-            # 準備增加數量到下一個
             if qty < 5:
                 try:
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     driver.execute_script("arguments[0].click();", plus_btn)
                     
-                    # === 修正2: 點擊後，強制等待更新完成 ===
                     print(f"   ⏳ 正在增加數量 ({qty}->{qty+1})...")
-                    time.sleep(1) # 給它一點時間反應，讓 loading 出現
+                    time.sleep(1) 
                     try:
-                        # 等待 "FETCHING CART" 出現再消失，或者直接等待它消失
-                        # 這裡設定最長等待 20 秒
                         WebDriverWait(driver, 20).until_not(
                             EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
                         )
                     except TimeoutException:
                         print("   ⚠️ 等待價格更新超時 (網站可能卡頓)，嘗試繼續...")
 
-                    time.sleep(2) # 額外緩衝，確保數字變動
+                    time.sleep(2) 
 
-                    # 檢查是否達到上限
                     try:
                         error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')]")
                         if error_msg.is_displayed():
@@ -320,18 +272,16 @@ def process_sku(driver, sku):
         
         empty_cart(driver)
 
-        # === 打包與上傳 ===
-        print("📦 正在打包截圖...")
+        # === 打包截圖 (供 GitHub 下載) ===
+        print("📦 正在打包截圖 (供 GitHub Artifacts 下載)...")
         timestamp = get_taiwan_time_str()
         zip_filename = f"{sku}_{timestamp}"
-        zip_path = shutil.make_archive(zip_filename, 'zip', sku_folder)
+        shutil.make_archive(zip_filename, 'zip', sku_folder)
         
-        drive_link = upload_to_drive(zip_path, f"{zip_filename}.zip")
-        
+        # 刪除暫存資料夾 (保留 .zip 檔)
         shutil.rmtree(sku_folder) 
-        # os.remove(zip_path) # 保留 ZIP 給 GitHub
 
-        return prices, drive_link, product_url
+        return prices, product_url
 
     except Exception as e:
         print(f"❌ 發生錯誤: {e}")
@@ -341,7 +291,7 @@ def process_sku(driver, sku):
             empty_cart(driver)
         except:
             pass
-        return ["Error"] * 5, "上傳失敗", product_url
+        return ["Error"] * 5, product_url
 
 # ================= 主程式 =================
 def main():
@@ -368,17 +318,20 @@ def main():
                 safe_get(row_data, 6)  # G
             ]
 
-            web_prices, drive_link, product_url = process_sku(driver, sku)
+            # 執行爬蟲，不再回傳 drive_link
+            web_prices, product_url = process_sku(driver, sku)
             
             update_time = get_taiwan_time_display()
             comparison_result = compare_prices(user_prices, web_prices)
             
-            data_to_write = web_prices + [update_time, comparison_result, drive_link, product_url]
+            # 欄位調整: H~L (Prices) + M (Time) + N (Result) + O (Product URL)
+            data_to_write = web_prices + [update_time, comparison_result, product_url]
             
-            cell_range = f"H{i}:P{i}"
+            # 寫入範圍: H~O (共 8 欄)
+            cell_range = f"H{i}:O{i}"
             sheet.update(values=[data_to_write], range_name=cell_range)
             
-            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result} | Link: {drive_link} | URL: {product_url}")
+            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result} | URL: {product_url}")
             print("-" * 30)
 
         print("🎉 所有任務完成！")
