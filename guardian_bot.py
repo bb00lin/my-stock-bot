@@ -57,12 +57,15 @@ def parse_date(date_str):
     except:
         return None
 
-# ================= 資料同步與解析功能 =================
+# ================= 資料同步與解析功能 (邏輯更新) =================
 def parse_promo_string(promo_text):
+    """
+    解析促銷字串。
+    對於未定義的數量，使用「最佳單價」推算，並強制捨去第二位小數 (只保留一位)。
+    """
     if not promo_text: return ["", "", "", "", ""]
-    # 修正 Regex: 允許 For 與 $ 之間沒有空格 (\s*)
-    matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', promo_text)
     
+    matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', promo_text)
     price_map = {}
     for qty_str, price_str in matches:
         try:
@@ -83,12 +86,21 @@ def parse_promo_string(promo_text):
     if best_unit_price == float('inf'): return ["", "", "", "", ""]
 
     calculated_prices = []
+    
     for q in range(1, 6):
         if q in price_map:
+            # 規則有定義，直接用定義值
             calculated_prices.append(str(price_map[q]))
         else:
+            # 規則沒定義，用最佳單價推算
             total = best_unit_price * q
-            val_str = "{:.2f}".format(total).rstrip('0').rstrip('.')
+            
+            # === 關鍵修改：強制保留1位小數 (忽略第2位以後) ===
+            # 例如: 221.333 -> 221.3
+            total_truncated = int(total * 10) / 10.0
+            
+            # 格式化字串，去除 .0 (例如 221.0 -> 221, 221.3 -> 221.3)
+            val_str = "{:.1f}".format(total_truncated).rstrip('0').rstrip('.')
             calculated_prices.append(val_str)
             
     return calculated_prices
@@ -150,7 +162,7 @@ def sync_promotion_data(client):
     print("✅ 資料同步完成")
     return True
 
-# ================= 郵件通知功能 (主旨邏輯更新) =================
+# ================= 郵件通知功能 =================
 def generate_html_table(data_rows):
     if not data_rows: return ""
     headers = ["SKU", "商品名稱", "比對結果", "更新時間"]
@@ -186,12 +198,9 @@ def send_notification_email(all_match, error_summary, full_data):
 
     print("📧 正在發送通知郵件...")
     
-    # === 新增：判斷主旨圖示邏輯 ===
-    # 檢查是否有任何抓取到的價格包含 "Limit Reached"
     has_limit_reached = False
     if full_data:
         for row in full_data:
-            # 網站價格位於 index 7~11 (Qty 1~5)
             web_prices_slice = row[7:12] 
             if any("Limit Reached" in str(p) for p in web_prices_slice):
                 has_limit_reached = True
@@ -202,30 +211,23 @@ def send_notification_email(all_match, error_summary, full_data):
     color = ""
     summary_text = ""
 
-    # 邏輯 1: 如果有 Limit Reached -> ⚠️
     if has_limit_reached:
         subject_prefix = "⚠️"
         subject_text = "[Ozio比對結果-警告] 達購買上限/異常"
-        color = "#ff9800" # 橘色
+        color = "#ff9800" 
         summary_text = f"發現部分商品達到購買上限或有其他異常，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
-    
-    # 邏輯 2: 如果沒有 Limit Reached，且比對結果不是全符合 -> 🔥
     elif not all_match:
         subject_prefix = "🔥"
         subject_text = "[Ozio比對結果-異常] 請檢查表格"
-        color = "red" # 紅色
+        color = "red" 
         summary_text = f"發現價格異常，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
-        
-    # 邏輯 3: 全符合 -> ✅
     else:
         subject_prefix = "✅"
         subject_text = "[Ozio比對結果-正常] 價格相符"
-        color = "green" # 綠色
+        color = "green" 
         summary_text = "所有商品價格比對結果均相符 (或非檔期)。"
 
     final_subject = f"{subject_prefix} {subject_text}"
-    
-    # 生成內容
     snapshot_table = generate_html_table(full_data)
 
     msg = MIMEMultipart()
@@ -281,7 +283,6 @@ def compare_prices(user_prices, web_prices):
         w_raw = web_prices[i]
         u_val = clean_price(u_raw)
         
-        # 處理 Limit Reached
         if w_raw == "Limit Reached":
             if u_val: mismatches.append(f"Q{i+1}:Limit Reached")
             continue
