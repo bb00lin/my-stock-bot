@@ -198,13 +198,13 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         return False
 
 # ================= Task 2: Mix & Match =================
-def sync_mix_match_data(client, worksheet_name):
+def sync_mix_match_data(client):
     print("🔄 [Task 2] 同步 Mix & Match 資料 (擴充 Qty 2~5)...")
     promo_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_PROMO)
     try:
-        mix_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(worksheet_name)
+        mix_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_MIX)
     except:
-        mix_sheet = client.open(SPREADSHEET_FILE_NAME).add_worksheet(title=worksheet_name, rows=1000, cols=20)
+        mix_sheet = client.open(SPREADSHEET_FILE_NAME).add_worksheet(title=WORKSHEET_MIX, rows=100, cols=20)
 
     mix_sheet.clear()
     headers = ["Main SKU", "Product Name", "Promo Rule", "Target Qty", "Mix Strategy", "Expected Price", "Web Total Price", "Result", "Update Time", "Main Link"]
@@ -423,18 +423,18 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     
     return total_price, main_url, zip_path, missing_skus, final_display_str
 
-def run_mix_match_task(client, driver, worksheet_name, loop_count):
-    row_count = sync_mix_match_data(client, worksheet_name)
+def run_mix_match_task(client, driver):
+    row_count = sync_mix_match_data(client)
     if row_count == 0: return [], [], True
 
-    sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(worksheet_name)
+    sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_MIX)
     all_values = sheet.get_all_values()
     results_for_mail = []
     attachments = []
     all_match = True
     error_summary = []
 
-    print(f"🚀 [壓力測試第 {loop_count} 輪] 開始執行混搭測試...")
+    print(f"🚀 [Task 2] 開始執行混搭測試...")
 
     for i, row in enumerate(all_values[1:], start=2):
         main_sku = row[0]
@@ -500,8 +500,7 @@ def run_mix_match_task(client, driver, worksheet_name, loop_count):
 
     subject_prefix = "✅" if all_match else "🔥"
     date_info = f"{get_taiwan_time_now().strftime('%m/%d(%a)')}"
-    loop_info = f" 壓力測試第 {loop_count} 輪"
-    subject = f"{date_info}{subject_prefix}[Ozio Mix & Match比對結果]{loop_info}"
+    subject = f"{date_info}{subject_prefix}[Ozio Mix & Match比對結果]"
     
     summary_text = "所有混搭組合價格均相符。" if all_match else f"發現混搭價格異常。<br>{'<br>'.join(error_summary)}"
     if any("⚠️缺" in str(r) for r in results_for_mail):
@@ -547,42 +546,20 @@ def send_email_generic(subject, summary, data_rows, attachments):
         print(f"📧 郵件已發送: {subject}")
     except Exception as e: print(f"❌ 寄信失敗: {e}")
 
-# ================= 壓力測試主程式 =================
-def stress_test_main():
-    client = connect_google_sheet()
-    driver = init_driver()
-    
-    loop_count = 1
-    start_time = time.time()
-    
+def main():
     try:
-        while True:
-            print("\n" + "="*60)
-            print(f"🔄 開始壓力測試第 {loop_count} 輪")
-            print("="*60)
-            
-            # 建立新工作表（依時間命名，不覆蓋舊資料）
-            timestamp = get_taiwan_time_now().strftime("%Y%m%d_%H%M%S")
-            worksheet_name = f"Mix_StressTest_{timestamp}"
-            
-            run_mix_match_task(client, driver, worksheet_name, loop_count)
-            
-            elapsed = time.time() - start_time
-            print(f"\n⏱️  第 {loop_count} 輪完成，累計執行時間: {elapsed:.2f} 秒")
-            print("🛑 按 Ctrl+C 中斷測試，或等待 30 秒後繼續下一輪...")
-            
-            # 每輪間隔 30 秒，避免過度請求
-            time.sleep(30)
-            loop_count += 1
-            
-    except KeyboardInterrupt:
-        print("\n\n🛑 手動中斷壓力測試")
-    except Exception as e:
-        print(f"💥 壓力測試發生錯誤: {e}")
-    finally:
+        client = connect_google_sheet()
+        driver = init_driver()
+        
+        run_mix_match_task(client, driver)
+        
         driver.quit()
-        print(f"\n📊 總共執行 {loop_count-1} 輪測試")
-        print("🎉 壓力測試結束！所有結果已儲存至獨立工作表")
+        print("\n🎉 Mix & Match 任務完成！")
+        
+    except Exception as e:
+        print(f"💥 Fatal Error: {e}")
+        try: driver.quit()
+        except: pass
 
 if __name__ == "__main__":
-    stress_test_main()
+    main()
