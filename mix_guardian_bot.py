@@ -66,7 +66,6 @@ def create_zip_evidence(sku, sku_folder):
         if not os.path.exists(sku_folder) or not os.listdir(sku_folder): return None
         timestamp = get_taiwan_time_str()
         zip_filename_base = f"{sku}_{timestamp}"
-        # 注意：make_archive 會回傳完整路徑 (例如 /home/runner/work/.../sku_time.zip)
         zip_path = shutil.make_archive(zip_filename_base, 'zip', sku_folder)
         shutil.rmtree(sku_folder) 
         return zip_path
@@ -316,10 +315,31 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty):
         if not main_url: main_url = driver.current_url
 
     driver.get("https://guardian.com.sg/cart")
-    time.sleep(5)
     
-    total_price = get_total_price_safely(driver)
+    # === [關鍵修正]：智慧等待 Fetching Cart 消失 ===
+    print("   ⏳ 等待購物車計算 (Fetching Cart)...")
+    try:
+        # 最多等 20 秒，直到轉圈圈消失
+        WebDriverWait(driver, 20).until_not(
+            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
+        )
+    except TimeoutException:
+        print("   ⚠️ 等待購物車載入超時，嘗試直接抓取")
+    
+    time.sleep(2) # 額外緩衝
+    
+    # === 增加重試機制，防止抓到 Error ===
+    total_price = "Error"
+    for retry in range(5):
+        price = get_total_price_safely(driver)
+        if price and price != "Error":
+            total_price = price
+            break
+        print(f"   ⚠️ 尚未抓到價格，重試 ({retry+1}/5)...")
+        time.sleep(2)
+        
     if not total_price: total_price = "Error"
+    # ===============================================
     
     screenshot_name = f"Mix_{first_sku}_Total.png"
     driver.save_screenshot(f"{folder_name}/{screenshot_name}")
@@ -373,8 +393,7 @@ def run_mix_match_task(client, driver):
             error_summary.append(f"{main_sku}: {result_text}")
             if zip_file: attachments.append(zip_file)
         else:
-            # 如果是正確的，可以選擇刪除或保留
-            # 這裡為了保險起見，我們不再刪除任何檔案，交給 GitHub Actions 清理
+            # 如果正常，不刪除暫存檔 (交給 GitHub Action 清理)
             pass
 
         update_time = get_taiwan_time_display()
@@ -389,10 +408,8 @@ def run_mix_match_task(client, driver):
     
     send_email_generic(subject, summary_text, results_for_mail, attachments)
     
-    # === 移除原本的刪除邏輯，確保檔案留給 GitHub Action 上傳 ===
-    # for f in attachments:
-    #     try: os.remove(f)
-    #     except: pass
+    # 不刪除附件，留給 Actions 上傳
+    # for f in attachments: try: os.remove(f) except: pass
 
 def send_email_generic(subject, summary, data_rows, attachments):
     if not MAIL_USERNAME or not MAIL_PASSWORD: return
