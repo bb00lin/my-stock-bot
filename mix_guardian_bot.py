@@ -277,7 +277,6 @@ def sync_mix_match_data(client):
                     expected_price = int(raw_total * 10) / 10.0
                     rule_text = f"Calculated (Unit: {best_unit_price:.2f})"
 
-                # 這裡先產生一個「計畫中的」策略，之後會被實際執行結果覆蓋
                 current_cycle = cycle(pool)
                 strategy_dict = {}
                 for _ in range(target_qty):
@@ -296,7 +295,6 @@ def sync_mix_match_data(client):
 def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     empty_cart(driver)
     
-    # 原始計畫清單
     raw_items = strategy_str.split(';')
     unique_skus_planned = []
     for item in raw_items:
@@ -311,15 +309,12 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     
     print(f"   🕵️ 正在檢查商品庫存狀況...")
     
-    # 1. 檢查主商品
     if not check_item_exists(driver, main_sku):
         print(f"   🛑 主商品 {main_sku} 搜尋不到")
-        # [已修正] Link 欄位會顯示 URL Not Found
         return "Main Missing", "URL Not Found", None, [main_sku], strategy_str
     
     available_skus.append(main_sku)
     
-    # 2. 檢查 MIX 商品 (排除主商品)
     for sku in unique_skus_planned:
         if sku == main_sku: continue 
         if check_item_exists(driver, sku):
@@ -328,10 +323,8 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
             print(f"   ⚠️ 混搭商品 {sku} 搜尋不到，將移除")
             missing_skus.append(sku)
     
-    # 3. 判斷是否只剩主商品
     if len(available_skus) == 1 and len(unique_skus_planned) > 1:
         print(f"   🛑 所有 MIX 商品皆從缺，只剩主料，停止比較")
-        # 即使停止，也要回傳更新後的策略字串 (顯示 MIX:0)
         final_display_parts = []
         for s in unique_skus_planned:
             if s == main_sku: final_display_parts.append(f"{s}:1")
@@ -340,19 +333,13 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
         
         return "Only Main", "", None, missing_skus, final_display_str
 
-    # === 4. 重新分配邏輯 (滿足: 主商品固定1，剩下用現存MIX填滿) ===
-    # 確保 final_strategy 初始
     final_strategy = {sku: 0 for sku in unique_skus_planned} 
     
-    # Step A: 主商品固定 1 個
     final_strategy[main_sku] = 1
     current_count = 1
     
-    # Step B: 剩下的名額 (Target - 1) 由 available_skus 中的夥伴填滿
-    # 建立夥伴池 (排除 main_sku)
     partners_pool = [s for s in available_skus if s != main_sku]
     
-    # 如果沒有夥伴了 (前面已經擋過 Only Main，理論上這裡不會空)
     if not partners_pool:
         fill_pool = [main_sku]
     else:
@@ -365,7 +352,6 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
         final_strategy[next_item] = final_strategy.get(next_item, 0) + 1
         current_count += 1
 
-    # 生成 "實際執行" 的顯示字串 (保留原始順序)
     final_display_parts = []
     for s in unique_skus_planned:
         qty = final_strategy.get(s, 0)
@@ -374,8 +360,6 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     
     print(f"   🔄 實際執行策略: {final_display_str}")
 
-    # === 5. 執行加入購物車 (依照 final_strategy) ===
-    # 產生加入序列 (Flatten)
     items_to_add = []
     for sku, qty in final_strategy.items():
         for _ in range(qty):
@@ -396,23 +380,39 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     driver.get("https://guardian.com.sg/cart")
     
     print("   ⏳ 等待購物車計算 (Fetching Cart)...")
+    
+    # === [關鍵修正] 極致等待邏輯 ===
     try:
-        WebDriverWait(driver, 20).until_not(
-            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
+        # 1. 延長等待時間至 60 秒
+        # 2. 監聽 FETCHING CART 文字、loading-mask class、loader class
+        WebDriverWait(driver, 60).until(
+            EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')] | //div[contains(@class, 'loader')]"))
         )
     except TimeoutException:
-        print("   ⚠️ 等待購物車載入超時")
+        print("   ⚠️ 等待購物車載入超時 (60s)，嘗試直接抓取")
     
-    time.sleep(2) 
+    # 3. 就算消失了，強制多等 5 秒，確保 DOM 穩定
+    time.sleep(5) 
     
     total_price = "Error"
-    for retry in range(5):
+    # 4. 重試 10 次 (原本 5 次)，每次間隔 3 秒
+    for retry in range(10):
         price = get_total_price_safely(driver)
-        if price and price != "Error":
+        
+        # 簡單驗證：不是 Error 且長度 > 0
+        if price and price != "Error" and len(price) > 0:
             total_price = price
             break
-        print(f"   ⚠️ 尚未抓到價格，重試 ({retry+1}/5)...")
-        time.sleep(2)
+        
+        # 如果沒抓到，再檢查一次是不是轉圈圈又跑出來了
+        try:
+             WebDriverWait(driver, 3).until(
+                EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')]"))
+            )
+        except: pass
+
+        print(f"   ⚠️ 尚未抓到價格，重試 ({retry+1}/10)...")
+        time.sleep(3)
         
     if not total_price: total_price = "Error"
     
@@ -421,7 +421,6 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     
     zip_path = create_zip_evidence("Mix_Evidence", folder_name)
     
-    # 多回傳一個 final_display_str
     return total_price, main_url, zip_path, missing_skus, final_display_str
 
 def run_mix_match_task(client, driver):
@@ -455,7 +454,6 @@ def run_mix_match_task(client, driver):
         
         web_total, link, zip_file, missing_list, actual_strategy = process_mix_case_dynamic(driver, original_strategy, target_qty, main_sku)
         
-        # === 更新 Google Sheet 的 Strategy 欄位 (第 5 欄) ===
         sheet.update_cell(i, 5, actual_strategy) 
 
         missing_note = ""
@@ -473,7 +471,6 @@ def run_mix_match_task(client, driver):
             is_error = False 
             
         elif web_total == "Only Main":
-            # [已修正] 增加 (忽略比較) 字樣
             result_text = f"⚠️MIX全缺: 只剩主料 (忽略比較)"
             is_error = False
             
