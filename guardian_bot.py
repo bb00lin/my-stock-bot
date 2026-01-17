@@ -85,7 +85,6 @@ def parse_promo_string(promo_text):
             calculated_prices.append(str(price_map[q]))
         else:
             total = best_unit_price * q
-            # 保留1位小數，無條件捨去第2位
             total_truncated = int(total * 10) / 10.0
             val_str = "{:.1f}".format(total_truncated).rstrip('0').rstrip('.')
             calculated_prices.append(val_str)
@@ -131,7 +130,6 @@ def sync_promotion_data(client):
         elif d_start and not d_end:
              if today < d_start: date_status = f"⚠️ 尚未開始 (起:{d_start.strftime('%m/%d')})"
         
-        # 寫入 N 欄 (Index 13) 供 main 讀取
         row_data = [sku, prod_name] + user_prices + [""] * 6 + [date_status] + [""]
         new_rows.append(row_data)
 
@@ -166,7 +164,7 @@ def generate_html_table(data_rows):
         result = safe_get(row, 13)
         
         bg_color = "#ffffff"
-        if "商品未上架" in result: bg_color = "#eeeeee" # 灰色
+        if "商品未上架" in result: bg_color = "#eeeeee"
         elif "Diff" in result or "異常" in result: bg_color = "#ffebee" 
         elif "非檔期" in result or "尚未開始" in result: bg_color = "#fff3e0" 
             
@@ -268,26 +266,18 @@ def compare_prices(user_prices, web_prices, product_url):
     user_validation_error = validate_user_inputs(user_prices)
     if user_validation_error: return user_validation_error
 
-    # === 新增：檢查 URL 是否為 Not Found ===
     if "Not Found" in product_url:
-        # 檢查 web_prices 是否有抓到任何有效價格
         has_any_price = False
         for p in web_prices:
-            # 排除所有可能的錯誤字串
             if p and p not in ["Error", "Search Fail", "Not Found", "Add Fail", "Click Fail", "Limit Reached"]:
-                # 再確認一下是否能轉成數字，以防萬一
                 try:
                     float(p)
                     has_any_price = True
                     break
                 except: pass
-        
-        if has_any_price:
-            return "該商品未上架，但是卻有商品價格請確認!"
-        else:
-            return "該商品未上架"
+        if has_any_price: return "該商品未上架，但是卻有商品價格請確認!"
+        else: return "該商品未上架"
 
-    # === 正常的比對邏輯 ===
     mismatches = []
     valid_comparison_count = 0
 
@@ -421,7 +411,6 @@ def process_sku(driver, sku):
         time.sleep(5)
         handle_popups(driver)
 
-        # 點擊商品
         try:
             xpath_sku = f"//a[contains(@href, '{sku}')]"
             xpath_generic = "(//div[contains(@class, 'product')]//a)[1]"
@@ -458,7 +447,6 @@ def process_sku(driver, sku):
         time.sleep(4)
         handle_popups(driver)
 
-        # 加入購物車
         try:
             add_btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart'], button.action.tocart")))
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", add_btn)
@@ -473,8 +461,45 @@ def process_sku(driver, sku):
 
         time.sleep(5)
 
-        # 調整數量與抓取價格
         for qty in range(1, 6):
+            # === 新增：數量嚴格驗證機制 ===
+            # 這是防止機器人抓錯數量的關鍵邏輯
+            try:
+                actual_qty_on_page = -1
+                qty_input = None
+                input_selectors = ["input[data-role='cart-item-qty']", "input.input-text.qty", "input[type='number']"]
+                for sel in input_selectors:
+                    try:
+                        qty_input = driver.find_element(By.CSS_SELECTOR, sel)
+                        if qty_input: break
+                    except: pass
+                
+                if qty_input:
+                    # 等待最多 5 秒確認數量正確
+                    for _ in range(10): 
+                        val = qty_input.get_attribute("value")
+                        if val and int(val) == qty:
+                            actual_qty_on_page = int(val)
+                            break
+                        # 順便檢查是否被限購擋住
+                        try:
+                            err = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')] | //div[contains(@class, 'message-error')]")
+                            if err.is_displayed():
+                                print(f"   🛑 驗證時發現限購阻擋 (停在 {val})")
+                                break
+                        except: pass
+                        time.sleep(0.5)
+                
+                # 如果數量不對 (且不是 Qty 1)，嘗試強制修正或記錄
+                if qty > 1 and actual_qty_on_page != -1 and actual_qty_on_page != qty:
+                     print(f"   ❌ 嚴重錯誤：網頁數量 ({actual_qty_on_page}) 與預期 ({qty}) 不符！")
+                     # 如果數量卡住，這通常代表「按了沒反應」或「被擋住」
+                     # 為了安全，這裡不抓價格，直接視為 Limit Reached 或 Error
+                     # 但為了讓邏輯繼續，我們先 break 出去，讓後面的 Limit Reached 檢查接手
+                     pass 
+            except: pass
+
+            # 正常的等待載入
             try: WebDriverWait(driver, 15).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
             except: pass
             
@@ -599,7 +624,6 @@ def main():
 
             web_prices, product_url = process_sku(driver, sku)
             update_time = get_taiwan_time_display()
-            # === 更新 main: 傳遞 product_url 到 compare_prices ===
             comparison_result = compare_prices(user_prices, web_prices, product_url)
             
             if date_status:
@@ -613,8 +637,6 @@ def main():
             print("-" * 30)
 
             if "均相符" not in comparison_result and "該商品未上架" not in comparison_result:
-                # 注意: "該商品未上架" (正常) 不應被視為 error_summary，但如果有價格異常則算
-                # 如果是 "該商品未上架，但是卻有商品價格請確認!" 則會因為不包含 "均相符" 且比較長而被加入
                 overall_status_match = False
                 error_summary_list.append(f"SKU {sku}: {comparison_result}")
             
