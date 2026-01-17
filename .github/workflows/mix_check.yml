@@ -2,8 +2,8 @@ name: Mix Match Check
 
 on:
   schedule:
-    - cron: '0 2 * * *' 
-  workflow_dispatch:    
+    - cron: '0 2 * * *' # 每天台灣時間早上 10 點執行
+  workflow_dispatch:    # 允許手動點擊按鈕執行
 
 jobs:
   build:
@@ -28,16 +28,31 @@ jobs:
 
     - name: Create credentials file
       run: |
-        # === 這裡修正了 Secret 名稱 ===
+        # 使用您截圖中確認的正確 Secret 名稱
         echo "${{ secrets.GOOGLE_SHEETS_JSON }}" > google_key.json
+
+    # === ✨ 新增：檢查金鑰是否成功建立 (除錯用) ✨ ===
+    - name: Check google_key.json size
+      run: |
+        ls -l google_key.json
+        if [ ! -s google_key.json ]; then
+          echo "❌ Error: google_key.json is empty! Please check your GitHub Secrets settings."
+          exit 1
+        else
+          echo "✅ google_key.json created successfully (File is not empty)."
+        fi
+    # =================================================
 
     - name: Run Mix Match Bot
       env:
         MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
         MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        # 如果您的程式碼中有用到 LINE 或其他 Token，也請在這裡補上
+        # LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
       run: python mix_guardian_bot.py 
 
     - name: Upload Artifacts (Optional)
+      # 無論成功失敗，都上傳截圖以便除錯
       if: always() 
       uses: actions/upload-artifact@v4
       with:
