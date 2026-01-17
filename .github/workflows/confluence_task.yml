@@ -3,7 +3,7 @@ name: Confluence Weekly Automation
 on:
   schedule:
     # 每週一 19:00 (GMT+8) -> UTC 11:00
-    - cron: '0 11 * * 1'
+    #- cron: '0 11 * * 1'
   workflow_dispatch: # 允許手動觸發
 
 jobs:
