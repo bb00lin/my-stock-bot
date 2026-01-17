@@ -3,7 +3,7 @@ name: Guardian Price Check Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 2 * * *' # 每天台灣時間早上 10:00 自動執行 (UTC 02:00)
 
 jobs:
   run_scraper:
@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # 新增了 google-api-python-client 等套件
+          # 安裝 Selenium, Google Sheets, 以及 Google Drive 所需套件
           pip install selenium gspread oauth2client webdriver-manager google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: Create JSON Key
@@ -38,10 +38,10 @@ jobs:
       - name: Run Python Script
         run: python guardian_bot.py
 
-      - name: Upload Artifacts (上傳截圖備份)
-        if: always()
+      - name: Upload Artifacts (上傳截圖壓縮檔)
+        if: always() # 無論程式成功或失敗都會執行
         uses: actions/upload-artifact@v4
         with:
           name: screenshots
-          path: "**/*.png"
+          path: "*.zip" # <--- 關鍵修改：只抓取 Python 產生的 .zip 檔案
           retention-days: 5
