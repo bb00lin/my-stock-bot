@@ -18,27 +18,28 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # ================= 設定區 =================
-# 主工作表 (機器人填寫與比對用)
-SHEET_NAME_MAIN = '工作表1' 
-# 資料來源工作表 (Promotion)
-SHEET_NAME_SOURCE = 'promotion'
+# ★★★ 您的 Google Sheet 檔案名稱 (左上角那個大標題) ★★★
+SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
+
+# 工作表名稱
+WORKSHEET_MAIN = '工作表1' 
+WORKSHEET_PROMO = 'promotion'
+
 # 您的 Google Sheet 網址 (用於 Email 連結)
-# ★★★ 請將下方的網址替換成您實際的 Google Sheet 網址 ★★★
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/您的試算表ID/edit"
 
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
 
-# Email 設定 (從環境變數讀取，確保安全)
+# Email 設定
 MAIL_SENDER = os.environ.get('MAIL_USERNAME', 'bb00lin@gmail.com')
 MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
-MAIL_RECEIVER = 'bb00lin@gmail.com' # 修正 gamil 為 gmail
+MAIL_RECEIVER = 'bb00lin@gmail.com' 
 
 # ================= 輔助功能 =================
 def clean_price(price_text):
     if not price_text:
         return ""
-    # 移除 SGD, $, 逗號, 換行, 空格
     cleaned = str(price_text).replace("SGD", "").replace("$", "").replace(",", "").replace("\n", "").replace(" ", "").strip()
     return cleaned
 
@@ -57,23 +58,13 @@ def safe_get(row_list, index):
         return str(row_list[index])
     return ""
 
-# ================= 資料同步與解析功能 (新增) =================
+# ================= 資料同步與解析功能 =================
 def parse_promo_string(promo_text):
-    """
-    解析促銷字串，例如:
-    "1 For $49.9, 2 For $94, 3 For $135"
-    "1 For $28"
-    回傳: Qty 1~5 的預期 User Price (List)
-    """
     if not promo_text:
         return ["", "", "", "", ""]
 
-    # 使用 Regex 抓取所有 "X For $Y" 的組合
-    # 忽略括號內的 Mix & Match 說明
-    # pattern: 數字 + 空格 + For + 空格 + 可選$ + 數字(可含小數)
     matches = re.findall(r'(\d+)\s+[Ff]or\s+\$?([\d\.]+)', promo_text)
     
-    # 建立價格表 {數量: 總價}
     price_map = {}
     for qty_str, price_str in matches:
         try:
@@ -86,105 +77,88 @@ def parse_promo_string(promo_text):
     if not price_map:
         return ["", "", "", "", ""]
 
-    # 計算 Qty 1~5 的預期價格
     calculated_prices = []
     
-    # 取得 Qty 1 的單價 (最便宜金額) 用於倍數計算
-    # 根據需求：QTY4則用QTY1最便宜的金額乘以4
+    # 取得 Qty 1 的單價 (用於計算倍數)
     unit_price_base = 0
     if 1 in price_map:
         unit_price_base = price_map[1]
     else:
-        # 如果沒有定義 1 For X，找最小單位的平均價 (備用邏輯，通常都有 1 For X)
         min_qty = min(price_map.keys())
         unit_price_base = price_map[min_qty] / min_qty
 
     for q in range(1, 6):
         if q in price_map:
-            # 如果促銷規則有定義該數量的價格，直接使用 (例如 2 For 94)
+            # 規則定義的價格
             calculated_prices.append(str(price_map[q]))
         else:
-            # 如果沒有定義 (例如 Qty 4, 5)，使用 Qty 1 金額 * 數量
-            # 需求: "QTY4則用QTY1最便宜的金額乘以4"
+            # 規則未定義，用單價乘以數量
             total = unit_price_base * q
-            # 格式化為小數點後兩位，去除 .00
             val_str = "{:.2f}".format(total).rstrip('0').rstrip('.')
             calculated_prices.append(val_str)
             
     return calculated_prices
 
 def sync_promotion_data(client):
-    """
-    從 'promotion' 工作表讀取資料，處理後寫入 'Sheet1'
-    """
     print("🔄 正在從 promotion 同步資料...")
     try:
-        source_sheet = client.open(SHEET_NAME_SOURCE).sheet1 # 假設是第一個分頁，或是用名稱 client.open(...).worksheet('promotion')
-        target_sheet = client.open(SHEET_NAME_MAIN).sheet1 # 工作表1
+        # === 關鍵修正：先開檔案，再選分頁 ===
+        spreadsheet = client.open(SPREADSHEET_FILE_NAME)
+        source_sheet = spreadsheet.worksheet(WORKSHEET_PROMO) # 讀取 'promotion' 分頁
+        target_sheet = spreadsheet.worksheet(WORKSHEET_MAIN)  # 讀取 '工作表1' 分頁
     except Exception as e:
-        # 嘗試直接開分頁
-        try:
-            spreadsheet = client.open_by_key(client.open(SHEET_NAME_MAIN).id) # 開啟同一個檔案
-            source_sheet = spreadsheet.worksheet(SHEET_NAME_SOURCE)
-            target_sheet = spreadsheet.worksheet(SHEET_NAME_MAIN)
-        except Exception as e2:
-            print(f"❌ 無法開啟工作表: {e2}")
-            return False
+        print(f"❌ 無法開啟工作表 (請確認檔名是否為 '{SPREADSHEET_FILE_NAME}' 且分頁名稱正確): {e}")
+        return False
 
-    # 1. 讀取 Source 資料 (從第 7 列開始，因為第 6 列是標題)
-    # promotion 結構: L欄=SKU, M欄=名稱, G欄=促銷規則
-    # G=Index 6, L=Index 11, M=Index 12 (0-based)
+    # 1. 讀取 Source 資料
     all_values = source_sheet.get_all_values()
-    
     new_rows = []
     
     # 假設標題在第 6 列 (index 5)，資料從第 7 列 (index 6) 開始
     start_row_index = 6 
     
     for row in all_values[start_row_index:]:
-        # 安全取得欄位
-        raw_sku = safe_get(row, 11) # L欄
-        prod_name = safe_get(row, 12) # M欄
-        promo_desc = safe_get(row, 6) # G欄
+        raw_sku = safe_get(row, 11) # L欄 (Index 11)
+        prod_name = safe_get(row, 12) # M欄 (Index 12)
+        promo_desc = safe_get(row, 6) # G欄 (Index 6)
         
         if not raw_sku:
             continue
             
-        # a. 處理 SKU: 抓取末 6 碼 (忽略前3碼)
-        # 假設資料是 151621327 -> 621327
+        # a. 處理 SKU: 抓末 6 碼
         sku = raw_sku
         if len(raw_sku) > 6:
             sku = raw_sku[-6:]
             
-        # c. 處理價格: 解析 G 欄
+        # c. 處理價格
         user_prices = parse_promo_string(promo_desc)
         
-        # 組合成目標列格式
-        # A: SKU, B: Name, C~G: User Prices, H~O: 空白(待填)
-        row_data = [sku, prod_name] + user_prices + [""] * 8 # H~O 預留空白
+        # A:SKU, B:Name, C~G:User Prices, H~O:空
+        row_data = [sku, prod_name] + user_prices + [""] * 8
         new_rows.append(row_data)
 
     if not new_rows:
-        print("⚠️ Promotion 表格無資料或格式錯誤")
+        print("⚠️ Promotion 表格無資料")
         return False
 
-    # 2. 清除 Sheet1 舊資料 (保留標題，假設標題在第 1 列)
+    # 2. 清除 Sheet1 舊資料 (保留標題)
     print("🧹 清除舊資料...")
-    # 取得目前行數，避免清除過多
     current_rows = len(target_sheet.get_all_values())
     if current_rows > 1:
+        # 清除 A2 到 O最後一行
         target_sheet.batch_clear([f"A2:O{current_rows}"])
     
     # 3. 寫入新資料
     print(f"📝 寫入 {len(new_rows)} 筆新資料...")
+    # 寫入範圍 A2:G...
     target_sheet.update(values=new_rows, range_name=f"A2:G{2 + len(new_rows) - 1}")
     print("✅ 資料同步完成")
     return True
 
-# ================= 郵件通知功能 (新增) =================
+# ================= 郵件通知功能 =================
 def send_notification_email(all_match, error_summary):
     if not MAIL_USERNAME or not MAIL_PASSWORD:
-        print("⚠️ 未設定 Email 帳密，跳過寄信 (請在 GitHub Secrets 設定 MAIL_USERNAME/PASSWORD)")
+        print("⚠️ 未設定 Email 帳密，跳過寄信")
         return
 
     print("📧 正在發送通知郵件...")
@@ -204,13 +178,11 @@ def send_notification_email(all_match, error_summary):
     msg['Subject'] = subject
 
     html = f"""
-    <html>
-      <body>
+    <html><body>
         <h2 style="color:{color}">{subject}</h2>
         <p>{body_content}</p>
         <p>此郵件由 Guardian Price Bot 自動發送</p>
-      </body>
-    </html>
+    </body></html>
     """
     msg.attach(MIMEText(html, 'html'))
 
@@ -224,24 +196,19 @@ def send_notification_email(all_match, error_summary):
     except Exception as e:
         print(f"❌ 郵件發送失敗: {e}")
 
-
-# ================= 核心邏輯 (驗證與比對) =================
+# ================= 核心邏輯 =================
 def validate_user_inputs(user_prices):
     clean_prices = [clean_price(p) for p in user_prices]
     if all(not p for p in clean_prices): return "異常:User價格全空"
-    
     valid_numbers = []
     for p in clean_prices:
         if not p: continue 
         try:
             val = float(p)
             valid_numbers.append(val)
-        except:
-            return f"異常:User含非數值({p})"
-            
+        except: return f"異常:User含非數值({p})"
     if len(valid_numbers) > 1:
-        if len(set(valid_numbers)) == 1:
-             return "異常:User價格數值皆相同"
+        if len(set(valid_numbers)) == 1: return "異常:User價格數值皆相同"
     return None
 
 def compare_prices(user_prices, web_prices):
@@ -323,23 +290,16 @@ def empty_cart(driver):
     except Exception as e: print(f"   ⚠️ 清空過程發生小錯誤: {e}")
 
 def get_price_safely(driver):
-    # === 修改：抓取 Total 而非 Subtotal ===
-    # 根據 HTML 截圖，Total 金額在 class 為 priceSummary-totalPrice-* 的 span 內
+    # 改抓 Total
     try:
-        # 策略 1: 透過 class 特徵 (priceSummary-totalPrice)
         total_element = driver.find_element(By.XPATH, "//span[contains(@class, 'priceSummary-totalPrice')]")
         return clean_price(total_element.text)
-    except:
-        pass
+    except: pass
 
     try:
-        # 策略 2: 透過文字 Total 尋找其數值
-        # 尋找包含 "Total" 的 div，然後找它後面的價格
         total_element = driver.find_element(By.XPATH, "//*[contains(text(), 'Total')]/ancestor::div[contains(@class, 'priceSummary-totalLineItems')]//span[contains(@class, 'priceSummary-totalPrice')]")
         return clean_price(total_element.text)
-    except:
-        pass
-        
+    except: pass
     return None
 
 def process_sku(driver, sku):
@@ -517,7 +477,7 @@ def main():
     try:
         client = connect_google_sheet()
         
-        # 1. 先執行資料同步 (Promotion -> Sheet1)
+        # 1. 先執行資料同步
         sync_success = sync_promotion_data(client)
         if not sync_success:
             print("⚠️ 資料同步失敗，停止執行後續爬蟲")
@@ -527,8 +487,11 @@ def main():
         print("--- 初始化檢查 ---")
         empty_cart(driver)
         
-        sheet = client.open(SHEET_NAME_MAIN).sheet1
+        # 重新讀取 Sheet1 (因為資料剛被更新)
+        spreadsheet = client.open(SPREADSHEET_FILE_NAME)
+        sheet = spreadsheet.worksheet(WORKSHEET_MAIN)
         all_values = sheet.get_all_values()
+        
         print(f"📋 共有 {len(all_values)-1} 筆資料待處理")
 
         overall_status_match = True
