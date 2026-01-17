@@ -19,6 +19,7 @@ URL = os.environ.get("CONF_URL")
 COOKIES_JSON = os.environ.get("CONF_COOKIES")
 
 def get_target_dates():
+    """計算本週一、本週日、本週五(檔名用)"""
     today = date.today()
     monday = today - timedelta(days=today.weekday())
     sunday = monday + timedelta(days=6)
@@ -73,10 +74,12 @@ def inject_cookies(driver):
             
     print(f"成功注入 {added} 個 Cookies，前往目標頁面...")
     driver.get(URL)
-    time.sleep(10)
+    time.sleep(8)
 
 def navigate_and_copy_latest(driver):
-    """在側邊欄找到最新的週報並複製 (修復版)"""
+    """
+    找到最新週報，解析 URL 取得 Page ID，然後直接跳轉到複製頁面。
+    """
     print(f"正在搜尋側邊欄的最新週報 (當前頁面: {driver.title})...")
     wait = WebDriverWait(driver, 30)
     
@@ -101,63 +104,46 @@ def navigate_and_copy_latest(driver):
         latest_name = latest_link.text
         print(f"找到最新週報: {latest_name}，正在進入...")
         
+        # 點擊進入頁面
         driver.execute_script("arguments[0].click();", latest_link)
         
-        # 【關鍵修改】不再等待「編輯」按鈕，改為等待頁面標題 (h1) 出現
-        print("等待頁面標題載入...")
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "h1")))
-        time.sleep(5) # 多等 5 秒讓頂部導航列載入
-        print("頁面載入完成，準備尋找操作選單。")
+        # 等待 URL 更新，確保進入了該頁面
+        print("等待頁面跳轉以獲取 Page ID...")
+        time.sleep(5)
+        wait.until(EC.url_contains("pages"))
         
-        # 嘗試點擊「...」按鈕
-        more_btn_locators = [
-            (By.CSS_SELECTOR, "[data-testid='page-metadata-actions-more-button']"),
-            (By.XPATH, "//button[@aria-label='更多動作']"),
-            (By.XPATH, "//button//span[@aria-label='更多動作']/.."),
-            (By.CSS_SELECTOR, "button[aria-label='More actions']")
-        ]
+        current_url = driver.current_url
+        print(f"當前週報網址: {current_url}")
         
-        menu_opened = False
-        for loc in more_btn_locators:
-            try:
-                btn = driver.find_element(*loc)
-                btn.click()
-                menu_opened = True
-                print("成功點擊 '...' 按鈕。")
-                break
-            except: continue
-        
-        # 【保險方案】如果按鈕點不到，使用鍵盤快捷鍵 "." (句號) 呼叫選單
-        if not menu_opened:
-            print("按鈕點擊失敗，使用鍵盤快捷鍵 '.' (句號) 呼叫選單...")
-            webdriver.ActionChains(driver).send_keys(".").perform()
-            time.sleep(2) # 等待對話框
+        # 2. 解析網址取得 Page ID
+        # 典型網址: https://.../wiki/spaces/SPACE/pages/12345678/Title
+        # Regex: 尋找 /pages/ 後面的數字
+        match = re.search(r"/pages/(\d+)", current_url)
+        if not match:
+            raise Exception(f"無法從網址中解析出 Page ID: {current_url}")
             
-            # 輸入 "複製" 並按 Enter
-            print("發送 '複製' 指令...")
-            webdriver.ActionChains(driver).send_keys("複製").pause(1).send_keys(Keys.ENTER).perform()
+        page_id = match.group(1)
+        print(f"解析成功！Page ID: {page_id}")
         
-        else:
-            # 如果選單成功打開，點擊「複製」
-            print("選單已開，點擊 '複製'...")
-            try:
-                copy_option = wait.until(EC.element_to_be_clickable(
-                    (By.XPATH, "//span[contains(text(), '複製') or contains(text(), 'Copy')]")
-                ))
-                copy_option.click()
-            except TimeoutException:
-                # 選單開了但找不到選項，可能是英文介面或需要滾動，嘗試快捷鍵補救
-                print("選單中找不到選項，嘗試快捷鍵補救...")
-                webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-                webdriver.ActionChains(driver).send_keys(".").pause(1).send_keys("複製").pause(1).send_keys(Keys.ENTER).perform()
-
-        print("已觸發複製，等待編輯器載入 (網址應包含 copy-page)...")
-        wait.until(EC.url_contains("copy-page"))
-        # 編輯器載入很重，給予充足時間
-        time.sleep(15)
+        # 3. 建構「複製頁面」的網址
+        # 格式通常為: .../wiki/spaces/SPACE/pages/copy/PAGE_ID
+        # 我們利用 split 切割出前半段
+        url_prefix = current_url.split('/pages/')[0]
+        copy_url = f"{url_prefix}/pages/copy/{page_id}"
+        
+        print(f"直接跳轉至複製頁面: {copy_url}")
+        driver.get(copy_url)
+        
+        # 4. 等待編輯器載入
+        print("等待編輯器載入 (尋找標題輸入框)...")
+        # 只要能找到標題輸入框，就代表複製成功且編輯器就緒
+        wait.until(EC.visibility_of_element_located(
+            (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
+        ))
+        print("編輯器已就緒！")
         
     except TimeoutException:
-        print("操作逾時！請檢查截圖確認當前畫面狀態。")
+        print("導航或載入逾時！")
         driver.save_screenshot("nav_error.png")
         raise
 
@@ -166,20 +152,15 @@ def rename_page(driver, new_filename):
     print(f"正在重命名為: WeeklyReport_{new_filename}")
     wait = WebDriverWait(driver, 20)
     
-    try:
-        title_area = wait.until(EC.visibility_of_element_located(
-            (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
-        ))
-        
-        title_area.click()
-        title_area.send_keys(Keys.CONTROL + "a")
-        title_area.send_keys(Keys.BACK_SPACE)
-        time.sleep(0.5)
-        title_area.send_keys(f"WeeklyReport_{new_filename}")
-        time.sleep(1)
-    except TimeoutException:
-        print("找不到標題輸入框，可能編輯器尚未載入完成。")
-        raise
+    title_area = driver.find_element(By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
+    title_area.click()
+    # 清空標題
+    title_area.send_keys(Keys.CONTROL + "a")
+    title_area.send_keys(Keys.BACK_SPACE)
+    time.sleep(0.5)
+    # 輸入新標題
+    title_area.send_keys(f"WeeklyReport_{new_filename}")
+    time.sleep(1)
 
 def update_jira_macros(driver, date_info):
     """迴圈更新所有 Jira 表格的日期"""
@@ -188,10 +169,11 @@ def update_jira_macros(driver, date_info):
     
     macro_locator = (By.CSS_SELECTOR, "div[data-prosemirror-node-name='blockCard']")
     
+    # 等待至少一個表格出現
     try:
         wait.until(EC.presence_of_element_located(macro_locator))
     except TimeoutException:
-        print("警告：找不到 Jira 表格，可能頁面空白或載入不全。")
+        print("警告：找不到 Jira 表格。")
         return
 
     macros_count = len(driver.find_elements(*macro_locator))
@@ -199,6 +181,7 @@ def update_jira_macros(driver, date_info):
 
     for i in range(macros_count):
         try:
+            # 重新抓取元素避免 Stale
             macros = driver.find_elements(*macro_locator)
             if i >= len(macros): break
             
@@ -225,7 +208,7 @@ def update_jira_macros(driver, date_info):
                 new_jql = re.sub(dates_found[0], date_info['monday_str'], new_jql, count=1)
                 new_jql = re.sub(dates_found[1], date_info['sunday_str'], new_jql, count=1)
                 
-                print(f"[{i+1}/{macros_count}] 更新: {dates_found[0]}~{dates_found[1]} -> {date_info['monday_str']}~{date_info['sunday_str']}")
+                print(f"[{i+1}/{macros_count}] 更新日期: {dates_found[0]}~{dates_found[1]} -> {date_info['monday_str']}~{date_info['sunday_str']}")
                 
                 jql_input.click()
                 jql_input.send_keys(Keys.CONTROL + "a")
@@ -233,15 +216,16 @@ def update_jira_macros(driver, date_info):
                 time.sleep(0.1)
                 jql_input.send_keys(new_jql)
                 jql_input.send_keys(Keys.ENTER)
-                time.sleep(1)
+                time.sleep(2) # 等待驗證
                 
+                # 點擊插入/儲存
                 insert_btn = driver.find_element(By.XPATH, "//button[contains(., 'Insert') or contains(., 'Save') or contains(., '插入')]")
                 insert_btn.click()
                 
                 wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
                 time.sleep(2)
             else:
-                print(f"[{i+1}/{macros_count}] 跳過：未發現日期。")
+                print(f"[{i+1}/{macros_count}] 跳過：無日期格式。")
                 webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
                 
         except Exception as e:
@@ -258,6 +242,7 @@ def publish_page(driver):
             (By.CSS_SELECTOR, "[data-testid='publish-button']")
         ))
         publish_btn.click()
+        # 等待發布完成的跳轉
         time.sleep(10)
         print("頁面發布成功！")
     except Exception as e:
@@ -266,13 +251,13 @@ def publish_page(driver):
 
 def main():
     dates = get_target_dates()
-    print(f"=== Confluence 自動週報腳本 ===")
+    print(f"=== Confluence 自動週報腳本 (v5.0 直接網址版) ===")
     print(f"本週區間: {dates['monday_str']} ~ {dates['sunday_str']} | 檔名: {dates['friday_filename']}")
     
     driver = init_driver()
     try:
         inject_cookies(driver)
-        navigate_and_copy_latest(driver)
+        navigate_and_copy_latest(driver) # 這裡改用了直接跳轉法
         rename_page(driver, dates['friday_filename'])
         update_jira_macros(driver, dates)
         publish_page(driver)
