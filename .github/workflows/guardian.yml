@@ -3,7 +3,7 @@ name: Guardian Price Check Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *' # 每天台灣時間早上 10:00 自動執行 (UTC 02:00)
+    - cron: '0 2 * * *' # 每天台灣時間早上 10:00 自動執行
 
 jobs:
   run_scraper:
@@ -20,7 +20,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # 安裝 Selenium, Google Sheets, 以及 Google Drive 所需套件
           pip install selenium gspread oauth2client webdriver-manager google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: Create JSON Key
@@ -38,10 +37,18 @@ jobs:
       - name: Run Python Script
         run: python guardian_bot.py
 
+      # === 新增步驟：設定動態檔名 (台灣時間) ===
+      - name: Generate Timestamp
+        if: always()
+        run: |
+          # 設定時區為台北，格式為：Screenshots_年月日_時分 (例如 Screenshots_20260117_1030)
+          echo "TIMESTAMP=Screenshots_$(TZ='Asia/Taipei' date +'%Y%m%d_%H%M')" >> $GITHUB_ENV
+
+      # === 修改步驟：使用動態檔名 ===
       - name: Upload Artifacts (上傳截圖壓縮檔)
-        if: always() # 無論程式成功或失敗都會執行
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: screenshots
-          path: "*.zip" # <--- 關鍵修改：只抓取 Python 產生的 .zip 檔案
+          name: ${{ env.TIMESTAMP }}  # <--- 這裡會自動變成上面的時間字串
+          path: "*.zip"
           retention-days: 5
