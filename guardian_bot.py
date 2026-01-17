@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from googleapiclient.errors import HttpError
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -115,14 +116,23 @@ def upload_to_drive(file_path, file_name):
         file = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields='id, webViewLink'
+            fields='id, webViewLink',
+            supportsAllDrives=True # 嘗試支援共享雲端硬碟
         ).execute()
         
         print(f"   ✅ 上傳成功! File ID: {file.get('id')}")
         return file.get('webViewLink')
         
+    except HttpError as error:
+        # 特別處理空間不足的錯誤 (Error 403 reason: storageQuotaExceeded)
+        if error.resp.status == 403 and 'storageQuotaExceeded' in str(error):
+            print("   ⚠️ 上傳失敗：Service Account 儲存空間不足 (Google 限制)。請改用 GitHub Artifacts 下載。")
+            return "上傳失敗(空間不足)"
+        else:
+            print(f"   ❌ 上傳 Google Drive 失敗: {error}")
+            return "上傳失敗"
     except Exception as e:
-        print(f"   ❌ 上傳 Google Drive 失敗: {e}")
+        print(f"   ❌ 發生未預期錯誤: {e}")
         return "上傳失敗"
 
 # ================= Selenium 功能 =================
@@ -180,11 +190,12 @@ def get_price_safely(driver):
 def process_sku(driver, sku):
     print(f"\n🔍 開始搜尋 SKU: {sku}")
     prices = [] 
+    product_url = "" # 初始化商品連結
     
     # === 建立暫存資料夾 ===
     sku_folder = str(sku)
     if os.path.exists(sku_folder):
-        shutil.rmtree(sku_folder) # 確保乾淨
+        shutil.rmtree(sku_folder) 
     os.makedirs(sku_folder)
     
     try:
@@ -201,7 +212,7 @@ def process_sku(driver, sku):
             search_box.send_keys(Keys.RETURN)
         except TimeoutException:
             print("❌ 搜尋框載入超時")
-            return ["Search Fail"] * 5, ""
+            return ["Search Fail"] * 5, "", "URL Not Found"
 
         time.sleep(5)
 
@@ -225,12 +236,18 @@ def process_sku(driver, sku):
                 time.sleep(1)
                 driver.execute_script("arguments[0].click();", first_product)
                 print("👉 (JS強制) 成功點擊商品，進入內頁")
+                
+                # === 新增：抓取商品連結 ===
+                time.sleep(2) # 等待網址跳轉
+                product_url = driver.current_url
+                print(f"🔗 取得商品連結: {product_url}")
+                # ========================
             else:
                 raise NoSuchElementException("無法找到任何商品連結")
 
         except NoSuchElementException:
             print(f"⚠️ 搜尋不到 SKU {sku}")
-            return ["Not Found"] * 5, ""
+            return ["Not Found"] * 5, "", "URL Not Found"
 
         time.sleep(4)
 
@@ -247,7 +264,7 @@ def process_sku(driver, sku):
             driver.get("https://guardian.com.sg/cart")
         except TimeoutException:
             print("❌ 加入購物車按鈕找不到")
-            return ["Add Fail"] * 5, ""
+            return ["Add Fail"] * 5, "", product_url
 
         time.sleep(5)
 
@@ -264,7 +281,6 @@ def process_sku(driver, sku):
             if current_price:
                 prices.append(current_price)
                 print(f"   💰 數量 {qty}: SGD {current_price}")
-                # 截圖存入資料夾
                 driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}.png")
             else:
                 print("   ⚠️ 找不到價格欄位")
@@ -307,7 +323,7 @@ def process_sku(driver, sku):
         shutil.rmtree(sku_folder)
         os.remove(zip_path)
 
-        return prices, drive_link
+        return prices, drive_link, product_url
 
     except Exception as e:
         print(f"❌ 發生錯誤: {e}")
@@ -317,7 +333,7 @@ def process_sku(driver, sku):
             empty_cart(driver)
         except:
             pass
-        return ["Error"] * 5, "上傳失敗"
+        return ["Error"] * 5, "上傳失敗", product_url
 
 # ================= 主程式 =================
 def main():
@@ -345,20 +361,20 @@ def main():
                 safe_get(row_data, 6)  # G
             ]
 
-            # 執行爬蟲，回傳 (價格List, Drive連結)
-            web_prices, drive_link = process_sku(driver, sku)
+            # 執行爬蟲，回傳 (價格, 雲端連結, 商品網址)
+            web_prices, drive_link, product_url = process_sku(driver, sku)
             
             update_time = get_taiwan_time_display()
             comparison_result = compare_prices(user_prices, web_prices)
             
-            # 寫入: H~L (Prices) + M (Time) + N (Result) + O (Link)
-            data_to_write = web_prices + [update_time, comparison_result, drive_link]
+            # 寫入: H~L (Prices) + M (Time) + N (Result) + O (Drive Link) + P (Product URL)
+            data_to_write = web_prices + [update_time, comparison_result, drive_link, product_url]
             
-            # 寫入到 O 欄 (第15欄)
-            cell_range = f"H{i}:O{i}"
+            # 寫入到 P 欄 (第16欄)
+            cell_range = f"H{i}:P{i}"
             sheet.update(values=[data_to_write], range_name=cell_range)
             
-            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result} | Link: {drive_link}")
+            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result} | Link: {drive_link} | URL: {product_url}")
             print("-" * 30)
 
         print("🎉 所有任務完成！")
