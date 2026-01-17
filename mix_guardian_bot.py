@@ -4,6 +4,7 @@ import re
 import os
 import shutil
 import smtplib
+import math
 from itertools import cycle
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -201,9 +202,9 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         print(f"      ❌ 加入過程發生錯誤: {e}")
         return False
 
-# ================= Task 2: Mix & Match (自動遞補 + 缺貨標記) =================
+# ================= Task 2: Mix & Match (全階層 2-5 & 主料優先 & 檔期過濾) =================
 def sync_mix_match_data(client):
-    print("🔄 [Task 2] 同步 Mix & Match 資料...")
+    print("🔄 [Task 2] 同步 Mix & Match 資料 (擴充 Qty 2~5)...")
     promo_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_PROMO)
     try:
         mix_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_MIX)
@@ -224,11 +225,33 @@ def sync_mix_match_data(client):
             end_str = safe_get(row, 9)
             d_start = parse_date(start_str)
             d_end = parse_date(end_str)
-            if d_start and d_end and not (d_start <= today <= d_end): continue 
+            
+            # === [新增] 檔期判斷：如果非檔期，只顯示一列並標記，不產生後續 Qty 2-5 ===
+            is_valid_date = True
+            date_note = ""
+            if d_start and d_end and not (d_start <= today <= d_end):
+                is_valid_date = False
+                date_note = f"⚠️主商品非上架期間 ({d_start.strftime('%m/%d')}~{d_end.strftime('%m/%d')})"
+            elif d_start and not d_end and today < d_start:
+                is_valid_date = False
+                date_note = f"⚠️主商品非上架期間 (尚未開始)"
 
             main_sku = safe_get(row, 11).replace("'", "").strip()
             if len(main_sku) > 6: main_sku = main_sku[-6:]
             prod_name = safe_get(row, 12)
+
+            # 解析規則 (即使日期無效也要解析一下，為了填欄位)
+            matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', desc)
+            rule_text_display = desc[:20] + "..." if len(desc)>20 else desc
+            if matches:
+                # 簡單取最後一個當代表
+                rule_text_display = f"{matches[-1][0]} For ${matches[-1][1]}"
+
+            # 如果日期無效，寫入單行提示並跳過
+            if not is_valid_date:
+                row_data = [main_sku, prod_name, rule_text_display, "", "", "", "", date_note, "", ""]
+                new_data.append(row_data)
+                continue # ★直接換下一個商品，不跑下面的 Qty 2-5★
 
             partners = []
             match_partners = re.search(r'Mix & Match\s*([\d,]+)', desc)
@@ -240,38 +263,56 @@ def sync_mix_match_data(client):
                     if p != main_sku: partners.append(p)
             
             if not partners: continue 
-
-            matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', desc)
             if not matches: continue
             
-            max_qty = 0
-            expected_price = 0.0
-            rule_text = ""
+            # 建立價格對照表
+            price_map = {}
             for q_str, p_str in matches:
-                q = int(q_str)
-                if q > max_qty:
-                    max_qty = q
-                    expected_price = float(p_str)
-                    rule_text = f"{q} For ${p_str}"
+                try: price_map[int(q_str)] = float(p_str)
+                except: continue
+            if not price_map: continue
 
+            best_unit_price = min([p/q for q, p in price_map.items()])
             pool = [main_sku] + partners
-            pool_cycle = cycle(pool)
-            strategy_dict = {}
-            for _ in range(max_qty):
-                item = next(pool_cycle)
-                strategy_dict[item] = strategy_dict.get(item, 0) + 1
             
-            strategy_str = "; ".join([f"{k}:{v}" for k, v in strategy_dict.items()])
+            # 產生 Qty 2 到 5
+            for target_qty in range(2, 6):
+                expected_price = 0.0
+                rule_text = ""
+                
+                if target_qty in price_map:
+                    expected_price = price_map[target_qty]
+                    rule_text = f"{target_qty} For ${expected_price}"
+                else:
+                    raw_total = best_unit_price * target_qty
+                    expected_price = int(raw_total * 10) / 10.0
+                    rule_text = f"Calculated (Unit: {best_unit_price:.2f})"
 
-            row_data = [main_sku, prod_name, rule_text, max_qty, strategy_str, str(expected_price), "", "", "", ""]
-            new_data.append(row_data)
+                current_cycle = cycle(pool)
+                strategy_dict = {}
+                for _ in range(target_qty):
+                    item = next(current_cycle)
+                    strategy_dict[item] = strategy_dict.get(item, 0) + 1
+                
+                strategy_str = "; ".join([f"{k}:{v}" for k, v in strategy_dict.items()])
+
+                row_data = [main_sku, prod_name, rule_text, target_qty, strategy_str, str(expected_price), "", "", "", ""]
+                new_data.append(row_data)
 
     mix_sheet.update(values=new_data, range_name="A1")
     print(f"✅ [Task 2] 已生成 {len(new_data)-1} 筆混搭測試案例")
     return len(new_data)-1
 
-def process_mix_case_dynamic(driver, strategy_str, target_total_qty):
+def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
+    """ 
+    動態處理混搭：
+    1. [優先] 檢查主商品是否存在。若無 -> 終止。
+    2. 檢查其他商品。
+    3. 重新分配。
+    4. [新增] 檢查如果只剩主商品 -> 終止。
+    """
     empty_cart(driver)
+    
     raw_items = strategy_str.split(';')
     unique_skus = []
     for item in raw_items:
@@ -282,20 +323,35 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty):
     if not os.path.exists(folder_name): os.makedirs(folder_name)
     
     available_skus = []
-    missing_skus = [] # 新增：記錄缺貨清單
+    missing_skus = [] 
     
     print(f"   🕵️ 正在檢查商品庫存狀況...")
     
+    # 優先檢查 Main SKU
+    if not check_item_exists(driver, main_sku):
+        print(f"   🛑 主商品 {main_sku} 搜尋不到，跳過此測試")
+        return "Main Missing", "", None, [main_sku]
+    
+    available_skus.append(main_sku)
+    
+    # 檢查其他夥伴
     for sku in unique_skus:
+        if sku == main_sku: continue 
+        
         if check_item_exists(driver, sku):
             available_skus.append(sku)
         else:
-            print(f"   ⚠️ 商品 {sku} 搜尋不到，將從混搭名單移除")
+            print(f"   ⚠️ 混搭商品 {sku} 搜尋不到，將移除")
             missing_skus.append(sku)
-            
-    if not available_skus:
-        return "Error (All Missing)", "", None, missing_skus
+    
+    # === [新增] 檢查是否只剩主商品 ===
+    # 如果 available_skus 長度為 1 (只有主商品)，且本來 unique_skus 數量 > 1 (表示本來有要混搭)
+    # 這代表所有 MIX 商品都缺貨了
+    if len(available_skus) == 1 and len(unique_skus) > 1:
+        print(f"   🛑 所有 MIX 商品皆從缺，只剩主料，停止比較")
+        return "Only Main", "", None, missing_skus
 
+    # 重新分配
     final_strategy = {}
     pool_cycle = cycle(available_skus)
     for _ in range(target_total_qty):
@@ -325,7 +381,7 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty):
             EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
         )
     except TimeoutException:
-        print("   ⚠️ 等待購物車載入超時，嘗試直接抓取")
+        print("   ⚠️ 等待購物車載入超時")
     
     time.sleep(2) 
     
@@ -340,12 +396,11 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty):
         
     if not total_price: total_price = "Error"
     
-    screenshot_name = f"Mix_{first_sku}_Total.png"
+    screenshot_name = f"Mix_{main_sku}_Total.png"
     driver.save_screenshot(f"{folder_name}/{screenshot_name}")
     
     zip_path = create_zip_evidence("Mix_Evidence", folder_name)
     
-    # 回傳多了 missing_skus
     return total_price, main_url, zip_path, missing_skus
 
 def run_mix_match_task(client, driver):
@@ -363,24 +418,36 @@ def run_mix_match_task(client, driver):
 
     for i, row in enumerate(all_values[1:], start=2):
         main_sku = row[0]
+        # 檢查 Result 欄位 (index 7)，如果已經有非上架標記，則跳過
+        pre_result = safe_get(row, 7)
+        if "主商品非上架期間" in pre_result:
+            print(f"   ⚠️ {main_sku}: 非上架期間，跳過")
+            # 還是要更新時間證明有跑過
+            sheet.update_cell(i, 9, get_taiwan_time_display()) # Update Time
+            results_for_mail.append([main_sku, row[1], pre_result, get_taiwan_time_display()])
+            continue
+
         original_strategy = row[4]
         target_qty = int(row[3])
         expected = float(row[5])
         
-        print(f"   🧪 測試: {original_strategy} (目標 {target_qty} 個)")
+        print(f"   🧪 測試: {main_sku} Qty:{target_qty} (預期 ${expected})")
         
-        # 接收缺貨清單
-        web_total, link, zip_file, missing_list = process_mix_case_dynamic(driver, original_strategy, target_qty)
+        web_total, link, zip_file, missing_list = process_mix_case_dynamic(driver, original_strategy, target_qty, main_sku)
         
-        # 產生缺貨標記文字
         missing_note = ""
-        if missing_list:
-            missing_note = f" (⚠️缺: {','.join(missing_list)})"
+        if missing_list: missing_note = f" (⚠️缺: {','.join(missing_list)})"
         
         is_error = False
         result_text = ""
         
-        if "Fail" in web_total or "Error" in web_total:
+        if web_total == "Main Missing":
+            result_text = f"(⚠️主料從缺: {main_sku})"
+            # 主料缺貨不算比對失敗，不影響 all_match
+        elif web_total == "Only Main":
+            result_text = f"(⚠️MIX全缺: 只剩主料){missing_note}"
+            # 只剩主料也不算比對失敗，因為單主料由另一個bot負責
+        elif "Fail" in web_total or "Error" in web_total:
             result_text = f"🔥 錯誤 ({web_total}){missing_note}"
             is_error = True
         else:
@@ -397,10 +464,9 @@ def run_mix_match_task(client, driver):
 
         if is_error:
             all_match = False
-            error_summary.append(f"{main_sku}: {result_text}")
+            error_summary.append(f"{main_sku} (Qty{target_qty}): {result_text}")
             if zip_file: attachments.append(zip_file)
         else:
-            # 如果正常，這裡可以選擇是否保留 zip
             pass
 
         update_time = get_taiwan_time_display()
@@ -425,7 +491,7 @@ def send_email_generic(subject, summary, data_rows, attachments):
     for r in data_rows:
         bg = "#fff"
         if "🔥" in r[2] or "Diff" in r[2] or "Error" in r[2] or "Limit" in r[2]: bg = "#ffebee"
-        elif "⚠️缺" in r[2]: bg = "#fff3e0" # 缺貨但價格對，給黃色提醒
+        elif "⚠️" in r[2]: bg = "#fff3e0"
         
         table_html += f"<tr style='background:{bg}'><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td></tr>"
     table_html += "</table>"
@@ -460,7 +526,6 @@ def main():
         client = connect_google_sheet()
         driver = init_driver()
         
-        # === 唯一執行的任務：Mix & Match ===
         run_mix_match_task(client, driver)
         
         driver.quit()
