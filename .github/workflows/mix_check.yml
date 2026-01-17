@@ -1,0 +1,48 @@
+name: Mix Match Check # [修改點 1] 顯示在 GitHub Actions 列表的名稱
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 每天台灣時間早上 10 點執行 (UTC 02:00)
+  workflow_dispatch:    # 允許手動點擊按鈕執行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Chrome
+      uses: browser-actions/setup-chrome@latest
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install selenium webdriver-manager gspread oauth2client
+
+    - name: Create credentials file
+      run: |
+        echo "${{ secrets.GDRIVE_API_CREDENTIALS }}" > google_key.json
+      # 請確保您的 Repo Secrets 裡有名為 GDRIVE_API_CREDENTIALS 的金鑰
+
+    - name: Run Mix Match Bot
+      env:
+        MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+        MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+      # [修改點 2] 這裡指向您的新檔案名稱
+      run: python mix_guardian_bot.py 
+
+    - name: Upload Artifacts (Optional)
+      # 如果有發生錯誤產生截圖，也可以上傳到 GitHub Artifacts 備份
+      if: always() 
+      uses: actions/upload-artifact@v4
+      with:
+        name: screenshots
+        path: mix_temp/ 
+        retention-days: 5
