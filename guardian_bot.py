@@ -131,6 +131,7 @@ def sync_promotion_data(client):
         elif d_start and not d_end:
              if today < d_start: date_status = f"⚠️ 尚未開始 (起:{d_start.strftime('%m/%d')})"
         
+        # 寫入 N 欄 (Index 13) 供 main 讀取
         row_data = [sku, prod_name] + user_prices + [""] * 6 + [date_status] + [""]
         new_rows.append(row_data)
 
@@ -165,7 +166,8 @@ def generate_html_table(data_rows):
         result = safe_get(row, 13)
         
         bg_color = "#ffffff"
-        if "Diff" in result or "異常" in result: bg_color = "#ffebee" 
+        if "商品未上架" in result: bg_color = "#eeeeee" # 灰色
+        elif "Diff" in result or "異常" in result: bg_color = "#ffebee" 
         elif "非檔期" in result or "尚未開始" in result: bg_color = "#fff3e0" 
             
         table_html += f"<tr style='background-color: {bg_color};'>"
@@ -185,7 +187,6 @@ def send_notification_email(all_match, error_summary, full_data):
 
     print("📧 正在發送通知郵件...")
     
-    # 判斷是否達上限
     has_limit_reached = False
     if full_data:
         for row in full_data:
@@ -215,14 +216,11 @@ def send_notification_email(all_match, error_summary, full_data):
         color = "green" 
         summary_text = "所有商品價格比對結果均相符。"
 
-    # === 新增：產生日期字串 (例如 1/17(六)) ===
     now = get_taiwan_time_now()
     weekdays = ["(一)", "(二)", "(三)", "(四)", "(五)", "(六)", "(日)"]
     date_str = f"{now.month}/{now.day}{weekdays[now.weekday()]}"
 
-    # 組合最終主旨 (日期 + 圖示 + 主旨)
     final_subject = f"{date_str}{subject_prefix}{subject_text}"
-    
     snapshot_table = generate_html_table(full_data)
 
     msg = MIMEMultipart()
@@ -266,10 +264,30 @@ def validate_user_inputs(user_prices):
         except: return f"異常:User含非數值({p})"
     return None
 
-def compare_prices(user_prices, web_prices):
+def compare_prices(user_prices, web_prices, product_url):
     user_validation_error = validate_user_inputs(user_prices)
     if user_validation_error: return user_validation_error
 
+    # === 新增：檢查 URL 是否為 Not Found ===
+    if "Not Found" in product_url:
+        # 檢查 web_prices 是否有抓到任何有效價格
+        has_any_price = False
+        for p in web_prices:
+            # 排除所有可能的錯誤字串
+            if p and p not in ["Error", "Search Fail", "Not Found", "Add Fail", "Click Fail", "Limit Reached"]:
+                # 再確認一下是否能轉成數字，以防萬一
+                try:
+                    float(p)
+                    has_any_price = True
+                    break
+                except: pass
+        
+        if has_any_price:
+            return "該商品未上架，但是卻有商品價格請確認!"
+        else:
+            return "該商品未上架"
+
+    # === 正常的比對邏輯 ===
     mismatches = []
     valid_comparison_count = 0
 
@@ -572,7 +590,6 @@ def main():
             sku = sku.replace("'", "").replace('"', '').strip() 
             if not sku: continue
             
-            # 讀取日期狀態
             date_status = safe_get(row_data, 13)
             
             if "非檔期" in date_status or "尚未開始" in date_status:
@@ -582,7 +599,8 @@ def main():
 
             web_prices, product_url = process_sku(driver, sku)
             update_time = get_taiwan_time_display()
-            comparison_result = compare_prices(user_prices, web_prices)
+            # === 更新 main: 傳遞 product_url 到 compare_prices ===
+            comparison_result = compare_prices(user_prices, web_prices, product_url)
             
             if date_status:
                 comparison_result = f"{date_status} | {comparison_result}"
@@ -594,7 +612,9 @@ def main():
             print(f"✅ SKU {sku} 完成 | 結果: {comparison_result}")
             print("-" * 30)
 
-            if "均相符" not in comparison_result:
+            if "均相符" not in comparison_result and "該商品未上架" not in comparison_result:
+                # 注意: "該商品未上架" (正常) 不應被視為 error_summary，但如果有價格異常則算
+                # 如果是 "該商品未上架，但是卻有商品價格請確認!" 則會因為不包含 "均相符" 且比較長而被加入
                 overall_status_match = False
                 error_summary_list.append(f"SKU {sku}: {comparison_result}")
             
