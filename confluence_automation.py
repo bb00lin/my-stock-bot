@@ -10,12 +10,12 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # --- 設定區 (從環境變數讀取，確保安全) ---
 URL = os.environ.get("CONF_URL")  # Confluence 網址
 USERNAME = os.environ.get("CONF_USER") # 您的 Email
-PASSWORD = os.environ.get("CONF_PASS") # 您的 API Token
+PASSWORD = os.environ.get("CONF_PASS") # 【注意】這裡必須是「真正的登入密碼」，不能是 API Token
 
 # --- 日期計算邏輯 ---
 def get_target_dates():
@@ -53,17 +53,15 @@ def init_driver():
     return driver
 
 def login(driver):
-    """執行 Atlassian 登入流程 (增強版)"""
+    """執行 Atlassian 登入流程 (含錯誤偵測)"""
     print(f"正在前往: {URL}")
     driver.get(URL)
     wait = WebDriverWait(driver, 30)
     
     try:
         print("等待輸入帳號...")
-        # 【修正點】使用更寬鬆的選擇器，不只依賴 id="username"
-        # 尋找任何 id 是 username, name 是 username 或 type 是 email 的欄位
+        # 寬鬆選擇器：尋找 id="username", name="username" 或 type="email"
         email_selector = (By.XPATH, "//input[@id='username' or @name='username' or @type='email']")
-        
         email_field = wait.until(EC.element_to_be_clickable(email_selector))
         email_field.clear()
         email_field.send_keys(USERNAME)
@@ -82,46 +80,44 @@ def login(driver):
         login_btn = driver.find_element(By.ID, "login-submit")
         login_btn.click()
         
-        # 驗證登入是否成功 (等待 URL 變化或標題變化)
-        print("登入資訊已送出，等待頁面跳轉...")
-        time.sleep(15)
+        print("登入資訊已送出，等待頁面跳轉 (最多等待 20 秒)...")
+        time.sleep(5) # 先等一下讓後端處理
         
-        # 簡單檢查：如果標題還停留在 Login，可能失敗了
-        if "Log in" in driver.title:
-            print(f"警告：瀏覽器標題仍為 '{driver.title}'，可能卡在兩步驟驗證或載入過慢。")
-        else:
-            print(f"登入似乎成功，當前標題: {driver.title}")
-
+        # 檢查是否成功跳轉 (標題不再包含 "Log in")
+        # 這裡用一個小迴圈每秒檢查一次
+        for i in range(15):
+            if "Log in" not in driver.title and "Atlassian account" not in driver.title:
+                print(f"登入成功！當前標題: {driver.title}")
+                return
+            
+            # 檢查是否有錯誤訊息出現
+            try:
+                # 嘗試抓取常見的錯誤提示元素 (Atlassian 通常用 form-error 或 error-summary)
+                error_elements = driver.find_elements(By.XPATH, "//*[contains(@id, 'error') or contains(@class, 'error')]")
+                for err in error_elements:
+                    if err.is_displayed() and len(err.text) > 5:
+                        print(f"!!! 偵測到登入錯誤提示: {err.text} !!!")
+                        print("如果是 'Incorrect email or password'，請確認您的 CONF_PASS 是否為真正的密碼 (非 API Token)。")
+                        raise Exception("Login Failed with Error Message")
+            except NoSuchElementException:
+                pass
+                
+            time.sleep(1)
+            
+        # 如果跑完迴圈還沒跳轉
+        print(f"警告：等待逾時，瀏覽器標題仍為 '{driver.title}'")
+        print("可能原因：1. 密碼錯誤  2. 需要兩步驟驗證 (2FA)  3. 網頁載入極慢")
+        
     except TimeoutException:
-        print("\n!!! 嚴重錯誤：登入逾時 !!!")
+        print("\n!!! 嚴重錯誤：找不到登入欄位或操作逾時 !!!")
         print(f"當前瀏覽器標題: {driver.title}")
-        # 嘗試印出頁面原始碼的一小部分，幫助除錯
-        try:
-            print("頁面原始碼片段 (前500字):")
-            print(driver.page_source[:500])
-        except:
-            pass
-        driver.save_screenshot("login_error_debug.png")
+        driver.save_screenshot("login_timeout.png")
         raise
 
 def update_jira_macros(driver, date_info):
     """
-    更新 Jira 表格的核心邏輯
-    注意：此函式在本次測試中不會被呼叫，以確保安全。
+    更新 Jira 表格的核心邏輯 (目前不執行)
     """
-    wait = WebDriverWait(driver, 20)
-    macro_locator = (By.CSS_SELECTOR, "div[data-prosemirror-node-name='blockCard']")
-    
-    try:
-        wait.until(EC.presence_of_element_located(macro_locator))
-    except TimeoutException:
-        print("找不到 Jira 表格，跳過。")
-        return
-
-    macros = driver.find_elements(*macro_locator)
-    print(f"共發現 {len(macros)} 個 Jira 表格...")
-
-    # (此處省略具體編輯代碼，因為目前不執行)
     pass
 
 def main():
@@ -135,17 +131,16 @@ def main():
         login(driver)
         
         # ----------------------------------------------------
-        # 安全鎖：以下代碼已被註解，確保不會修改您的 Confluence 內容
+        # 安全鎖：編輯功能暫時關閉
         # ----------------------------------------------------
-        
-        # print("準備進入編輯模式...")
         # driver.get("您的目標頁面編輯網址")
         # update_jira_macros(driver, dates)
         
-        print(">>> 測試結束：登入流程已執行，未進行任何編輯操作。 <<<")
+        print(">>> 測試結束 <<<")
         
     except Exception as e:
-        print(f"執行過程中發生未預期的錯誤: {str(e)}")
+        print(f"執行失敗: {str(e)}")
+        # 截圖以供檢查
         driver.save_screenshot("fatal_error.png")
     finally:
         print("關閉瀏覽器...")
