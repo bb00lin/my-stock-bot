@@ -25,7 +25,7 @@ WORKSHEET_MAIN = '工作表1'
 WORKSHEET_MIX = 'Mix_Match_Check' 
 WORKSHEET_PROMO = 'promotion'
 
-# ★★★ 請確認此網址正確 ★★★
+# 請確認此網址正確
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/您的試算表ID/edit"
 
 CREDENTIALS_FILE = 'google_key.json'
@@ -71,7 +71,7 @@ def create_zip_evidence(sku, sku_folder):
         return zip_path
     except: return None
 
-# ================= Google Sheet 連線 (已補回) =================
+# ================= Google Sheet 連線 =================
 def connect_google_sheet():
     print("📊 正在連線 Google Sheet...")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -117,7 +117,6 @@ def empty_cart(driver):
     except: pass
 
 def get_total_price_safely(driver):
-    """ 抓取購物車總金額 (Total) """
     try:
         total_element = driver.find_element(By.XPATH, "//span[contains(@class, 'priceSummary-totalPrice')]")
         return clean_price(total_element.text)
@@ -129,14 +128,12 @@ def get_total_price_safely(driver):
     return None
 
 def add_single_item_to_cart(driver, sku, qty_needed=1):
-    """ 搜尋並加入單一商品到購物車 (不進入購物車頁面) """
     print(f"   ➕ 加入商品: {sku} x {qty_needed}")
     try:
         driver.get(URL)
         time.sleep(3)
         handle_popups(driver)
 
-        # 搜尋
         search_input = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, "input[placeholder*='Search'], input[name='q']")))
         driver.execute_script("arguments[0].value = '';", search_input)
         search_input.send_keys(sku)
@@ -145,7 +142,6 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         time.sleep(3)
         handle_popups(driver)
 
-        # 點擊
         try:
             xpath_sku = f"//a[contains(@href, '{sku}')]"
             xpath_generic = "(//div[contains(@class, 'product')]//a)[1]"
@@ -162,8 +158,6 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         
         try:
             add_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart'], button.action.tocart")))
-            
-            # 調整數量輸入框
             try:
                 qty_input = driver.find_element(By.CSS_SELECTOR, "input[name='qty']")
                 driver.execute_script("arguments[0].value = arguments[1];", qty_input, str(qty_needed))
@@ -181,7 +175,7 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         print(f"      ❌ 加入過程發生錯誤: {e}")
         return False
 
-# ================= Task 1: 單一商品檢查 (原功能) =================
+# ================= Task 1: 單一商品檢查 =================
 def parse_promo_string(promo_text):
     if not promo_text: return ["", "", "", "", ""]
     matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', promo_text)
@@ -204,7 +198,6 @@ def parse_promo_string(promo_text):
     return calculated_prices
 
 def process_sku_single(driver, sku):
-    """ 原本的單商品爬蟲流程 """
     print(f"\n🔍 [Task 1] 開始搜尋 SKU: {sku}")
     prices = [] 
     product_url = "" 
@@ -218,7 +211,6 @@ def process_sku_single(driver, sku):
         time.sleep(5)
         handle_popups(driver)
         
-        # 搜尋
         search_input = WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.CSS_SELECTOR, "input[placeholder*='Search'], input[name='q']")))
         driver.execute_script("arguments[0].value = '';", search_input)
         search_input.send_keys(sku)
@@ -226,7 +218,6 @@ def process_sku_single(driver, sku):
         time.sleep(5)
         handle_popups(driver)
 
-        # 點擊
         try:
             xpath = f"//a[contains(@href, '{sku}')]"
             try: link = driver.find_element(By.XPATH, xpath)
@@ -240,22 +231,23 @@ def process_sku_single(driver, sku):
         time.sleep(3)
         product_url = driver.current_url
         if "search.html" in product_url:
+            driver.save_screenshot(f"{sku_folder}/{sku}_click_fail.png")
+            generated_zip = create_zip_evidence(sku, sku_folder)
             return ["Click Fail"]*5, product_url, generated_zip
 
-        # 加入購物車
         try:
             add_btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart'], button.action.tocart")))
             driver.execute_script("arguments[0].click();", add_btn)
             time.sleep(5)
             driver.get("https://guardian.com.sg/cart")
         except:
+            driver.save_screenshot(f"{sku_folder}/{sku}_add_fail.png")
+            generated_zip = create_zip_evidence(sku, sku_folder)
             return ["Add Fail"]*5, product_url, generated_zip
 
         time.sleep(5)
 
-        # 1~5 數量循環
         for qty in range(1, 6):
-            # 數量驗證 (簡化版)
             try:
                 qty_input = driver.find_element(By.CSS_SELECTOR, "input[data-role='cart-item-qty'], input.input-text.qty")
                 for _ in range(5):
@@ -268,7 +260,6 @@ def process_sku_single(driver, sku):
             
             price = get_total_price_safely(driver)
             
-            # 檢查是否達上限
             try:
                 err = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')]")
                 if err.is_displayed():
@@ -294,12 +285,15 @@ def process_sku_single(driver, sku):
 
     except Exception as e:
         print(f"❌ Error: {e}")
+        try:
+            driver.save_screenshot(f"{sku_folder}/{sku}_exception.png")
+            generated_zip = create_zip_evidence(sku, sku_folder)
+        except: pass
         empty_cart(driver)
         return ["Error"]*5, product_url, generated_zip
 
-# ================= Task 2: Mix & Match (新功能) =================
+# ================= Task 2: Mix & Match =================
 def sync_mix_match_data(client):
-    """ 讀取 Promotion，找出 Mix & Match，生成測試案例寫入 Sheet2 """
     print("🔄 [Task 2] 同步 Mix & Match 資料...")
     promo_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_PROMO)
     try:
@@ -307,7 +301,6 @@ def sync_mix_match_data(client):
     except:
         mix_sheet = client.open(SPREADSHEET_FILE_NAME).add_worksheet(title=WORKSHEET_MIX, rows=100, cols=20)
 
-    # 清空舊資料並寫入標題
     mix_sheet.clear()
     headers = ["Main SKU", "Product Name", "Promo Rule", "Target Qty", "Mix Strategy", "Expected Price", "Web Total Price", "Result", "Update Time", "Main Link"]
     
@@ -315,9 +308,8 @@ def sync_mix_match_data(client):
     new_data = [headers]
     today = get_taiwan_time_now().date()
 
-    # 從第7列開始 (Index 6)
     for row in rows[6:]:
-        desc = safe_get(row, 6) # G欄
+        desc = safe_get(row, 6) 
         
         if "Mix & Match" in desc:
             start_str = safe_get(row, 8)
@@ -325,8 +317,7 @@ def sync_mix_match_data(client):
             d_start = parse_date(start_str)
             d_end = parse_date(end_str)
             
-            if d_start and d_end and not (d_start <= today <= d_end):
-                continue 
+            if d_start and d_end and not (d_start <= today <= d_end): continue 
 
             main_sku = safe_get(row, 11).replace("'", "").strip()
             if len(main_sku) > 6: main_sku = main_sku[-6:]
@@ -349,7 +340,6 @@ def sync_mix_match_data(client):
             max_qty = 0
             expected_price = 0.0
             rule_text = ""
-            
             for q_str, p_str in matches:
                 q = int(q_str)
                 if q > max_qty:
@@ -359,7 +349,6 @@ def sync_mix_match_data(client):
 
             pool = [main_sku] + partners
             pool_cycle = cycle(pool)
-            
             strategy_dict = {}
             for _ in range(max_qty):
                 item = next(pool_cycle)
@@ -367,10 +356,7 @@ def sync_mix_match_data(client):
             
             strategy_str = "; ".join([f"{k}:{v}" for k, v in strategy_dict.items()])
 
-            row_data = [
-                main_sku, prod_name, rule_text, max_qty, strategy_str, 
-                str(expected_price), "", "", "", "" 
-            ]
+            row_data = [main_sku, prod_name, rule_text, max_qty, strategy_str, str(expected_price), "", "", "", ""]
             new_data.append(row_data)
 
     mix_sheet.update(values=new_data, range_name="A1")
@@ -378,13 +364,10 @@ def sync_mix_match_data(client):
     return len(new_data)-1
 
 def process_mix_case(driver, strategy_str):
-    """ 執行混搭加入購物車 """
     empty_cart(driver)
-    
     items = strategy_str.split(';')
     folder_name = "mix_temp"
     if not os.path.exists(folder_name): os.makedirs(folder_name)
-    
     main_url = ""
     
     for item in items:
@@ -395,7 +378,10 @@ def process_mix_case(driver, strategy_str):
             
             success = add_single_item_to_cart(driver, sku, qty)
             if not success:
-                return "Add Fail", "", None
+                # 失敗也要截圖
+                driver.save_screenshot(f"{folder_name}/Add_Fail_{sku}.png")
+                zip_path = create_zip_evidence("Mix_Error", folder_name)
+                return "Add Fail", "", zip_path
             
             if not main_url: main_url = driver.current_url 
             
@@ -413,17 +399,14 @@ def process_mix_case(driver, strategy_str):
     driver.save_screenshot(f"{folder_name}/{screenshot_name}")
     
     zip_path = create_zip_evidence("Mix_Evidence", folder_name)
-    
     return total_price, main_url, zip_path
 
 def run_mix_match_task(client, driver):
-    """ 執行 Mix & Match 完整任務流程 """
     row_count = sync_mix_match_data(client)
     if row_count == 0: return [], [], True
 
     sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_MIX)
     all_values = sheet.get_all_values()
-    
     results_for_mail = []
     attachments = []
     all_match = True
@@ -440,44 +423,64 @@ def run_mix_match_task(client, driver):
         
         web_total, link, zip_file = process_mix_case(driver, strategy)
         
-        if zip_file: attachments.append(zip_file)
-        
+        # === Mix Match 智慧過濾：只夾帶有問題的 ===
+        # 如果 zip_file 存在，但結果是"Add Fail"或算錯，才加入
+        is_error = False
         result_text = ""
-        try:
-            web_val = float(web_total)
-            if abs(web_val - expected) < 0.05:
-                result_text = "✅ 相符"
-            else:
-                result_text = f"🔥 差異 (Exp:{expected} != Web:{web_val})"
-                all_match = False
-                error_summary.append(f"{main_sku}: {result_text}")
-        except:
-            result_text = f"🔥 錯誤 ({web_total})"
+        
+        if web_total == "Add Fail":
+            result_text = "🔥 錯誤 (Add Fail)"
+            is_error = True
+        elif web_total == "Error":
+            result_text = "🔥 錯誤 (Cart Error)"
+            is_error = True
+        else:
+            try:
+                web_val = float(web_total)
+                if abs(web_val - expected) < 0.05:
+                    result_text = "✅ 相符"
+                else:
+                    result_text = f"🔥 差異 (Exp:{expected} != Web:{web_val})"
+                    is_error = True
+            except:
+                result_text = f"🔥 錯誤 ({web_total})"
+                is_error = True
+
+        if is_error:
             all_match = False
-            error_summary.append(f"{main_sku}: {web_total}")
+            error_summary.append(f"{main_sku}: {result_text}")
+            if zip_file: attachments.append(zip_file)
+        else:
+            # 如果正常，刪除 zip 節省空間
+            if zip_file: 
+                try: os.remove(zip_file)
+                except: pass
 
         update_time = get_taiwan_time_display()
-        
         sheet.update(values=[[web_total, result_text, update_time, link]], range_name=f"G{i}:J{i}")
-        
         results_for_mail.append([main_sku, row[1], result_text, update_time])
 
     subject_prefix = "✅" if all_match else "🔥"
-    subject = f"{get_taiwan_time_now().strftime('%m/%d(%a)')}{subject_prefix} [Ozio Mix & Match比對結果]"
+    date_info = f"{get_taiwan_time_now().strftime('%m/%d(%a)')}"
+    subject = f"{date_info}{subject_prefix}[Ozio Mix & Match比對結果]"
     
     summary_text = "所有混搭組合價格均相符。" if all_match else f"發現混搭價格異常。<br>{'<br>'.join(error_summary)}"
     
     send_email_generic(subject, summary_text, results_for_mail, attachments)
+    
+    # 清理 Mix Match 附件
+    for f in attachments:
+        try: os.remove(f)
+        except: pass
 
 def send_email_generic(subject, summary, data_rows, attachments):
-    """ 通用的發信函式 """
     if not MAIL_USERNAME or not MAIL_PASSWORD: return
 
     table_html = "<table border='1' style='border-collapse:collapse;width:100%'>"
     table_html += "<tr style='background:#f2f2f2'><th>SKU</th><th>商品</th><th>結果</th><th>時間</th></tr>"
     for r in data_rows:
         bg = "#fff"
-        if "🔥" in r[2]: bg = "#ffebee"
+        if "🔥" in r[2] or "Diff" in r[2] or "Error" in r[2] or "Limit" in r[2]: bg = "#ffebee"
         table_html += f"<tr style='background:{bg}'><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td></tr>"
     table_html += "</table>"
 
@@ -508,7 +511,6 @@ def send_email_generic(subject, summary, data_rows, attachments):
 
 # ================= 主程式 (雙任務) =================
 def run_task_1(client, driver):
-    """ 執行原本的單商品檢查 """
     print("\n🟢 [Task 1] 啟動單商品檢查...")
     
     sheet_main = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_MAIN)
@@ -518,7 +520,7 @@ def run_task_1(client, driver):
     new_rows = []
     today = get_taiwan_time_now().date()
     
-    for row in all_promos[6:]: # data start row 7
+    for row in all_promos[6:]: 
         raw_sku = safe_get(row, 11)
         if not raw_sku: continue
         sku = raw_sku.replace("'", "").strip()[-6:]
@@ -549,28 +551,42 @@ def run_task_1(client, driver):
         date_status = row[13]
         
         web_prices, link, zip_f = process_sku_single(driver, sku)
-        if zip_f: attachments.append(zip_f)
         
         user_prices = row[2:7]
         mismatches = []
+        is_abnormal = False
         
         if "Not Found" in link:
              has_p = any(p and p not in ["Error","Search Fail"] for p in web_prices)
              res = "該商品未上架，但是卻有商品價格請確認!" if has_p else "該商品未上架"
+             if has_p: is_abnormal = True # 雖未上架但有價格->異常
         else:
             for idx, up in enumerate(user_prices):
                 wp = web_prices[idx]
-                if wp == "Limit Reached" and up: mismatches.append("Limit")
+                if wp == "Limit Reached" and up: 
+                    mismatches.append("Limit")
+                    is_abnormal = True
                 elif clean_price(up) != clean_price(wp):
                     try: 
                         if abs(float(clean_price(up)) - float(clean_price(wp))) > 0.01:
                             mismatches.append("Diff")
-                    except: mismatches.append("Diff")
+                            is_abnormal = True
+                    except: 
+                        mismatches.append("Diff")
+                        is_abnormal = True
             
             res = "均相符" if not mismatches else "; ".join(mismatches)
 
         if date_status: res = f"{date_status} | {res}"
         
+        # === Task 1 智慧過濾：只夾帶異常附件 ===
+        if zip_f:
+            if is_abnormal or "Error" in res or "Fail" in res:
+                attachments.append(zip_f)
+            else:
+                try: os.remove(zip_f)
+                except: pass
+
         sheet_main.update(values=[web_prices + [get_taiwan_time_display(), res, link]], range_name=f"H{i}:O{i}")
         
         mail_data.append([sku, row[1], res, get_taiwan_time_display()])
@@ -581,7 +597,8 @@ def run_task_1(client, driver):
     print("📧 發送 Task 1 郵件...")
     has_limit = any("Limit" in str(r) for r in mail_data)
     prefix = "⚠️" if has_limit else ("✅" if all_match else "🔥")
-    subject = f"{get_taiwan_time_now().strftime('%m/%d(%a)')}{prefix} [Ozio比對結果-{'警告' if has_limit else ('正常' if all_match else '異常')}]"
+    date_info = f"{get_taiwan_time_now().strftime('%m/%d(%a)')}"
+    subject = f"{date_info}{prefix}[Ozio比對結果-{'警告' if has_limit else ('正常' if all_match else '異常')}]"
     if has_limit: subject += " 達購買上限/異常"
     elif all_match: subject += " 價格相符"
     else: subject += " 請檢查表格"
