@@ -26,9 +26,7 @@ WORKSHEET_MAIN = '工作表1'
 WORKSHEET_MIX = 'Mix_Match_Check' 
 WORKSHEET_PROMO = 'promotion'
 
-# ⚠️⚠️⚠️【請務必修改這裡】⚠️⚠️⚠️
-# 請將下方的網址換成您實際 Google Sheet 的網址 (瀏覽器網址列那串)
-# 否則信件中的連結會失效
+# [已修正] 使用您提供的正確 Google Sheet 網址
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgpoiwGE7tO-QSY2-kC_ecf868cY/edit?gid=1727836519#gid=1727836519"
 
 CREDENTIALS_FILE = 'google_key.json'
@@ -316,6 +314,7 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     # 1. 檢查主商品
     if not check_item_exists(driver, main_sku):
         print(f"   🛑 主商品 {main_sku} 搜尋不到")
+        # [已修正] Link 欄位會顯示 URL Not Found
         return "Main Missing", "URL Not Found", None, [main_sku], strategy_str
     
     available_skus.append(main_sku)
@@ -333,7 +332,6 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     if len(available_skus) == 1 and len(unique_skus_planned) > 1:
         print(f"   🛑 所有 MIX 商品皆從缺，只剩主料，停止比較")
         # 即使停止，也要回傳更新後的策略字串 (顯示 MIX:0)
-        # 這裡的邏輯是: 主料:1, 其他MIX:0 -> 總數不達標，但要顯示狀態
         final_display_parts = []
         for s in unique_skus_planned:
             if s == main_sku: final_display_parts.append(f"{s}:1")
@@ -344,7 +342,7 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
 
     # === 4. 重新分配邏輯 (滿足: 主商品固定1，剩下用現存MIX填滿) ===
     # 確保 final_strategy 初始
-    final_strategy = {sku: 0 for sku in unique_skus_planned} # 先把所有計畫中的都設為0
+    final_strategy = {sku: 0 for sku in unique_skus_planned} 
     
     # Step A: 主商品固定 1 個
     final_strategy[main_sku] = 1
@@ -354,9 +352,8 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     # 建立夥伴池 (排除 main_sku)
     partners_pool = [s for s in available_skus if s != main_sku]
     
-    # 如果沒有夥伴了 (前面已經擋過 Only Main，理論上這裡不會空，除非原本計畫就只有 Main)
+    # 如果沒有夥伴了 (前面已經擋過 Only Main，理論上這裡不會空)
     if not partners_pool:
-        # 如果原本計畫就是全買主商品 (e.g. unique只有main)，那就全填主商品
         fill_pool = [main_sku]
     else:
         fill_pool = partners_pool
@@ -458,8 +455,7 @@ def run_mix_match_task(client, driver):
         
         web_total, link, zip_file, missing_list, actual_strategy = process_mix_case_dynamic(driver, original_strategy, target_qty, main_sku)
         
-        # === [修正] 更新 Google Sheet 的 Strategy 欄位 (第 5 欄) ===
-        # 這樣表格就會顯示 630247:1; 621325:0; 632202:2
+        # === 更新 Google Sheet 的 Strategy 欄位 (第 5 欄) ===
         sheet.update_cell(i, 5, actual_strategy) 
 
         missing_note = ""
@@ -477,6 +473,7 @@ def run_mix_match_task(client, driver):
             is_error = False 
             
         elif web_total == "Only Main":
+            # [已修正] 增加 (忽略比較) 字樣
             result_text = f"⚠️MIX全缺: 只剩主料 (忽略比較)"
             is_error = False
             
