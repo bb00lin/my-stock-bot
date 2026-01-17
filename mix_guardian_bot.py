@@ -22,7 +22,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 # ================= 設定區 =================
 SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
 WORKSHEET_MAIN = '工作表1' 
-WORKSHEET_MIX = 'Mix_Match_Check'  # ★★★ 鎖定目標工作表 ★★★
+WORKSHEET_MIX = 'Mix_Match_Check' 
 WORKSHEET_PROMO = 'promotion'
 
 # 請確認此網址正確
@@ -66,6 +66,7 @@ def create_zip_evidence(sku, sku_folder):
         if not os.path.exists(sku_folder) or not os.listdir(sku_folder): return None
         timestamp = get_taiwan_time_str()
         zip_filename_base = f"{sku}_{timestamp}"
+        # 注意：make_archive 會回傳完整路徑 (例如 /home/runner/work/.../sku_time.zip)
         zip_path = shutil.make_archive(zip_filename_base, 'zip', sku_folder)
         shutil.rmtree(sku_folder) 
         return zip_path
@@ -372,9 +373,9 @@ def run_mix_match_task(client, driver):
             error_summary.append(f"{main_sku}: {result_text}")
             if zip_file: attachments.append(zip_file)
         else:
-            if zip_file: 
-                try: os.remove(zip_file)
-                except: pass
+            # 如果是正確的，可以選擇刪除或保留
+            # 這裡為了保險起見，我們不再刪除任何檔案，交給 GitHub Actions 清理
+            pass
 
         update_time = get_taiwan_time_display()
         sheet.update(values=[[web_total, result_text, update_time, link]], range_name=f"G{i}:J{i}")
@@ -388,9 +389,10 @@ def run_mix_match_task(client, driver):
     
     send_email_generic(subject, summary_text, results_for_mail, attachments)
     
-    for f in attachments:
-        try: os.remove(f)
-        except: pass
+    # === 移除原本的刪除邏輯，確保檔案留給 GitHub Action 上傳 ===
+    # for f in attachments:
+    #     try: os.remove(f)
+    #     except: pass
 
 def send_email_generic(subject, summary, data_rows, attachments):
     if not MAIL_USERNAME or not MAIL_PASSWORD: return
