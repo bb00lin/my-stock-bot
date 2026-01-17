@@ -131,7 +131,6 @@ def sync_promotion_data(client):
         elif d_start and not d_end:
              if today < d_start: date_status = f"⚠️ 尚未開始 (起:{d_start.strftime('%m/%d')})"
         
-        # 寫入 N 欄 (Index 13) 供 main 讀取
         row_data = [sku, prod_name] + user_prices + [""] * 6 + [date_status] + [""]
         new_rows.append(row_data)
 
@@ -186,6 +185,7 @@ def send_notification_email(all_match, error_summary, full_data):
 
     print("📧 正在發送通知郵件...")
     
+    # 判斷是否達上限
     has_limit_reached = False
     if full_data:
         for row in full_data:
@@ -215,7 +215,14 @@ def send_notification_email(all_match, error_summary, full_data):
         color = "green" 
         summary_text = "所有商品價格比對結果均相符。"
 
-    final_subject = f"{subject_prefix} {subject_text}"
+    # === 新增：產生日期字串 (例如 1/17(六)) ===
+    now = get_taiwan_time_now()
+    weekdays = ["(一)", "(二)", "(三)", "(四)", "(五)", "(六)", "(日)"]
+    date_str = f"{now.month}/{now.day}{weekdays[now.weekday()]}"
+
+    # 組合最終主旨 (日期 + 圖示 + 主旨)
+    final_subject = f"{date_str}{subject_prefix}{subject_text}"
+    
     snapshot_table = generate_html_table(full_data)
 
     msg = MIMEMultipart()
@@ -565,12 +572,11 @@ def main():
             sku = sku.replace("'", "").replace('"', '').strip() 
             if not sku: continue
             
-            # 讀取日期狀態 (Index 13)
+            # 讀取日期狀態
             date_status = safe_get(row_data, 13)
             
             if "非檔期" in date_status or "尚未開始" in date_status:
                 print(f"⚠️ SKU {sku} {date_status}，但仍執行爬蟲更新數據...")
-                # 不跳過，繼續執行
 
             user_prices = [safe_get(row_data, 2), safe_get(row_data, 3), safe_get(row_data, 4), safe_get(row_data, 5), safe_get(row_data, 6)]
 
@@ -578,7 +584,6 @@ def main():
             update_time = get_taiwan_time_display()
             comparison_result = compare_prices(user_prices, web_prices)
             
-            # 如果有日期狀態，將其合併到比對結果中
             if date_status:
                 comparison_result = f"{date_status} | {comparison_result}"
 
@@ -589,7 +594,6 @@ def main():
             print(f"✅ SKU {sku} 完成 | 結果: {comparison_result}")
             print("-" * 30)
 
-            # 更新整體狀態
             if "均相符" not in comparison_result:
                 overall_status_match = False
                 error_summary_list.append(f"SKU {sku}: {comparison_result}")
