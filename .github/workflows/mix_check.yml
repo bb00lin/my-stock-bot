@@ -6,7 +6,7 @@ on:
   workflow_dispatch:    # 允許手動點擊按鈕執行
 
 jobs:
-  build:
+  run_mix_bot:
     runs-on: ubuntu-latest
 
     steps:
@@ -16,7 +16,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.11' # 配合您原本成功的版本
 
     - name: Install Chrome
       uses: browser-actions/setup-chrome@latest
@@ -26,36 +26,33 @@ jobs:
         python -m pip install --upgrade pip
         pip install selenium webdriver-manager gspread oauth2client
 
+    # === ✨ 關鍵修正：參照您成功的 YML 寫法 ✨ ===
     - name: Create credentials file
+      env:
+        # 將 Secret 先存入環境變數，避免格式跑掉
+        GOOGLE_KEY: ${{ secrets.GOOGLE_SHEETS_JSON }}
       run: |
-        # 使用您截圖中確認的正確 Secret 名稱
-        echo "${{ secrets.GOOGLE_SHEETS_JSON }}" > google_key.json
-
-    # === ✨ 新增：檢查金鑰是否成功建立 (除錯用) ✨ ===
-    - name: Check google_key.json size
-      run: |
-        ls -l google_key.json
+        echo "$GOOGLE_KEY" > google_key.json
+        
+        # 檢查檔案是否建立成功
         if [ ! -s google_key.json ]; then
-          echo "❌ Error: google_key.json is empty! Please check your GitHub Secrets settings."
+          echo "❌ Error: google_key.json is empty! Check Secret Name."
           exit 1
         else
-          echo "✅ google_key.json created successfully (File is not empty)."
+          echo "✅ google_key.json created successfully."
         fi
-    # =================================================
+    # ============================================
 
     - name: Run Mix Match Bot
       env:
         MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
         MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-        # 如果您的程式碼中有用到 LINE 或其他 Token，也請在這裡補上
-        # LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
       run: python mix_guardian_bot.py 
 
     - name: Upload Artifacts (Optional)
-      # 無論成功失敗，都上傳截圖以便除錯
       if: always() 
       uses: actions/upload-artifact@v4
       with:
-        name: screenshots
-        path: mix_temp/ 
+        name: mix_screenshots
+        path: "*.zip" # 抓取所有產生的 zip 檔
         retention-days: 5
