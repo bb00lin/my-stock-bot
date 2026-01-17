@@ -15,81 +15,78 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
 
 # ================= 設定區 =================
 SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
 WORKSHEET_MAIN = '工作表1' 
 WORKSHEET_PROMO = 'promotion'
 
-# ★★★ 請確認此網址是否正確 ★★★
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/您的試算表ID/edit"
 
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
 
-# Email 設定 (修正變數名稱以避免 NameError)
-MAIL_USERNAME = os.environ.get('MAIL_USERNAME', 'bb00lin@gmail.com')
+# Email 設定 (讀取環境變數)
+MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
 MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
+# 您的接收信箱
 MAIL_RECEIVER = 'bb00lin@gmail.com' 
 
 # ================= 輔助功能 =================
 def clean_price(price_text):
-    if not price_text:
-        return ""
-    cleaned = str(price_text).replace("SGD", "").replace("$", "").replace(",", "").replace("\n", "").replace(" ", "").strip()
-    return cleaned
+    if not price_text: return ""
+    return str(price_text).replace("SGD", "").replace("$", "").replace(",", "").replace("\n", "").replace(" ", "").strip()
+
+def get_taiwan_time_now():
+    """ 回傳 datetime 物件 (UTC+8) """
+    return datetime.now(timezone(timedelta(hours=8)))
 
 def get_taiwan_time_display():
-    tz = timezone(timedelta(hours=8))
-    now = datetime.now(tz)
-    return now.strftime("%Y-%m-%d %H:%M")
+    return get_taiwan_time_now().strftime("%Y-%m-%d %H:%M")
 
 def get_taiwan_time_str():
-    tz = timezone(timedelta(hours=8))
-    now = datetime.now(tz)
-    return now.strftime("%Y%m%d%H%M")
+    return get_taiwan_time_now().strftime("%Y%m%d%H%M")
 
 def safe_get(row_list, index):
-    if index < len(row_list):
-        return str(row_list[index])
+    if index < len(row_list): return str(row_list[index])
     return ""
+
+def parse_date(date_str):
+    """ 解析 DD/MM/YYYY 格式 """
+    try:
+        # 去除可能的時間部分，只取日期
+        date_part = date_str.split()[0]
+        return datetime.strptime(date_part, "%d/%m/%Y").date()
+    except:
+        return None
 
 # ================= 資料同步與解析功能 =================
 def parse_promo_string(promo_text):
-    if not promo_text:
-        return ["", "", "", "", ""]
-
+    if not promo_text: return ["", "", "", "", ""]
     matches = re.findall(r'(\d+)\s+[Ff]or\s+\$?([\d\.]+)', promo_text)
-    
     price_map = {}
     for qty_str, price_str in matches:
         try:
             qty = int(qty_str)
             price = float(price_str)
             price_map[qty] = price
-        except:
-            continue
-            
-    if not price_map:
-        return ["", "", "", "", ""]
+        except: continue
+    if not price_map: return ["", "", "", "", ""]
 
     calculated_prices = []
     unit_price_base = 0
-    if 1 in price_map:
-        unit_price_base = price_map[1]
+    if 1 in price_map: unit_price_base = price_map[1]
     else:
         min_qty = min(price_map.keys())
         unit_price_base = price_map[min_qty] / min_qty
 
     for q in range(1, 6):
-        if q in price_map:
-            calculated_prices.append(str(price_map[q]))
+        if q in price_map: calculated_prices.append(str(price_map[q]))
         else:
             total = unit_price_base * q
             val_str = "{:.2f}".format(total).rstrip('0').rstrip('.')
             calculated_prices.append(val_str)
-            
     return calculated_prices
 
 def sync_promotion_data(client):
@@ -104,23 +101,39 @@ def sync_promotion_data(client):
 
     all_values = source_sheet.get_all_values()
     new_rows = []
+    today = get_taiwan_time_now().date()
+    
+    # promotion 標題在第 6 列 (index 5)
     start_row_index = 6 
     
     for row in all_values[start_row_index:]:
-        raw_sku = safe_get(row, 11)
-        prod_name = safe_get(row, 12)
-        promo_desc = safe_get(row, 6)
+        raw_sku = safe_get(row, 11) # L欄
+        prod_name = safe_get(row, 12) # M欄
+        promo_desc = safe_get(row, 6) # G欄
+        date_start_str = safe_get(row, 8) # I欄 (Valid From)
+        date_end_str = safe_get(row, 9)   # J欄 (Valid To)
         
-        if not raw_sku:
-            continue
+        if not raw_sku: continue
             
-        # === 修正：強力清除 SKU 中的單引號與空白 ===
         sku = str(raw_sku).replace("'", "").replace('"', '').strip()
-        if len(sku) > 6:
-            sku = sku[-6:] # 取後6碼
+        if len(sku) > 6: sku = sku[-6:]
             
         user_prices = parse_promo_string(promo_desc)
-        row_data = [sku, prod_name] + user_prices + [""] * 8
+        
+        # === 日期判斷邏輯 ===
+        date_status = "" # 預設為空 (表示正常)
+        d_start = parse_date(date_start_str)
+        d_end = parse_date(date_end_str)
+        
+        if d_start and d_end:
+            if not (d_start <= today <= d_end):
+                date_status = f"⚠️ 非檔期 ({d_start.strftime('%m/%d')}~{d_end.strftime('%m/%d')})"
+        elif d_start and not d_end:
+             if today < d_start: date_status = f"⚠️ 尚未開始 (起:{d_start.strftime('%m/%d')})"
+        
+        # 寫入資料：A~G(基本資料) + H~M(留白給機器人填) + N(比對結果先填入日期狀態) + O(網址留白)
+        # N 欄位於 index 13
+        row_data = [sku, prod_name] + user_prices + [""] * 6 + [date_status] + [""]
         new_rows.append(row_data)
 
     if not new_rows:
@@ -134,14 +147,53 @@ def sync_promotion_data(client):
     
     print(f"📝 寫入 {len(new_rows)} 筆新資料...")
     end_row = 2 + len(new_rows) - 1
+    # 寫入 A2 到 O 欄
     target_sheet.update(values=new_rows, range_name=f"A2:O{end_row}")
     
     print("✅ 資料同步完成")
     return True
 
-# ================= 郵件通知功能 =================
-def send_notification_email(all_match, error_summary):
-    # 這裡修正了變數名稱，確保與上方定義一致
+# ================= 郵件通知功能 (HTML 表格版) =================
+def generate_html_table(data_rows):
+    """ 將 List of Lists 轉換為 HTML 表格 """
+    if not data_rows: return ""
+    
+    # 定義標題
+    headers = ["SKU", "商品名稱", "比對結果", "更新時間"]
+    
+    table_html = "<table border='1' style='border-collapse: collapse; width: 100%; font-size: 12px;'>"
+    # 表頭
+    table_html += "<tr style='background-color: #f2f2f2;'>"
+    for h in headers:
+        table_html += f"<th style='padding: 8px; text-align: left;'>{h}</th>"
+    table_html += "</tr>"
+    
+    # 內容 (只取重要欄位以簡化郵件)
+    # A=0(SKU), B=1(Name), M=12(Time), N=13(Result)
+    for row in data_rows:
+        sku = safe_get(row, 0)
+        name = safe_get(row, 1)
+        time_str = safe_get(row, 12)
+        result = safe_get(row, 13)
+        
+        # 根據結果設定顏色
+        bg_color = "#ffffff"
+        if "Diff" in result or "異常" in result:
+            bg_color = "#ffebee" # 紅色背景
+        elif "非檔期" in result:
+            bg_color = "#fff3e0" # 橘色背景
+            
+        table_html += f"<tr style='background-color: {bg_color};'>"
+        table_html += f"<td style='padding: 8px;'>{sku}</td>"
+        table_html += f"<td style='padding: 8px;'>{name}</td>"
+        table_html += f"<td style='padding: 8px;'>{result}</td>"
+        table_html += f"<td style='padding: 8px;'>{time_str}</td>"
+        table_html += "</tr>"
+        
+    table_html += "</table>"
+    return table_html
+
+def send_notification_email(all_match, error_summary, full_data):
     if not MAIL_USERNAME or not MAIL_PASSWORD:
         print("⚠️ 未設定 Email 帳密，跳過寄信")
         return
@@ -150,12 +202,15 @@ def send_notification_email(all_match, error_summary):
     
     if all_match:
         subject = "[Ozio比對結果-正常]價格相符"
-        body_content = f"所有商品價格比對結果均相符。<br><br>查看表格: <a href='{SHEET_URL_FOR_MAIL}'>Google Sheet 連結</a>"
         color = "green"
+        summary_text = "所有商品價格比對結果均相符 (或非檔期)。"
     else:
         subject = "[Ozio比對結果-異常]請檢查表格"
-        body_content = f"發現價格異常，請檢查表格。<br><br>異常摘要:<br>{error_summary}<br><br>查看表格: <a href='{SHEET_URL_FOR_MAIL}'>Google Sheet 連結</a>"
         color = "red"
+        summary_text = f"發現異常狀況，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
+
+    # 產生 HTML 表格快照
+    snapshot_table = generate_html_table(full_data)
 
     msg = MIMEMultipart()
     msg['From'] = MAIL_USERNAME
@@ -165,7 +220,11 @@ def send_notification_email(all_match, error_summary):
     html = f"""
     <html><body>
         <h2 style="color:{color}">{subject}</h2>
-        <p>{body_content}</p>
+        <p>{summary_text}</p>
+        <p><b>以下為工作表快照：</b></p>
+        {snapshot_table}
+        <br>
+        <p>查看完整表格: <a href='{SHEET_URL_FOR_MAIL}'>Google Sheet 連結</a></p>
         <p>此郵件由 Guardian Price Bot 自動發送</p>
     </body></html>
     """
@@ -241,22 +300,27 @@ def init_driver():
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
-    options.add_argument("--disable-blink-features=AutomationControlled") 
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return driver
 
 def handle_popups(driver):
+    """ 處理可能的彈窗 """
     try:
-        popups = ["button[aria-label='Close']", "div.close-popup", "button.align-right.secondary.slidedown-button", "#onetrust-accept-btn-handler"]
+        # 增加更多可能的彈窗選擇器
+        popups = [
+            "button[aria-label='Close']", 
+            "div.close-popup", 
+            "button.align-right.secondary.slidedown-button", # Cookie
+            "#onetrust-accept-btn-handler",
+            "div[class*='popup'] button", # 通用
+            "iframe[title*='popup']" # iframe 類型廣告
+        ]
         for p in popups:
             try:
-                btn = driver.find_element(By.CSS_SELECTOR, p)
-                if btn.is_displayed():
-                    driver.execute_script("arguments[0].click();", btn)
+                elem = driver.find_element(By.CSS_SELECTOR, p)
+                if elem.is_displayed():
+                    driver.execute_script("arguments[0].click();", elem)
+                    print("   👋 已關閉一個阻擋視窗")
                     time.sleep(1)
             except: pass
     except: pass
@@ -300,22 +364,21 @@ def process_sku(driver, sku):
         time.sleep(5)
         handle_popups(driver)
 
-        # 1. 搜尋 (新增重試機制)
+        # 1. 搜尋 (增強版: 等待輸入框)
         search_input = None
         selectors = ["input[placeholder*='Search']", "input[name='q']", "input[type='search']", "input.search-input"]
         
-        # 嘗試找搜尋框，如果找不到就重整一次頁面
         for attempt in range(2): 
             try:
                 for selector in selectors:
                     try:
-                        search_input = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, selector)))
+                        search_input = WebDriverWait(driver, 8).until(EC.visibility_of_element_located((By.CSS_SELECTOR, selector)))
                         if search_input: break
                     except: continue
                 
-                if search_input: break # 找到了
+                if search_input: break 
                 
-                if attempt == 0: # 第一次失敗，嘗試重整
+                if attempt == 0:
                     print("   ⚠️ 第一次找不到搜尋框，嘗試重整頁面...")
                     driver.refresh()
                     time.sleep(5)
@@ -323,10 +386,11 @@ def process_sku(driver, sku):
             except: pass
         
         if not search_input:
-            print("❌ 搜尋框載入超時 (重試後仍失敗)")
+            print("❌ 搜尋框載入超時")
             return ["Search Fail"] * 5, "URL Not Found"
 
-        search_input.clear()
+        # 使用 JS 清除並輸入，避免被攔截
+        driver.execute_script("arguments[0].value = '';", search_input)
         search_input.send_keys(sku)
         time.sleep(1)
         search_input.send_keys(Keys.RETURN)
@@ -334,29 +398,42 @@ def process_sku(driver, sku):
         time.sleep(5)
         handle_popups(driver)
 
-        # 2. 點擊商品
+        # 2. 點擊商品 (精準比對 SKU)
         try:
-            xpath_selectors = [f"//a[contains(@href, '{sku}')]", "(//div[contains(@class, 'product')]//a)[1]", "(//main//a[.//img])[1]", "//div[data-testid='product-card']//a"]
+            # 優先找包含 SKU 的連結
+            xpath_sku = f"//a[contains(@href, '{sku}')]"
+            # 備用：找一般商品卡片
+            xpath_generic = "(//div[contains(@class, 'product')]//a)[1]"
+            
             clicked = False
-            for xpath in xpath_selectors:
+            
+            # 先試圖找特定 SKU
+            try:
+                link = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath_sku)))
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", link)
+                driver.execute_script("arguments[0].click();", link)
+                clicked = True
+                print("   👉 找到精確 SKU 連結並點擊")
+            except:
+                pass
+            
+            if not clicked:
                 try:
-                    product_link = driver.find_element(By.XPATH, xpath)
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", product_link)
-                    time.sleep(1)
-                    try: product_link.click()
-                    except: driver.execute_script("arguments[0].click();", product_link)
+                    link = driver.find_element(By.XPATH, xpath_generic)
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", link)
+                    driver.execute_script("arguments[0].click();", link)
                     clicked = True
-                    break
-                except: continue
+                    print("   👉 點擊第一個商品結果")
+                except:
+                    pass
+
+            if not clicked: raise NoSuchElementException("無法找到商品連結")
             
-            if not clicked: raise NoSuchElementException("無法找到任何商品連結")
-            
-            try: WebDriverWait(driver, 10).until(lambda d: "search.html" not in d.current_url)
-            except: print("   ⚠️ 警告：網址似乎仍停留在搜尋頁")
-            
-            time.sleep(2) 
+            # 等待跳轉
+            time.sleep(3)
             product_url = driver.current_url
             print(f"🔗 取得目前連結: {product_url}")
+            
             if "search.html" in product_url:
                 print("❌ 點擊後仍停留在搜尋結果頁")
                 return ["Click Fail"] * 5, product_url
@@ -402,7 +479,6 @@ def process_sku(driver, sku):
                         if qty == 1: is_valid = True
                         else:
                             if current_val > previous_price_val: is_valid = True
-                            else: print(f"   ⚠️ 抓取異常 (嘗試 {attempt+1}): Qty {qty} (${current_val}) <= Qty {qty-1} (${previous_price_val})")
                     except: is_valid = False
                 
                 if is_valid:
@@ -420,7 +496,6 @@ def process_sku(driver, sku):
                 final_price = current_price_str
                 try: previous_price_val = float(final_price)
                 except: pass
-                print(f"   ❌ 重試後強制填入: {final_price}")
                 driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}_abnormal.png")
 
             prices.append(final_price)
@@ -429,8 +504,6 @@ def process_sku(driver, sku):
                 try:
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     driver.execute_script("arguments[0].click();", plus_btn)
-                    
-                    print(f"   ⏳ 正在增加數量 ({qty}->{qty+1})...")
                     time.sleep(0.5) 
                     try: WebDriverWait(driver, 20).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
                     except TimeoutException: pass
@@ -442,9 +515,7 @@ def process_sku(driver, sku):
                             for _ in range(qty, 5): prices.append("Limit Reached")
                             break
                     except: pass
-                except Exception:
-                    print("   ⚠️ 無法點擊 + 按鈕")
-                    break
+                except Exception: break
         
         while len(prices) < 5: prices.append("Error")
         empty_cart(driver)
@@ -487,13 +558,26 @@ def main():
 
         overall_status_match = True
         error_summary_list = []
+        
+        # 用來儲存所有更新後的資料，以便最後生成郵件表格
+        # 初始化標題
+        full_data_for_mail = []
 
         for i, row_data in enumerate(all_values[1:], start=2):
             sku = safe_get(row_data, 0).strip()
-            # === 修正：這裡也要過濾 SKU ===
+            # 確保 SKU 沒有雜質
             sku = sku.replace("'", "").replace('"', '').strip() 
             if not sku: continue
             
+            # 檢查是否為非檔期 (欄位 N, Index 13)
+            date_status = safe_get(row_data, 13)
+            
+            if "非檔期" in date_status or "尚未開始" in date_status:
+                print(f"⏭️ SKU {sku} {date_status}，跳過爬蟲。")
+                # 為了郵件表格完整性，直接使用現有資料
+                full_data_for_mail.append(row_data)
+                continue
+
             user_prices = [safe_get(row_data, 2), safe_get(row_data, 3), safe_get(row_data, 4), safe_get(row_data, 5), safe_get(row_data, 6)]
 
             web_prices, product_url = process_sku(driver, sku)
@@ -504,18 +588,24 @@ def main():
             cell_range = f"H{i}:O{i}"
             sheet.update(values=[data_to_write], range_name=cell_range)
             
-            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result} | URL: {product_url}")
+            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result}")
             print("-" * 30)
 
             if comparison_result != "均相符":
                 overall_status_match = False
                 error_summary_list.append(f"SKU {sku}: {comparison_result}")
+            
+            # 更新記憶體中的 row_data 以便產生報表 (H~O 欄位更新)
+            # A~G (0~6) 不變
+            # H~O (7~14) 替換為新資料
+            updated_row = row_data[:7] + web_prices + [update_time, comparison_result, product_url]
+            full_data_for_mail.append(updated_row)
 
         print("🎉 所有任務完成！")
         driver.quit()
         
-        error_text = "\n".join(error_summary_list) if error_summary_list else ""
-        send_notification_email(overall_status_match, error_text)
+        error_text = "<br>".join(error_summary_list) if error_summary_list else ""
+        send_notification_email(overall_status_match, error_text, full_data_for_mail)
 
     except Exception as main_e:
         print(f"💥 程式執行發生重大錯誤: {main_e}")
