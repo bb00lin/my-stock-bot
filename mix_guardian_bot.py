@@ -201,7 +201,7 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         print(f"      ❌ 加入過程發生錯誤: {e}")
         return False
 
-# ================= Task 2: Mix & Match (自動遞補) =================
+# ================= Task 2: Mix & Match (自動遞補 + 缺貨標記) =================
 def sync_mix_match_data(client):
     print("🔄 [Task 2] 同步 Mix & Match 資料...")
     promo_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_PROMO)
@@ -282,6 +282,8 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty):
     if not os.path.exists(folder_name): os.makedirs(folder_name)
     
     available_skus = []
+    missing_skus = [] # 新增：記錄缺貨清單
+    
     print(f"   🕵️ 正在檢查商品庫存狀況...")
     
     for sku in unique_skus:
@@ -289,9 +291,10 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty):
             available_skus.append(sku)
         else:
             print(f"   ⚠️ 商品 {sku} 搜尋不到，將從混搭名單移除")
+            missing_skus.append(sku)
             
     if not available_skus:
-        return "Error (All Missing)", "", None
+        return "Error (All Missing)", "", None, missing_skus
 
     final_strategy = {}
     pool_cycle = cycle(available_skus)
@@ -310,25 +313,22 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty):
         if not success:
             driver.save_screenshot(f"{folder_name}/Add_Fail_{sku}.png")
             zip_path = create_zip_evidence("Mix_Error", folder_name)
-            return "Add Fail", "", zip_path
+            return "Add Fail", "", zip_path, missing_skus
         
         if not main_url: main_url = driver.current_url
 
     driver.get("https://guardian.com.sg/cart")
     
-    # === [關鍵修正]：智慧等待 Fetching Cart 消失 ===
     print("   ⏳ 等待購物車計算 (Fetching Cart)...")
     try:
-        # 最多等 20 秒，直到轉圈圈消失
         WebDriverWait(driver, 20).until_not(
             EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
         )
     except TimeoutException:
         print("   ⚠️ 等待購物車載入超時，嘗試直接抓取")
     
-    time.sleep(2) # 額外緩衝
+    time.sleep(2) 
     
-    # === 增加重試機制，防止抓到 Error ===
     total_price = "Error"
     for retry in range(5):
         price = get_total_price_safely(driver)
@@ -339,13 +339,14 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty):
         time.sleep(2)
         
     if not total_price: total_price = "Error"
-    # ===============================================
     
     screenshot_name = f"Mix_{first_sku}_Total.png"
     driver.save_screenshot(f"{folder_name}/{screenshot_name}")
     
     zip_path = create_zip_evidence("Mix_Evidence", folder_name)
-    return total_price, main_url, zip_path
+    
+    # 回傳多了 missing_skus
+    return total_price, main_url, zip_path, missing_skus
 
 def run_mix_match_task(client, driver):
     row_count = sync_mix_match_data(client)
@@ -368,24 +369,30 @@ def run_mix_match_task(client, driver):
         
         print(f"   🧪 測試: {original_strategy} (目標 {target_qty} 個)")
         
-        web_total, link, zip_file = process_mix_case_dynamic(driver, original_strategy, target_qty)
+        # 接收缺貨清單
+        web_total, link, zip_file, missing_list = process_mix_case_dynamic(driver, original_strategy, target_qty)
+        
+        # 產生缺貨標記文字
+        missing_note = ""
+        if missing_list:
+            missing_note = f" (⚠️缺: {','.join(missing_list)})"
         
         is_error = False
         result_text = ""
         
         if "Fail" in web_total or "Error" in web_total:
-            result_text = f"🔥 錯誤 ({web_total})"
+            result_text = f"🔥 錯誤 ({web_total}){missing_note}"
             is_error = True
         else:
             try:
                 web_val = float(web_total)
                 if abs(web_val - expected) < 0.05:
-                    result_text = "✅ 相符"
+                    result_text = f"✅ 相符{missing_note}"
                 else:
-                    result_text = f"🔥 差異 (Exp:{expected} != Web:{web_val})"
+                    result_text = f"🔥 差異 (Exp:{expected} != Web:{web_val}){missing_note}"
                     is_error = True
             except:
-                result_text = f"🔥 錯誤 ({web_total})"
+                result_text = f"🔥 錯誤 ({web_total}){missing_note}"
                 is_error = True
 
         if is_error:
@@ -393,7 +400,7 @@ def run_mix_match_task(client, driver):
             error_summary.append(f"{main_sku}: {result_text}")
             if zip_file: attachments.append(zip_file)
         else:
-            # 如果正常，不刪除暫存檔 (交給 GitHub Action 清理)
+            # 如果正常，這裡可以選擇是否保留 zip
             pass
 
         update_time = get_taiwan_time_display()
@@ -405,11 +412,10 @@ def run_mix_match_task(client, driver):
     subject = f"{date_info}{subject_prefix}[Ozio Mix & Match比對結果]"
     
     summary_text = "所有混搭組合價格均相符。" if all_match else f"發現混搭價格異常。<br>{'<br>'.join(error_summary)}"
+    if any("⚠️缺" in str(r) for r in results_for_mail):
+        summary_text += "<br>(註：部分結果含有缺貨商品遞補標記)"
     
     send_email_generic(subject, summary_text, results_for_mail, attachments)
-    
-    # 不刪除附件，留給 Actions 上傳
-    # for f in attachments: try: os.remove(f) except: pass
 
 def send_email_generic(subject, summary, data_rows, attachments):
     if not MAIL_USERNAME or not MAIL_PASSWORD: return
@@ -419,6 +425,8 @@ def send_email_generic(subject, summary, data_rows, attachments):
     for r in data_rows:
         bg = "#fff"
         if "🔥" in r[2] or "Diff" in r[2] or "Error" in r[2] or "Limit" in r[2]: bg = "#ffebee"
+        elif "⚠️缺" in r[2]: bg = "#fff3e0" # 缺貨但價格對，給黃色提醒
+        
         table_html += f"<tr style='background:{bg}'><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td></tr>"
     table_html += "</table>"
 
