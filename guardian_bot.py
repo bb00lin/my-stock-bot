@@ -165,20 +165,40 @@ def sync_promotion_data(client):
     print("✅ 資料同步完成")
     return True
 
-# ================= 郵件通知功能 =================
+# ================= 郵件通知功能 (僅修改此處) =================
 def generate_html_table(data_rows):
     if not data_rows: return ""
-    headers = ["SKU", "商品名稱", "比對結果", "更新時間"]
-    table_html = "<table border='1' style='border-collapse: collapse; width: 100%; font-size: 12px;'>"
+    
+    # === [修改] 擴充欄位以顯示所有價格 ===
+    headers = [
+        "SKU", "Product Name", 
+        "User Q1 Price", "User Q2 Price", "User Q3 Price", "User Q4 Price", "User Q5 Price",
+        "Qty 1 Price", "Qty 2 Price", "Qty 3 Price", "Qty 4 Price", "Qty 5 Price",
+        "Update Time", "Result", "LINK"
+    ]
+    
+    table_html = "<table border='1' style='border-collapse: collapse; width: 100%; font-size: 11px;'>"
     table_html += "<tr style='background-color: #f2f2f2;'>"
-    for h in headers: table_html += f"<th style='padding: 8px; text-align: left;'>{h}</th>"
+    for h in headers: 
+        width = "50px" if "Price" in h else "auto"
+        table_html += f"<th style='padding: 5px; text-align: center; width: {width};'>{h}</th>"
     table_html += "</tr>"
     
     for row in data_rows:
+        # row 的結構是 [SKU, Name, U1...U5, W1...W5, Time, Result, Link]
+        # 共 2+5+5+3 = 15 個元素
+        
         sku = safe_get(row, 0)
         name = safe_get(row, 1)
+        
+        # User Prices (index 2-6)
+        user_p = row[2:7]
+        # Web Prices (index 7-11)
+        web_p = row[7:12]
+        
         time_str = safe_get(row, 12)
         result = safe_get(row, 13)
+        link = safe_get(row, 14)
         
         bg_color = "#ffffff"
         if "商品未上架" in result: bg_color = "#eeeeee"
@@ -186,10 +206,25 @@ def generate_html_table(data_rows):
         elif "非檔期" in result or "尚未開始" in result: bg_color = "#fff3e0" 
             
         table_html += f"<tr style='background-color: {bg_color};'>"
-        table_html += f"<td style='padding: 8px;'>{sku}</td>"
-        table_html += f"<td style='padding: 8px;'>{name}</td>"
-        table_html += f"<td style='padding: 8px;'>{result}</td>"
-        table_html += f"<td style='padding: 8px;'>{time_str}</td>"
+        table_html += f"<td style='padding: 5px;'>{sku}</td>"
+        table_html += f"<td style='padding: 5px;'>{name}</td>"
+        
+        # 填入 User Prices
+        for p in user_p: table_html += f"<td style='padding: 5px; text-align: center;'>{p}</td>"
+        
+        # 填入 Web Prices
+        for p in web_p: table_html += f"<td style='padding: 5px; text-align: center;'>{p}</td>"
+        
+        table_html += f"<td style='padding: 5px;'>{time_str}</td>"
+        
+        # Result 欄位 (紅字標示錯誤)
+        res_style = "color: red; font-weight: bold;" if "Diff" in result or "異常" in result else ""
+        table_html += f"<td style='padding: 5px; {res_style}'>{result}</td>"
+        
+        # Link 欄位
+        link_display = "Link" if "http" in link else link
+        table_html += f"<td style='padding: 5px;'><a href='{link}'>{link_display}</a></td>"
+        
         table_html += "</tr>"
         
     table_html += "</table>"
@@ -688,6 +723,8 @@ def main():
                 overall_status_match = False
                 error_summary_list.append(f"SKU {sku}: {comparison_result}")
             
+            # [修正] 這裡組裝完整的 row data 供郵件使用
+            # 格式: [SKU, Name, UserQ1~5, WebQ1~5, Time, Result, Link]
             updated_row = row_data[:7] + web_prices + [update_time, comparison_result, product_url]
             full_data_for_mail.append(updated_row)
 
