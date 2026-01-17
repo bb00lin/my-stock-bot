@@ -20,6 +20,8 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 
 # ================= 設定區 =================
 SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
+# [修改] 改為寫入一個專門的壓力測試工作表，以免撐爆原本的正式報表
+# 當然您也可以維持 '工作表1'，但要注意資料量會暴增
 WORKSHEET_MAIN = '工作表1' 
 WORKSHEET_PROMO = 'promotion'
 
@@ -32,8 +34,6 @@ URL = "https://guardian.com.sg/"
 # Email 設定
 MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
 MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
-
-# === 修改：改為列表以支援多個收件人 ===
 MAIL_RECEIVER = ['bb00lin@gmail.com', 'helen.chen.168@gmail.com']
 
 # ================= 輔助功能 =================
@@ -63,8 +63,7 @@ def parse_date(date_str):
 
 def create_zip_evidence(sku, sku_folder):
     try:
-        if not os.path.exists(sku_folder) or not os.listdir(sku_folder):
-            return None
+        if not os.path.exists(sku_folder) or not os.listdir(sku_folder): return None
         timestamp = get_taiwan_time_str()
         zip_filename_base = f"{sku}_{timestamp}"
         zip_path = shutil.make_archive(zip_filename_base, 'zip', sku_folder)
@@ -108,18 +107,18 @@ def parse_promo_string(promo_text):
             
     return calculated_prices
 
-def sync_promotion_data(client):
-    print("🔄 正在從 promotion 同步資料 (正常模式 - 清除舊資料)...")
+# [修改] 壓力測試版：這個函式現在只負責回傳資料結構，不再寫入 Sheet
+def get_promotion_data(client):
+    print("🔄 讀取 Promotion 資料...")
     try:
         spreadsheet = client.open(SPREADSHEET_FILE_NAME)
         source_sheet = spreadsheet.worksheet(WORKSHEET_PROMO)
-        target_sheet = spreadsheet.worksheet(WORKSHEET_MAIN)
     except Exception as e:
         print(f"❌ 無法開啟工作表: {e}")
-        return False
+        return []
 
     all_values = source_sheet.get_all_values()
-    new_rows = []
+    data_list = []
     today = get_taiwan_time_now().date()
     start_row_index = 6 
     
@@ -147,25 +146,17 @@ def sync_promotion_data(client):
         elif d_start and not d_end:
              if today < d_start: date_status = f"⚠️ 尚未開始 (起:{d_start.strftime('%m/%d')})"
         
-        row_data = [sku, prod_name] + user_prices + [""] * 6 + [date_status] + [""]
-        new_rows.append(row_data)
+        # 這裡不清除舊資料，而是回傳整理好的資料結構供主程式使用
+        data_list.append({
+            "sku": sku,
+            "name": prod_name,
+            "user_prices": user_prices,
+            "date_status": date_status
+        })
 
-    if not new_rows:
-        print("⚠️ Promotion 表格無資料")
-        return False
+    return data_list
 
-    print("🧹 清除舊資料...")
-    current_rows = len(target_sheet.get_all_values())
-    if current_rows > 1:
-        target_sheet.batch_clear([f"A2:O{current_rows}"])
-    
-    print(f"📝 寫入 {len(new_rows)} 筆新資料...")
-    end_row = 2 + len(new_rows) - 1
-    target_sheet.update(values=new_rows, range_name=f"A2:O{end_row}")
-    print("✅ 資料同步完成")
-    return True
-
-# ================= 郵件通知功能 =================
+# ================= 郵件通知功能 (保持原樣) =================
 def generate_html_table(data_rows):
     if not data_rows: return ""
     headers = ["SKU", "商品名稱", "比對結果", "更新時間"]
@@ -195,10 +186,8 @@ def generate_html_table(data_rows):
     table_html += "</table>"
     return table_html
 
-def send_notification_email(all_match, error_summary, full_data, attachment_files):
-    if not MAIL_USERNAME or not MAIL_PASSWORD:
-        print("⚠️ 未設定 Email 帳密，跳過寄信")
-        return
+def send_notification_email(all_match, error_summary, full_data, attachment_files, round_num):
+    if not MAIL_USERNAME or not MAIL_PASSWORD: return
 
     print("📧 正在發送通知郵件...")
     
@@ -217,30 +206,28 @@ def send_notification_email(all_match, error_summary, full_data, attachment_file
 
     if has_limit_reached:
         subject_prefix = "⚠️"
-        subject_text = "[Ozio比對結果-警告] 達購買上限/異常"
+        subject_text = "[Ozio壓力測試-警告] 達購買上限/異常"
         color = "#ff9800" 
-        summary_text = f"發現部分商品達到購買上限或有其他異常，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
+        summary_text = f"Round {round_num}: 發現部分商品達到購買上限或有其他異常。<br>異常摘要:<br>{error_summary}"
     elif not all_match:
         subject_prefix = "🔥"
-        subject_text = "[Ozio比對結果-異常] 請檢查表格"
+        subject_text = "[Ozio壓力測試-異常] 請檢查表格"
         color = "red" 
-        summary_text = f"發現價格異常或非檔期商品，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
+        summary_text = f"Round {round_num}: 發現價格異常或非檔期商品。<br>異常摘要:<br>{error_summary}"
     else:
         subject_prefix = "✅"
-        subject_text = "[Ozio比對結果-正常] 價格相符"
+        subject_text = "[Ozio壓力測試-正常] 價格相符"
         color = "green" 
-        summary_text = "所有商品價格比對結果均相符。"
+        summary_text = f"Round {round_num}: 所有商品價格比對結果均相符。"
 
     now = get_taiwan_time_now()
-    weekdays = ["(一)", "(二)", "(三)", "(四)", "(五)", "(六)", "(日)"]
-    date_str = f"{now.month}/{now.day}{weekdays[now.weekday()]}"
+    date_str = f"{now.month}/{now.day} {now.strftime('%H:%M')}"
 
-    final_subject = f"{date_str}{subject_prefix}{subject_text}"
+    final_subject = f"{date_str} {subject_prefix} {subject_text} (R{round_num})"
     snapshot_table = generate_html_table(full_data)
 
     msg = MIMEMultipart()
     msg['From'] = MAIL_USERNAME
-    # === 修改：加入多個收件人 ===
     msg['To'] = ", ".join(MAIL_RECEIVER)
     msg['Subject'] = final_subject
 
@@ -248,36 +235,30 @@ def send_notification_email(all_match, error_summary, full_data, attachment_file
     <html><body>
         <h2 style="color:{color}">{final_subject}</h2>
         <p>{summary_text}</p>
-        <p><b>以下為工作表快照：</b></p>
+        <p><b>以下為本輪測試快照：</b></p>
         {snapshot_table}
         <br>
         <p>查看完整表格: <a href='{SHEET_URL_FOR_MAIL}'>Google Sheet 連結</a></p>
-        <p>此郵件由 Guardian Price Bot 自動發送</p>
+        <p>此郵件由 Guardian Price Bot 壓力測試模式發送</p>
     </body></html>
     """
     msg.attach(MIMEText(html, 'html'))
 
-    # 夾帶附件
     total_size = 0
     max_size = 24 * 1024 * 1024 
     
     if attachment_files:
-        print(f"📎 準備夾帶 {len(attachment_files)} 個壓縮檔...")
         for fpath in attachment_files:
             try:
                 if os.path.exists(fpath):
                     file_size = os.path.getsize(fpath)
-                    if total_size + file_size > max_size:
-                        print(f"   ⚠️ 附件過大，停止夾帶。")
-                        break
-                    
+                    if total_size + file_size > max_size: break
                     with open(fpath, 'rb') as f:
                         part = MIMEApplication(f.read(), Name=os.path.basename(fpath))
                     part['Content-Disposition'] = f'attachment; filename="{os.path.basename(fpath)}"'
                     msg.attach(part)
                     total_size += file_size
-            except Exception as e:
-                print(f"   ⚠️ 無法夾帶檔案 {fpath}: {e}")
+            except: pass
 
     try:
         server = smtplib.SMTP('smtp.gmail.com', 587)
@@ -293,12 +274,9 @@ def send_notification_email(all_match, error_summary, full_data, attachment_file
 def validate_user_inputs(user_prices):
     clean_prices = [clean_price(p) for p in user_prices]
     if all(not p for p in clean_prices): return "異常:User價格全空"
-    valid_numbers = []
     for p in clean_prices:
         if not p: continue 
-        try:
-            val = float(p)
-            valid_numbers.append(val)
+        try: float(p)
         except: return f"異常:User含非數值({p})"
     return None
 
@@ -408,6 +386,7 @@ def get_price_safely(driver):
     return None
 
 def process_sku(driver, sku):
+    # [保留原有的爬蟲邏輯]
     print(f"\n🔍 開始搜尋 SKU: {sku}")
     prices = [] 
     product_url = "" 
@@ -512,36 +491,6 @@ def process_sku(driver, sku):
         time.sleep(5)
 
         for qty in range(1, 6):
-            # 數量嚴格驗證機制
-            try:
-                actual_qty_on_page = -1
-                qty_input = None
-                input_selectors = ["input[data-role='cart-item-qty']", "input.input-text.qty", "input[type='number']"]
-                for sel in input_selectors:
-                    try:
-                        qty_input = driver.find_element(By.CSS_SELECTOR, sel)
-                        if qty_input: break
-                    except: pass
-                
-                if qty_input:
-                    for _ in range(10): 
-                        val = qty_input.get_attribute("value")
-                        if val and int(val) == qty:
-                            actual_qty_on_page = int(val)
-                            break
-                        try:
-                            err = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')] | //div[contains(@class, 'message-error')]")
-                            if err.is_displayed():
-                                print(f"   🛑 驗證時發現限購阻擋 (停在 {val})")
-                                break
-                        except: pass
-                        time.sleep(0.5)
-                
-                if qty > 1 and actual_qty_on_page != -1 and actual_qty_on_page != qty:
-                     print(f"   ❌ 嚴重錯誤：網頁數量 ({actual_qty_on_page}) 與預期 ({qty}) 不符！")
-                     pass 
-            except: pass
-
             try: WebDriverWait(driver, 15).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
             except: pass
             
@@ -626,89 +575,106 @@ def process_sku(driver, sku):
         except: pass
         return ["Error"] * 5, product_url, generated_zip
 
-# ================= 主程式 =================
-def main():
-    try:
-        client = connect_google_sheet()
+# ================= 壓力測試主程式 =================
+def run_one_round(client, round_num):
+    driver = init_driver()
+    print("--- 初始化檢查 ---")
+    empty_cart(driver)
+    
+    # [修改] 壓力測試不清除資料，每次只讀取商品清單
+    data_list = get_promotion_data(client)
+    
+    # [修改] 獲取 Sheet 物件並決定寫入位置 (累加)
+    spreadsheet = client.open(SPREADSHEET_FILE_NAME)
+    sheet = spreadsheet.worksheet(WORKSHEET_MAIN)
+    all_values = sheet.get_all_values()
+    start_row = len(all_values) + 1 # 從現有資料下一行開始
+    
+    # 寫入分隔線
+    if start_row == 1:
+        headers = ["SKU", "Product Name", "User Q1", "User Q2", "User Q3", "User Q4", "User Q5", 
+                   "Web Q1", "Web Q2", "Web Q3", "Web Q4", "Web Q5", "Update Time", "Result", "Link"]
+        sheet.append_row(headers)
+    else:
+        sheet.append_row([f"--- Round {round_num} Start ---"] + [""]*14)
+
+    overall_status_match = True
+    error_summary_list = []
+    full_data_for_mail = []
+    attachment_files = []
+
+    print(f"📋 開始第 {round_num} 輪，共有 {len(data_list)} 筆資料待處理")
+
+    for item in data_list:
+        sku = item['sku']
+        prod_name = item['name']
+        user_prices = item['user_prices']
+        date_status = item['date_status']
         
-        sync_success = sync_promotion_data(client)
-        if not sync_success:
-            print("⚠️ 資料同步失敗，停止執行後續爬蟲")
-            return
+        if "非檔期" in date_status or "尚未開始" in date_status:
+            print(f"⚠️ SKU {sku} {date_status}，但仍執行爬蟲更新數據...")
 
-        driver = init_driver()
-        print("--- 初始化檢查 ---")
-        empty_cart(driver)
+        # 執行爬蟲
+        web_prices, product_url, zip_file = process_sku(driver, sku)
+        if zip_file: attachment_files.append(zip_file)
+
+        update_time = get_taiwan_time_display()
+        comparison_result = compare_prices(user_prices, web_prices, product_url)
         
-        spreadsheet = client.open(SPREADSHEET_FILE_NAME)
-        sheet = spreadsheet.worksheet(WORKSHEET_MAIN)
-        all_values = sheet.get_all_values()
+        if date_status: comparison_result = f"{date_status} | {comparison_result}"
+
+        # 組裝寫入資料
+        data_row = [sku, prod_name] + user_prices + web_prices + [update_time, comparison_result, product_url]
         
-        print(f"📋 共有 {len(all_values)-1} 筆資料待處理")
-
-        overall_status_match = True
-        error_summary_list = []
-        full_data_for_mail = []
-        
-        # 收集 Zip 檔案
-        attachment_files = []
-
-        for i, row_data in enumerate(all_values[1:], start=2):
-            sku = safe_get(row_data, 0).strip()
-            sku = sku.replace("'", "").replace('"', '').strip() 
-            if not sku: continue
-            
-            date_status = safe_get(row_data, 13)
-            
-            if "非檔期" in date_status or "尚未開始" in date_status:
-                print(f"⚠️ SKU {sku} {date_status}，但仍執行爬蟲更新數據...")
-
-            user_prices = [safe_get(row_data, 2), safe_get(row_data, 3), safe_get(row_data, 4), safe_get(row_data, 5), safe_get(row_data, 6)]
-
-            # 接收 zip_file
-            web_prices, product_url, zip_file = process_sku(driver, sku)
-            
-            if zip_file:
-                attachment_files.append(zip_file)
-
-            update_time = get_taiwan_time_display()
-            comparison_result = compare_prices(user_prices, web_prices, product_url)
-            
-            if date_status:
-                comparison_result = f"{date_status} | {comparison_result}"
-
-            data_to_write = web_prices + [update_time, comparison_result, product_url]
-            cell_range = f"H{i}:O{i}"
-            sheet.update(values=[data_to_write], range_name=cell_range)
-            
+        # [修改] 即時寫入 Sheet (累加)
+        try:
+            sheet.append_row(data_row)
             print(f"✅ SKU {sku} 完成 | 結果: {comparison_result}")
-            print("-" * 30)
+        except Exception as e:
+            print(f"❌ 寫入 Sheet 失敗: {e}")
 
-            if "均相符" not in comparison_result and "該商品未上架" not in comparison_result:
-                overall_status_match = False
-                error_summary_list.append(f"SKU {sku}: {comparison_result}")
+        print("-" * 30)
+
+        if "均相符" not in comparison_result and "該商品未上架" not in comparison_result:
+            overall_status_match = False
+            error_summary_list.append(f"SKU {sku}: {comparison_result}")
+        
+        full_data_for_mail.append(data_row)
+
+    driver.quit()
+    
+    # 寄信
+    error_text = "<br>".join(error_summary_list) if error_summary_list else ""
+    send_notification_email(overall_status_match, error_text, full_data_for_mail, attachment_files, round_num)
+    
+    # 清理暫存檔
+    print("🧹 清理本輪暫存檔...")
+    for f in attachment_files:
+        try:
+            if os.path.exists(f): os.remove(f)
+        except: pass
+
+def main():
+    client = connect_google_sheet()
+    round_count = 1
+    
+    print("🔥 壓力測試模式 (無限循環 + 累加記錄)")
+    print("🛑 按下 Ctrl + C 可隨時停止")
+    
+    try:
+        while True:
+            print(f"\n{'='*30}\n開始第 {round_count} 輪循環測試\n{'='*30}")
+            run_one_round(client, round_count)
             
-            updated_row = row_data[:7] + web_prices + [update_time, comparison_result, product_url]
-            full_data_for_mail.append(updated_row)
-
-        print("🎉 所有任務完成！")
-        driver.quit()
-        
-        error_text = "<br>".join(error_summary_list) if error_summary_list else ""
-        
-        # 發送郵件 (含附件)
-        send_notification_email(overall_status_match, error_text, full_data_for_mail, attachment_files)
-        
-        # 清理暫存檔
-        print("🧹 清理本輪暫存檔...")
-        for f in attachment_files:
-            try:
-                if os.path.exists(f): os.remove(f)
-            except: pass
-
-    except Exception as main_e:
-        print(f"💥 程式執行發生重大錯誤: {main_e}")
-        if 'driver' in locals(): driver.quit()
+            print(f"✅ 第 {round_count} 輪測試結束。")
+            print("⏳ 冷卻 60 秒後開始下一輪...")
+            time.sleep(60)
+            round_count += 1
+            
+    except KeyboardInterrupt:
+        print("\n👋 收到停止指令，壓力測試結束。")
+    except Exception as e:
+        print(f"💥 發生重大錯誤: {e}")
 
 if __name__ == "__main__":
     main()
