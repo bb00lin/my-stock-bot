@@ -91,15 +91,19 @@ def parse_promo_string(promo_text):
             
     return calculated_prices
 
-def sync_promotion_data(client):
-    print("🔄 正在從 promotion 同步資料...")
+def sync_promotion_data_accumulate(client):
+    """
+    壓力測試專用：不清除舊資料，直接往下累加
+    回傳: (起始行號, 資料筆數)
+    """
+    print("🔄 [壓力測試] 正在讀取 promotion 並累加至 Sheet1...")
     try:
         spreadsheet = client.open(SPREADSHEET_FILE_NAME)
         source_sheet = spreadsheet.worksheet(WORKSHEET_PROMO)
         target_sheet = spreadsheet.worksheet(WORKSHEET_MAIN)
     except Exception as e:
         print(f"❌ 無法開啟工作表: {e}")
-        return False
+        return None, 0
 
     all_values = source_sheet.get_all_values()
     new_rows = []
@@ -135,18 +139,23 @@ def sync_promotion_data(client):
 
     if not new_rows:
         print("⚠️ Promotion 表格無資料")
-        return False
+        return None, 0
 
-    print("🧹 清除舊資料...")
-    current_rows = len(target_sheet.get_all_values())
-    if current_rows > 1:
-        target_sheet.batch_clear([f"A2:O{current_rows}"])
+    # === 壓力測試修改：不清除，直接往下寫 ===
+    # print("🧹 清除舊資料...") # 註解掉
+    # target_sheet.batch_clear([f"A2:O{current_rows}"]) # 註解掉
     
-    print(f"📝 寫入 {len(new_rows)} 筆新資料...")
-    end_row = 2 + len(new_rows) - 1
-    target_sheet.update(values=new_rows, range_name=f"A2:O{end_row}")
-    print("✅ 資料同步完成")
-    return True
+    # 取得目前總行數，從下一行開始寫
+    current_data = target_sheet.get_all_values()
+    start_writing_row = len(current_data) + 1
+    
+    print(f"📝 [壓力測試] 在第 {start_writing_row} 行開始寫入 {len(new_rows)} 筆新資料...")
+    
+    end_writing_row = start_writing_row + len(new_rows) - 1
+    target_sheet.update(values=new_rows, range_name=f"A{start_writing_row}:O{end_writing_row}")
+    
+    print("✅ 資料累加同步完成")
+    return start_writing_row, len(new_rows)
 
 # ================= 郵件通知功能 =================
 def generate_html_table(data_rows):
@@ -178,7 +187,7 @@ def generate_html_table(data_rows):
     table_html += "</table>"
     return table_html
 
-def send_notification_email(all_match, error_summary, full_data):
+def send_notification_email(all_match, error_summary, full_data, loop_count):
     if not MAIL_USERNAME or not MAIL_PASSWORD:
         print("⚠️ 未設定 Email 帳密，跳過寄信")
         return
@@ -200,17 +209,17 @@ def send_notification_email(all_match, error_summary, full_data):
 
     if has_limit_reached:
         subject_prefix = "⚠️"
-        subject_text = "[Ozio比對結果-警告] 達購買上限/異常"
+        subject_text = f"[壓力測試-第{loop_count}輪-警告] 達購買上限/異常"
         color = "#ff9800" 
-        summary_text = f"發現部分商品達到購買上限或有其他異常，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
+        summary_text = f"發現部分商品達到購買上限或有其他異常。<br>異常摘要:<br>{error_summary}"
     elif not all_match:
         subject_prefix = "🔥"
-        subject_text = "[Ozio比對結果-異常] 請檢查表格"
+        subject_text = f"[壓力測試-第{loop_count}輪-異常] 請檢查表格"
         color = "red" 
-        summary_text = f"發現價格異常或非檔期商品，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
+        summary_text = f"發現價格異常或非檔期商品。<br>異常摘要:<br>{error_summary}"
     else:
         subject_prefix = "✅"
-        subject_text = "[Ozio比對結果-正常] 價格相符"
+        subject_text = f"[壓力測試-第{loop_count}輪-正常] 價格相符"
         color = "green" 
         summary_text = "所有商品價格比對結果均相符。"
 
@@ -229,11 +238,12 @@ def send_notification_email(all_match, error_summary, full_data):
     html = f"""
     <html><body>
         <h2 style="color:{color}">{final_subject}</h2>
+        <p><b>這是壓力測試的第 {loop_count} 次執行報告。</b></p>
         <p>{summary_text}</p>
-        <p><b>以下為工作表快照：</b></p>
+        <p><b>本輪執行結果快照：</b></p>
         {snapshot_table}
         <br>
-        <p>查看完整表格: <a href='{SHEET_URL_FOR_MAIL}'>Google Sheet 連結</a></p>
+        <p>查看完整表格 (資料持續累加中): <a href='{SHEET_URL_FOR_MAIL}'>Google Sheet 連結</a></p>
         <p>此郵件由 Guardian Price Bot 自動發送</p>
     </body></html>
     """
@@ -462,8 +472,7 @@ def process_sku(driver, sku):
         time.sleep(5)
 
         for qty in range(1, 6):
-            # === 新增：數量嚴格驗證機制 ===
-            # 這是防止機器人抓錯數量的關鍵邏輯
+            # 數量嚴格驗證機制
             try:
                 actual_qty_on_page = -1
                 qty_input = None
@@ -475,13 +484,11 @@ def process_sku(driver, sku):
                     except: pass
                 
                 if qty_input:
-                    # 等待最多 5 秒確認數量正確
                     for _ in range(10): 
                         val = qty_input.get_attribute("value")
                         if val and int(val) == qty:
                             actual_qty_on_page = int(val)
                             break
-                        # 順便檢查是否被限購擋住
                         try:
                             err = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')] | //div[contains(@class, 'message-error')]")
                             if err.is_displayed():
@@ -490,16 +497,11 @@ def process_sku(driver, sku):
                         except: pass
                         time.sleep(0.5)
                 
-                # 如果數量不對 (且不是 Qty 1)，嘗試強制修正或記錄
                 if qty > 1 and actual_qty_on_page != -1 and actual_qty_on_page != qty:
                      print(f"   ❌ 嚴重錯誤：網頁數量 ({actual_qty_on_page}) 與預期 ({qty}) 不符！")
-                     # 如果數量卡住，這通常代表「按了沒反應」或「被擋住」
-                     # 為了安全，這裡不抓價格，直接視為 Limit Reached 或 Error
-                     # 但為了讓邏輯繼續，我們先 break 出去，讓後面的 Limit Reached 檢查接手
                      pass 
             except: pass
 
-            # 正常的等待載入
             try: WebDriverWait(driver, 15).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
             except: pass
             
@@ -586,68 +588,94 @@ def process_sku(driver, sku):
         except: pass
         return ["Error"] * 5, product_url
 
-# ================= 主程式 =================
+# ================= 主程式 (壓力測試版) =================
 def main():
     try:
         client = connect_google_sheet()
-        
-        sync_success = sync_promotion_data(client)
-        if not sync_success:
-            print("⚠️ 資料同步失敗，停止執行後續爬蟲")
-            return
-
         driver = init_driver()
-        print("--- 初始化檢查 ---")
-        empty_cart(driver)
         
-        spreadsheet = client.open(SPREADSHEET_FILE_NAME)
-        sheet = spreadsheet.worksheet(WORKSHEET_MAIN)
-        all_values = sheet.get_all_values()
+        loop_count = 0
         
-        print(f"📋 共有 {len(all_values)-1} 筆資料待處理")
-
-        overall_status_match = True
-        error_summary_list = []
-        full_data_for_mail = []
-
-        for i, row_data in enumerate(all_values[1:], start=2):
-            sku = safe_get(row_data, 0).strip()
-            sku = sku.replace("'", "").replace('"', '').strip() 
-            if not sku: continue
+        while True:
+            loop_count += 1
+            print(f"\n 🔥🔥🔥 [壓力測試] 開始第 {loop_count} 輪循環 🔥🔥🔥")
+            print("--- 初始化檢查 ---")
+            empty_cart(driver)
             
-            date_status = safe_get(row_data, 13)
+            # 1. 累加資料到 Sheet1
+            start_row, row_count = sync_promotion_data_accumulate(client)
+            if start_row is None or row_count == 0:
+                print("⚠️ 無法同步資料或無資料，休息 30 秒後重試...")
+                time.sleep(30)
+                continue
+
+            # 2. 取得這輪新增的資料進行爬蟲
+            spreadsheet = client.open(SPREADSHEET_FILE_NAME)
+            sheet = spreadsheet.worksheet(WORKSHEET_MAIN)
             
-            if "非檔期" in date_status or "尚未開始" in date_status:
-                print(f"⚠️ SKU {sku} {date_status}，但仍執行爬蟲更新數據...")
-
-            user_prices = [safe_get(row_data, 2), safe_get(row_data, 3), safe_get(row_data, 4), safe_get(row_data, 5), safe_get(row_data, 6)]
-
-            web_prices, product_url = process_sku(driver, sku)
-            update_time = get_taiwan_time_display()
-            comparison_result = compare_prices(user_prices, web_prices, product_url)
+            # 讀取全部資料，然後切片取出最新加入的那些行
+            all_values = sheet.get_all_values()
             
-            if date_status:
-                comparison_result = f"{date_status} | {comparison_result}"
-
-            data_to_write = web_prices + [update_time, comparison_result, product_url]
-            cell_range = f"H{i}:O{i}"
-            sheet.update(values=[data_to_write], range_name=cell_range)
+            # gspread 的行號是 1-based，Python list 是 0-based
+            # start_row 是 sheet 的行號 (例如 18)，對應 list index 是 17
+            # 標題在第1行 (index 0)
             
-            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result}")
-            print("-" * 30)
-
-            if "均相符" not in comparison_result and "該商品未上架" not in comparison_result:
-                overall_status_match = False
-                error_summary_list.append(f"SKU {sku}: {comparison_result}")
+            # 計算切片範圍
+            slice_start = start_row - 1
+            slice_end = slice_start + row_count
             
-            updated_row = row_data[:7] + web_prices + [update_time, comparison_result, product_url]
-            full_data_for_mail.append(updated_row)
+            rows_to_process = all_values[slice_start:slice_end]
+            
+            print(f"📋 本輪將處理 {len(rows_to_process)} 筆資料 (Row {start_row} ~ {start_row + row_count - 1})")
 
-        print("🎉 所有任務完成！")
-        driver.quit()
-        
-        error_text = "<br>".join(error_summary_list) if error_summary_list else ""
-        send_notification_email(overall_status_match, error_text, full_data_for_mail)
+            overall_status_match = True
+            error_summary_list = []
+            full_data_for_mail = [] # 這輪的郵件報告資料
+
+            for i, row_data in enumerate(rows_to_process):
+                # 計算實際寫回的行號
+                current_sheet_row = start_row + i
+                
+                sku = safe_get(row_data, 0).strip()
+                sku = sku.replace("'", "").replace('"', '').strip() 
+                if not sku: continue
+                
+                date_status = safe_get(row_data, 13)
+                
+                if "非檔期" in date_status or "尚未開始" in date_status:
+                    print(f"⚠️ SKU {sku} {date_status}，但仍執行爬蟲更新數據...")
+
+                user_prices = [safe_get(row_data, 2), safe_get(row_data, 3), safe_get(row_data, 4), safe_get(row_data, 5), safe_get(row_data, 6)]
+
+                web_prices, product_url = process_sku(driver, sku)
+                update_time = get_taiwan_time_display()
+                comparison_result = compare_prices(user_prices, web_prices, product_url)
+                
+                if date_status:
+                    comparison_result = f"{date_status} | {comparison_result}"
+
+                data_to_write = web_prices + [update_time, comparison_result, product_url]
+                cell_range = f"H{current_sheet_row}:O{current_sheet_row}"
+                sheet.update(values=[data_to_write], range_name=cell_range)
+                
+                print(f"✅ SKU {sku} 完成 | 結果: {comparison_result}")
+                print("-" * 30)
+
+                if "均相符" not in comparison_result and "該商品未上架" not in comparison_result:
+                    overall_status_match = False
+                    error_summary_list.append(f"SKU {sku}: {comparison_result}")
+                
+                # 更新 row_data 以便發送這輪的郵件
+                updated_row = row_data[:7] + web_prices + [update_time, comparison_result, product_url]
+                full_data_for_mail.append(updated_row)
+
+            print(f"🎉 第 {loop_count} 輪任務完成！")
+            
+            error_text = "<br>".join(error_summary_list) if error_summary_list else ""
+            send_notification_email(overall_status_match, error_text, full_data_for_mail, loop_count)
+            
+            print("⏳ 休息 10 秒後開始下一輪...")
+            time.sleep(10)
 
     except Exception as main_e:
         print(f"💥 程式執行發生重大錯誤: {main_e}")
