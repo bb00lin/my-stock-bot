@@ -1,9 +1,16 @@
 name: Mix Match Check
 
 on:
+  workflow_dispatch:      # 保留這個，讓您可以手動按按鈕
   schedule:
-    - cron: '0 2 * * *' # 每天台灣時間早上 10 點執行
-  workflow_dispatch:    # 允許手動點擊按鈕執行
+    # 範例 1：每 15 分鐘執行一次
+    - cron: '*/15 * * * *'
+    
+    # 範例 2：每 2 小時執行一次
+    # - cron: '0 */2 * * *'
+    
+    # 範例 3：每天台灣時間早上 10 點執行 (注意時差)
+    # - cron: '0 2 * * *'
 
 jobs:
   run_mix_bot:
