@@ -175,7 +175,7 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         print(f"      ❌ 加入過程發生錯誤: {e}")
         return False
 
-# ================= Task 1: 單一商品檢查 =================
+# ================= Task 1: 單一商品檢查 (修復嚴格檢查版) =================
 def parse_promo_string(promo_text):
     if not promo_text: return ["", "", "", "", ""]
     matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', promo_text)
@@ -248,34 +248,76 @@ def process_sku_single(driver, sku):
         time.sleep(5)
 
         for qty in range(1, 6):
+            # === [關鍵修復] 嚴格數量驗證 ===
+            # 這段邏輯會強制等待網頁上的數量變成我們預期的 qty
+            # 只有當數量正確時，才會往下執行去抓價格
+            verified_qty = False
+            
             try:
-                qty_input = driver.find_element(By.CSS_SELECTOR, "input[data-role='cart-item-qty'], input.input-text.qty")
-                for _ in range(5):
-                    if qty_input.get_attribute("value") == str(qty): break
-                    time.sleep(0.5)
+                qty_input_selectors = ["input[data-role='cart-item-qty']", "input.input-text.qty", "input[type='number']"]
+                qty_input = None
+                for sel in qty_input_selectors:
+                    try: 
+                        qty_input = driver.find_element(By.CSS_SELECTOR, sel)
+                        if qty_input: break
+                    except: pass
+                
+                if qty_input:
+                    # 給它 10 次機會 (5秒)，檢查網頁數值是否更新
+                    for _ in range(10):
+                        val = qty_input.get_attribute("value")
+                        if val and int(val) == qty:
+                            verified_qty = True
+                            break
+                        # 檢查是否有限購警告
+                        try:
+                            err = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')] | //div[contains(@class, 'message-error')]")
+                            if err.is_displayed():
+                                # 發現限購，直接跳出，交由後面邏輯處理
+                                break 
+                        except: pass
+                        time.sleep(0.5)
             except: pass
 
+            # 如果不是 Qty 1 (初始)，且驗證失敗，表示數量卡住
+            if qty > 1 and not verified_qty:
+                print(f"   ⚠️ 數量卡住，無法達到 {qty}，可能是限購或網頁延遲")
+                # 這時候不應該抓價格，因為價格肯定是錯的 (舊的)
+                # 直接讓價格設為 Error 或 Limit Reached 邏輯接手
+                pass 
+
+            # 正常抓價格流程
             try: WebDriverWait(driver, 10).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')]")))
             except: pass
             
-            price = get_total_price_safely(driver)
-            
+            # 檢查 Limit Reached (在抓價格之前先看有沒有紅字)
+            is_limit_reached = False
             try:
-                err = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')]")
+                err = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')] | //div[contains(@class, 'message-error')]")
                 if err.is_displayed():
-                    for _ in range(qty, 6): prices.append("Limit Reached")
-                    break
+                    is_limit_reached = True
             except: pass
 
+            if is_limit_reached:
+                print(f"   🛑 達到購買上限 (Qty {qty})")
+                for _ in range(qty, 6): prices.append("Limit Reached")
+                break # 直接結束後續數量循環
+
+            # 只有數量正確才抓價格，否則視為異常
+            price = "Error"
+            if qty == 1 or verified_qty:
+                price = get_total_price_safely(driver)
+            
             if not price: price = "Error"
             prices.append(price)
             driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}.png")
 
+            # 點擊下一階
             if qty < 5:
                 try:
                     plus = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     driver.execute_script("arguments[0].click();", plus)
-                    time.sleep(1)
+                    time.sleep(1) # 等待點擊反應
                 except: break
         
         while len(prices) < 5: prices.append("Error")
@@ -378,7 +420,6 @@ def process_mix_case(driver, strategy_str):
             
             success = add_single_item_to_cart(driver, sku, qty)
             if not success:
-                # 失敗也要截圖
                 driver.save_screenshot(f"{folder_name}/Add_Fail_{sku}.png")
                 zip_path = create_zip_evidence("Mix_Error", folder_name)
                 return "Add Fail", "", zip_path
@@ -423,8 +464,6 @@ def run_mix_match_task(client, driver):
         
         web_total, link, zip_file = process_mix_case(driver, strategy)
         
-        # === Mix Match 智慧過濾：只夾帶有問題的 ===
-        # 如果 zip_file 存在，但結果是"Add Fail"或算錯，才加入
         is_error = False
         result_text = ""
         
@@ -451,7 +490,6 @@ def run_mix_match_task(client, driver):
             error_summary.append(f"{main_sku}: {result_text}")
             if zip_file: attachments.append(zip_file)
         else:
-            # 如果正常，刪除 zip 節省空間
             if zip_file: 
                 try: os.remove(zip_file)
                 except: pass
@@ -468,7 +506,6 @@ def run_mix_match_task(client, driver):
     
     send_email_generic(subject, summary_text, results_for_mail, attachments)
     
-    # 清理 Mix Match 附件
     for f in attachments:
         try: os.remove(f)
         except: pass
@@ -559,7 +596,7 @@ def run_task_1(client, driver):
         if "Not Found" in link:
              has_p = any(p and p not in ["Error","Search Fail"] for p in web_prices)
              res = "該商品未上架，但是卻有商品價格請確認!" if has_p else "該商品未上架"
-             if has_p: is_abnormal = True # 雖未上架但有價格->異常
+             if has_p: is_abnormal = True 
         else:
             for idx, up in enumerate(user_prices):
                 wp = web_prices[idx]
@@ -579,7 +616,6 @@ def run_task_1(client, driver):
 
         if date_status: res = f"{date_status} | {res}"
         
-        # === Task 1 智慧過濾：只夾帶異常附件 ===
         if zip_f:
             if is_abnormal or "Error" in res or "Fail" in res:
                 attachments.append(zip_f)
@@ -615,13 +651,11 @@ def main():
         client = connect_google_sheet()
         driver = init_driver()
         
-        # === 執行 Task 1 (單商品) ===
         run_task_1(client, driver)
         
         print("\n⏳ 休息 10 秒後執行 Task 2...")
         time.sleep(10)
         
-        # === 執行 Task 2 (Mix Match) ===
         run_mix_match_task(client, driver)
         
         driver.quit()
