@@ -22,7 +22,7 @@ SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
 WORKSHEET_MAIN = '工作表1' 
 WORKSHEET_PROMO = 'promotion'
 
-SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1vN7v1d8xYJ9S_X3U4qYy0eC4p5a6b7c8d9e0f/edit"
+SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/您的試算表ID/edit"
 
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
@@ -57,17 +57,10 @@ def parse_date(date_str):
     except:
         return None
 
-# ================= 資料同步與解析功能 (修正Regex) =================
+# ================= 資料同步與解析功能 =================
 def parse_promo_string(promo_text):
-    """
-    解析促銷字串，找出所有數量的價格。
-    修正：兼容 'For$166' (無空格) 與 'For $166' (有空格) 的格式
-    """
     if not promo_text: return ["", "", "", "", ""]
-    
-    # === 關鍵修改 ===
-    # 原本: \s+ (強制要空格) -> 改為: \s* (空格可有可無)
-    # 這樣 "For$166" 也能被抓到了
+    # 修正 Regex: 允許 For 與 $ 之間沒有空格 (\s*)
     matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', promo_text)
     
     price_map = {}
@@ -80,20 +73,16 @@ def parse_promo_string(promo_text):
         
     if not price_map: return ["", "", "", "", ""]
 
-    # 找出「最佳單價」(Best Unit Price)
+    # 找出最佳單價
     best_unit_price = float('inf')
-    
     for q, p in price_map.items():
         unit_p = p / q
         if unit_p < best_unit_price:
             best_unit_price = unit_p
     
-    if best_unit_price == float('inf'): 
-        return ["", "", "", "", ""]
+    if best_unit_price == float('inf'): return ["", "", "", "", ""]
 
     calculated_prices = []
-    
-    # 計算 Qty 1~5
     for q in range(1, 6):
         if q in price_map:
             calculated_prices.append(str(price_map[q]))
@@ -161,7 +150,7 @@ def sync_promotion_data(client):
     print("✅ 資料同步完成")
     return True
 
-# ================= 郵件通知功能 =================
+# ================= 郵件通知功能 (主旨邏輯更新) =================
 def generate_html_table(data_rows):
     if not data_rows: return ""
     headers = ["SKU", "商品名稱", "比對結果", "更新時間"]
@@ -196,25 +185,57 @@ def send_notification_email(all_match, error_summary, full_data):
         return
 
     print("📧 正在發送通知郵件...")
-    if all_match:
-        subject = "[Ozio比對結果-正常]價格相符"
-        color = "green"
-        summary_text = "所有商品價格比對結果均相符 (或非檔期)。"
-    else:
-        subject = "[Ozio比對結果-異常]請檢查表格"
-        color = "red"
-        summary_text = f"發現異常狀況，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
+    
+    # === 新增：判斷主旨圖示邏輯 ===
+    # 檢查是否有任何抓取到的價格包含 "Limit Reached"
+    has_limit_reached = False
+    if full_data:
+        for row in full_data:
+            # 網站價格位於 index 7~11 (Qty 1~5)
+            web_prices_slice = row[7:12] 
+            if any("Limit Reached" in str(p) for p in web_prices_slice):
+                has_limit_reached = True
+                break
+    
+    subject_prefix = ""
+    subject_text = ""
+    color = ""
+    summary_text = ""
 
+    # 邏輯 1: 如果有 Limit Reached -> ⚠️
+    if has_limit_reached:
+        subject_prefix = "⚠️"
+        subject_text = "[Ozio比對結果-警告] 達購買上限/異常"
+        color = "#ff9800" # 橘色
+        summary_text = f"發現部分商品達到購買上限或有其他異常，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
+    
+    # 邏輯 2: 如果沒有 Limit Reached，且比對結果不是全符合 -> 🔥
+    elif not all_match:
+        subject_prefix = "🔥"
+        subject_text = "[Ozio比對結果-異常] 請檢查表格"
+        color = "red" # 紅色
+        summary_text = f"發現價格異常，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
+        
+    # 邏輯 3: 全符合 -> ✅
+    else:
+        subject_prefix = "✅"
+        subject_text = "[Ozio比對結果-正常] 價格相符"
+        color = "green" # 綠色
+        summary_text = "所有商品價格比對結果均相符 (或非檔期)。"
+
+    final_subject = f"{subject_prefix} {subject_text}"
+    
+    # 生成內容
     snapshot_table = generate_html_table(full_data)
 
     msg = MIMEMultipart()
     msg['From'] = MAIL_USERNAME
     msg['To'] = MAIL_RECEIVER
-    msg['Subject'] = subject
+    msg['Subject'] = final_subject
 
     html = f"""
     <html><body>
-        <h2 style="color:{color}">{subject}</h2>
+        <h2 style="color:{color}">{final_subject}</h2>
         <p>{summary_text}</p>
         <p><b>以下為工作表快照：</b></p>
         {snapshot_table}
@@ -260,6 +281,7 @@ def compare_prices(user_prices, web_prices):
         w_raw = web_prices[i]
         u_val = clean_price(u_raw)
         
+        # 處理 Limit Reached
         if w_raw == "Limit Reached":
             if u_val: mismatches.append(f"Q{i+1}:Limit Reached")
             continue
@@ -356,7 +378,6 @@ def process_sku(driver, sku):
         time.sleep(5)
         handle_popups(driver)
 
-        # 1. 搜尋
         search_input = None
         selectors = ["input[placeholder*='Search']", "input[name='q']", "input[type='search']", "input.search-input"]
         for attempt in range(2): 
@@ -386,7 +407,7 @@ def process_sku(driver, sku):
         time.sleep(5)
         handle_popups(driver)
 
-        # 2. 點擊商品
+        # 點擊商品
         try:
             xpath_sku = f"//a[contains(@href, '{sku}')]"
             xpath_generic = "(//div[contains(@class, 'product')]//a)[1]"
@@ -423,7 +444,7 @@ def process_sku(driver, sku):
         time.sleep(4)
         handle_popups(driver)
 
-        # 3. 加入購物車
+        # 加入購物車
         try:
             add_btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart'], button.action.tocart")))
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", add_btn)
@@ -438,7 +459,7 @@ def process_sku(driver, sku):
 
         time.sleep(5)
 
-        # 4. 調整數量與抓取價格
+        # 調整數量與抓取價格
         for qty in range(1, 6):
             try: WebDriverWait(driver, 15).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
             except: pass
