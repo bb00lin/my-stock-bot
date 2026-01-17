@@ -3,6 +3,7 @@ import gspread
 import re
 import os
 import shutil
+import random
 from datetime import datetime, timedelta, timezone
 from oauth2client.service_account import ServiceAccountCredentials
 from selenium import webdriver
@@ -12,7 +13,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
 
 # ================= 設定區 =================
 SHEET_NAME = 'Guardian_Price_Check'
@@ -94,16 +95,49 @@ def init_driver():
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
+    # === 升級：反偵測設定 ===
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
+    options.add_argument("--disable-blink-features=AutomationControlled") 
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    
+    # 防止 WebDriver 特徵被偵測
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    
     return driver
+
+def handle_popups(driver):
+    """ 嘗試關閉可能遮擋視線的彈窗 """
+    try:
+        # 這裡列出常見的彈窗關閉按鈕選擇器
+        popups = [
+            "button[aria-label='Close']", 
+            "div.close-popup", 
+            "button.align-right.secondary.slidedown-button", # 常見的 Cookie 同意按鈕
+            "#onetrust-accept-btn-handler" # Cookie 同意
+        ]
+        for p in popups:
+            try:
+                btn = driver.find_element(By.CSS_SELECTOR, p)
+                if btn.is_displayed():
+                    driver.execute_script("arguments[0].click();", btn)
+                    print("   👋 已關閉一個阻擋視窗")
+                    time.sleep(1)
+            except:
+                pass
+    except:
+        pass
 
 def empty_cart(driver):
     print("🧹 正在執行核彈級清空 (刪除 Cookies)...")
     try:
+        # 確保在網域內才能清
         if "guardian.com.sg" not in driver.current_url:
-             driver.get("https://guardian.com.sg/cart")
+             driver.get("https://guardian.com.sg/")
              time.sleep(2)
+        
         driver.delete_all_cookies()
         driver.execute_script("window.localStorage.clear();")
         driver.execute_script("window.sessionStorage.clear();")
@@ -150,58 +184,104 @@ def process_sku(driver, sku):
     
     try:
         driver.get(URL)
-        time.sleep(3)
+        time.sleep(5)
+        handle_popups(driver) # 嘗試關閉彈窗
 
-        # 1. 搜尋
+        # 1. 搜尋 (增強版選擇器)
         try:
-            search_box = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "input[placeholder='Search for a products or brand']"))
-            )
-            search_box.clear()
-            search_box.send_keys(sku)
-            search_box.send_keys(Keys.RETURN)
+            search_input = None
+            selectors = [
+                "input[placeholder*='Search']", # 模糊比對 placeholder
+                "input[name='q']", 
+                "input[type='search']",
+                "input.search-input"
+            ]
+            
+            for selector in selectors:
+                try:
+                    search_input = WebDriverWait(driver, 5).until(
+                        EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
+                    )
+                    if search_input:
+                        break
+                except:
+                    continue
+            
+            if not search_input:
+                raise TimeoutException("找不到搜尋框")
+
+            search_input.clear()
+            search_input.send_keys(sku)
+            time.sleep(1)
+            search_input.send_keys(Keys.RETURN)
         except TimeoutException:
-            print("❌ 搜尋框載入超時")
+            print("❌ 搜尋框載入超時 (可能網站載入慢或被阻擋)")
+            driver.save_screenshot(f"{sku_folder}/{sku}_search_fail.png")
             return ["Search Fail"] * 5, "URL Not Found"
 
         time.sleep(5)
+        handle_popups(driver)
 
-        # 2. 點擊商品
+        # 2. 點擊商品 (並確認是否進入內頁)
         try:
             xpath_selectors = [
+                f"//a[contains(@href, '{sku}')]", # 最準：連結包含 SKU
                 "(//div[contains(@class, 'product')]//a)[1]", 
                 "(//main//a[.//img])[1]", 
                 "//div[data-testid='product-card']//a"
             ]
-            first_product = None
+            
+            clicked = False
             for xpath in xpath_selectors:
                 try:
-                    first_product = driver.find_element(By.XPATH, xpath)
+                    product_link = driver.find_element(By.XPATH, xpath)
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", product_link)
+                    time.sleep(1)
+                    # 嘗試一般點擊
+                    try:
+                        product_link.click()
+                    except:
+                        # 失敗則用 JS 點擊
+                        driver.execute_script("arguments[0].click();", product_link)
+                    clicked = True
                     break
                 except:
                     continue
             
-            if first_product:
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", first_product)
-                time.sleep(1)
-                driver.execute_script("arguments[0].click();", first_product)
-                print("👉 (JS強制) 成功點擊商品，進入內頁")
-                time.sleep(2) 
-                product_url = driver.current_url
-                print(f"🔗 取得商品連結: {product_url}")
-            else:
+            if not clicked:
                 raise NoSuchElementException("無法找到任何商品連結")
+            
+            # === 關鍵：等待網址改變，確認離開搜尋頁 ===
+            print("👉 已嘗試點擊商品，驗證跳轉中...")
+            try:
+                WebDriverWait(driver, 10).until(
+                    lambda d: "search.html" not in d.current_url
+                )
+            except:
+                print("   ⚠️ 警告：網址似乎仍停留在搜尋頁，可能點擊失敗")
+            
+            time.sleep(2) 
+            product_url = driver.current_url
+            print(f"🔗 取得目前連結: {product_url}")
+
+            # 二次確認：如果還在搜尋頁，回傳失敗
+            if "search.html" in product_url:
+                print("❌ 點擊後仍停留在搜尋結果頁，視為失敗")
+                driver.save_screenshot(f"{sku_folder}/{sku}_click_fail.png")
+                return ["Click Fail"] * 5, product_url
 
         except NoSuchElementException:
             print(f"⚠️ 搜尋不到 SKU {sku}")
+            driver.save_screenshot(f"{sku_folder}/{sku}_not_found.png")
             return ["Not Found"] * 5, "URL Not Found"
 
         time.sleep(4)
+        handle_popups(driver)
 
         # 3. 加入購物車
         try:
             add_btn = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart']"))
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart'], button.action.tocart"))
             )
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", add_btn)
             time.sleep(1)
@@ -210,14 +290,14 @@ def process_sku(driver, sku):
             time.sleep(5) 
             driver.get("https://guardian.com.sg/cart")
         except TimeoutException:
-            print("❌ 加入購物車按鈕找不到")
+            print("❌ 加入購物車按鈕找不到 (可能商品缺貨或未正確進入內頁)")
+            driver.save_screenshot(f"{sku_folder}/{sku}_add_fail.png")
             return ["Add Fail"] * 5, product_url
 
         time.sleep(5)
 
         # 4. 調整數量與抓取價格
         for qty in range(1, 6):
-            # 智慧等待 Loading 消失
             try:
                 WebDriverWait(driver, 15).until_not(
                     EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
@@ -250,7 +330,7 @@ def process_sku(driver, sku):
                             EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
                         )
                     except TimeoutException:
-                        print("   ⚠️ 等待價格更新超時 (網站可能卡頓)，嘗試繼續...")
+                        print("   ⚠️ 等待價格更新超時，嘗試繼續...")
 
                     time.sleep(2) 
 
@@ -272,13 +352,11 @@ def process_sku(driver, sku):
         
         empty_cart(driver)
 
-        # === 打包截圖 (供 GitHub 下載) ===
-        print("📦 正在打包截圖 (供 GitHub Artifacts 下載)...")
+        # === 打包截圖 ===
+        print("📦 正在打包截圖...")
         timestamp = get_taiwan_time_str()
         zip_filename = f"{sku}_{timestamp}"
         shutil.make_archive(zip_filename, 'zip', sku_folder)
-        
-        # 刪除暫存資料夾 (保留 .zip 檔)
         shutil.rmtree(sku_folder) 
 
         return prices, product_url
@@ -318,16 +396,13 @@ def main():
                 safe_get(row_data, 6)  # G
             ]
 
-            # 執行爬蟲，不再回傳 drive_link
             web_prices, product_url = process_sku(driver, sku)
             
             update_time = get_taiwan_time_display()
             comparison_result = compare_prices(user_prices, web_prices)
             
-            # 欄位調整: H~L (Prices) + M (Time) + N (Result) + O (Product URL)
             data_to_write = web_prices + [update_time, comparison_result, product_url]
             
-            # 寫入範圍: H~O (共 8 欄)
             cell_range = f"H{i}:O{i}"
             sheet.update(values=[data_to_write], range_name=cell_range)
             
