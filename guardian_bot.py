@@ -57,14 +57,9 @@ def parse_date(date_str):
     except:
         return None
 
-# ================= 資料同步與解析功能 (邏輯更新) =================
+# ================= 資料同步與解析功能 =================
 def parse_promo_string(promo_text):
-    """
-    解析促銷字串。
-    對於未定義的數量，使用「最佳單價」推算，並強制捨去第二位小數 (只保留一位)。
-    """
     if not promo_text: return ["", "", "", "", ""]
-    
     matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', promo_text)
     price_map = {}
     for qty_str, price_str in matches:
@@ -76,7 +71,6 @@ def parse_promo_string(promo_text):
         
     if not price_map: return ["", "", "", "", ""]
 
-    # 找出最佳單價
     best_unit_price = float('inf')
     for q, p in price_map.items():
         unit_p = p / q
@@ -86,20 +80,13 @@ def parse_promo_string(promo_text):
     if best_unit_price == float('inf'): return ["", "", "", "", ""]
 
     calculated_prices = []
-    
     for q in range(1, 6):
         if q in price_map:
-            # 規則有定義，直接用定義值
             calculated_prices.append(str(price_map[q]))
         else:
-            # 規則沒定義，用最佳單價推算
             total = best_unit_price * q
-            
-            # === 關鍵修改：強制保留1位小數 (忽略第2位以後) ===
-            # 例如: 221.333 -> 221.3
+            # 保留1位小數，無條件捨去第2位
             total_truncated = int(total * 10) / 10.0
-            
-            # 格式化字串，去除 .0 (例如 221.0 -> 221, 221.3 -> 221.3)
             val_str = "{:.1f}".format(total_truncated).rstrip('0').rstrip('.')
             calculated_prices.append(val_str)
             
@@ -144,6 +131,7 @@ def sync_promotion_data(client):
         elif d_start and not d_end:
              if today < d_start: date_status = f"⚠️ 尚未開始 (起:{d_start.strftime('%m/%d')})"
         
+        # 寫入 N 欄 (Index 13) 供 main 讀取
         row_data = [sku, prod_name] + user_prices + [""] * 6 + [date_status] + [""]
         new_rows.append(row_data)
 
@@ -179,7 +167,7 @@ def generate_html_table(data_rows):
         
         bg_color = "#ffffff"
         if "Diff" in result or "異常" in result: bg_color = "#ffebee" 
-        elif "非檔期" in result: bg_color = "#fff3e0" 
+        elif "非檔期" in result or "尚未開始" in result: bg_color = "#fff3e0" 
             
         table_html += f"<tr style='background-color: {bg_color};'>"
         table_html += f"<td style='padding: 8px;'>{sku}</td>"
@@ -220,12 +208,12 @@ def send_notification_email(all_match, error_summary, full_data):
         subject_prefix = "🔥"
         subject_text = "[Ozio比對結果-異常] 請檢查表格"
         color = "red" 
-        summary_text = f"發現價格異常，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
+        summary_text = f"發現價格異常或非檔期商品，請檢查下方表格。<br>異常摘要:<br>{error_summary}"
     else:
         subject_prefix = "✅"
         subject_text = "[Ozio比對結果-正常] 價格相符"
         color = "green" 
-        summary_text = "所有商品價格比對結果均相符 (或非檔期)。"
+        summary_text = "所有商品價格比對結果均相符。"
 
     final_subject = f"{subject_prefix} {subject_text}"
     snapshot_table = generate_html_table(full_data)
@@ -577,12 +565,12 @@ def main():
             sku = sku.replace("'", "").replace('"', '').strip() 
             if not sku: continue
             
+            # 讀取日期狀態 (Index 13)
             date_status = safe_get(row_data, 13)
             
             if "非檔期" in date_status or "尚未開始" in date_status:
-                print(f"⏭️ SKU {sku} {date_status}，跳過爬蟲。")
-                full_data_for_mail.append(row_data)
-                continue
+                print(f"⚠️ SKU {sku} {date_status}，但仍執行爬蟲更新數據...")
+                # 不跳過，繼續執行
 
             user_prices = [safe_get(row_data, 2), safe_get(row_data, 3), safe_get(row_data, 4), safe_get(row_data, 5), safe_get(row_data, 6)]
 
@@ -590,6 +578,10 @@ def main():
             update_time = get_taiwan_time_display()
             comparison_result = compare_prices(user_prices, web_prices)
             
+            # 如果有日期狀態，將其合併到比對結果中
+            if date_status:
+                comparison_result = f"{date_status} | {comparison_result}"
+
             data_to_write = web_prices + [update_time, comparison_result, product_url]
             cell_range = f"H{i}:O{i}"
             sheet.update(values=[data_to_write], range_name=cell_range)
@@ -597,7 +589,8 @@ def main():
             print(f"✅ SKU {sku} 完成 | 結果: {comparison_result}")
             print("-" * 30)
 
-            if comparison_result != "均相符":
+            # 更新整體狀態
+            if "均相符" not in comparison_result:
                 overall_status_match = False
                 error_summary_list.append(f"SKU {sku}: {comparison_result}")
             
