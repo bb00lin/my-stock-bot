@@ -15,10 +15,16 @@ from selenium.common.exceptions import TimeoutException, StaleElementReferenceEx
 # --- 設定區 (從環境變數讀取，確保安全) ---
 URL = os.environ.get("CONF_URL")  # Confluence 網址
 USERNAME = os.environ.get("CONF_USER") # 您的 Email
-PASSWORD = os.environ.get("CONF_PASS") # 您的密碼 或 API Token
+PASSWORD = os.environ.get("CONF_PASS") # 您的 API Token
 
 # --- 日期計算邏輯 ---
 def get_target_dates():
+    """
+    計算本週的關鍵日期：
+    1. 本週一 (用於 JQL Start Date)
+    2. 本週日 (用於 JQL End Date)
+    3. 本週五 (用於檔案命名)
+    """
     today = date.today()
     # 取得本週一 (Monday = 0)
     monday = today - timedelta(days=today.weekday())
@@ -34,139 +40,149 @@ def get_target_dates():
     }
 
 def init_driver():
+    """初始化 Chrome Driver，包含反偵測設定"""
     chrome_options = Options()
-    chrome_options.add_argument("--headless")  # GitHub Actions 必須使用無頭模式
+    # 使用新版無頭模式，比舊版更難被偵測
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    # 本地測試時若想看畫面，可註解掉 "--headless"
+    # 【關鍵修復】加入 User-Agent 偽裝成真實的電腦瀏覽器，解決 Timeout 問題
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
 def login(driver):
-    print("正在登入 Confluence...")
+    """執行 Atlassian 登入流程"""
+    print(f"正在前往: {URL}")
     driver.get(URL)
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 30) # 延長等待時間至 30 秒
     
-    # 輸入 Email
-    email_field = wait.until(EC.element_to_be_clickable((By.ID, "username")))
-    email_field.send_keys(USERNAME)
-    email_field.send_keys(Keys.RETURN)
-    
-    # 等待密碼欄位出現並輸入
-    password_field = wait.until(EC.element_to_be_clickable((By.ID, "password")))
-    password_field.send_keys(PASSWORD)
-    password_field.send_keys(Keys.RETURN)
-    
-    # 確保登入完成，檢測是否進入首頁或指定頁面
-    print("登入動作完成，等待頁面載入...")
-    time.sleep(10) # 讓慢速的 Confluence 有時間跑完
+    try:
+        print("等待輸入帳號...")
+        # 1. 輸入 Email (改用 visibility_of_element_located 確保元素可見)
+        email_field = wait.until(EC.visibility_of_element_located((By.ID, "username")))
+        email_field.clear()
+        email_field.send_keys(USERNAME)
+        
+        # 顯式點擊「繼續」按鈕，比按 Enter 更穩定
+        continue_btn = driver.find_element(By.ID, "login-submit")
+        continue_btn.click()
+        
+        print("等待輸入密碼...")
+        # 2. 等待密碼欄位出現
+        password_field = wait.until(EC.visibility_of_element_located((By.ID, "password")))
+        password_field.clear()
+        password_field.send_keys(PASSWORD)
+        
+        # 點擊登入按鈕
+        login_btn = driver.find_element(By.ID, "login-submit")
+        login_btn.click()
+        
+        # 3. 確保登入完成
+        print("登入資訊已送出，正在等待頁面跳轉...")
+        time.sleep(15) # 給予充裕的時間讓 Confluence 載入複雜的首頁
+
+    except TimeoutException:
+        print("\n!!! 嚴重錯誤：登入逾時 !!!")
+        print(f"當前瀏覽器標題: {driver.title}")
+        print("這通常代表 Atlassian 阻擋了自動化登入，或者頁面還在轉圈圈。")
+        # 儲存截圖以便除錯
+        driver.save_screenshot("login_error_debug.png")
+        raise
 
 def update_jira_macros(driver, date_info):
-    wait = WebDriverWait(driver, 15)
+    """搜尋並更新頁面上的 Jira 表格日期"""
+    wait = WebDriverWait(driver, 20)
     
-    # 定位所有的 Jira Macro 區塊
-    # 根據提供的 HTML，我們抓取外層的 wrapper
-    # 注意：因為修改後 DOM 會重繪，所以不能一次抓完 list loop，必須每次重新抓取 "還沒改過" 的或者用 index
-    
-    print("開始搜尋頁面上的 Jira 表格...")
-    
-    # 這裡採用一個策略：不斷尋找並修改，直到找不到未修改的日期，或是遍歷所有表格
-    # 為了簡化，我們先假設依照順序修改
-    
-    # 進入 iframe (如果是 iframe) 或直接在頁面上編輯
-    # 根據 HTML 結構，這些表格似乎直接嵌在 div 裡，不是 iframe，但編輯時會彈出 Modal
-    
-    # 抓取所有這類 div
+    # 根據提供的 HTML 結構，定位 Jira Macro 區塊
     macro_locator = (By.CSS_SELECTOR, "div[data-prosemirror-node-name='blockCard']")
+    
+    # 先等待頁面元素載入
+    try:
+        wait.until(EC.presence_of_element_located(macro_locator))
+    except TimeoutException:
+        print("頁面上找不到 Jira 表格 (blockCard)，請確認是否已進入編輯模式或頁面是否正確。")
+        return
+
     macros = driver.find_elements(*macro_locator)
-    print(f"共發現 {len(macros)} 個 Jira 表格。")
+    print(f"共發現 {len(macros)} 個 Jira 表格，準備開始更新...")
 
     for i in range(len(macros)):
         try:
-            # 重新抓取元素，避免 StaleElementReferenceException
+            # 重新抓取元素列表，避免 StaleElementReferenceException (DOM 變更後舊元素失效)
             current_macros = driver.find_elements(*macro_locator)
             if i >= len(current_macros):
                 break
             
             target_macro = current_macros[i]
             
-            # 1. 點擊表格以選取
+            # 1. 捲動到目標並點擊選取
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_macro)
             time.sleep(1)
             target_macro.click()
             
-            # 2. 點擊下方的「編輯」按鈕 (通常是鉛筆圖示)
-            # 這裡需要一個通用的 locator，通常選取後會浮現 toolbar
-            # 嘗試尋找 Edit 按鈕 (這裡可能需要根據實際狀況調整 XPath)
-            edit_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='Edit'] | //span[text()='Edit'] | //button[contains(., 'Edit')]")))
-            edit_btn.click()
+            # 2. 點擊下方的「編輯」按鈕 (鉛筆圖示)
+            # 嘗試使用通用的 Edit 按鈕定位
+            try:
+                edit_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='Edit'] | //span[text()='Edit'] | //button[contains(., 'Edit')]")))
+                edit_btn.click()
+            except TimeoutException:
+                print(f"第 {i+1} 個表格無法點擊編輯按鈕，跳過。")
+                continue
+
             print(f"正在編輯第 {i+1} 個表格...")
 
-            # 3. 等待 JQL 編輯器出現 (利用您提供的 data-testid)
+            # 3. 等待 JQL 編輯器輸入框出現 (使用 data-testid)
             jql_input = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
             
-            # 4. 取得目前 JQL 文字
+            # 4. 取得目前 JQL 文字並計算新日期
             old_jql = jql_input.text
-            
-            # 5. 使用 Regex 替換日期
-            # 目標：找到 "YYYY-M-D" 或 "YYYY-MM-DD"，替換成新的
-            # 假設我們只換 `DURING` 裡面的日期
-            
             new_jql = old_jql
             
-            # 替換邏輯：尋找日期格式並強制換成本週一與週日
-            # Regex 尋找: 4碼年-1或2碼月-1或2碼日
+            # Regex 尋找: 4碼年-1或2碼月-1或2碼日 (例如 2026-1-12)
             date_pattern = r"\d{4}-\d{1,2}-\d{1,2}"
-            
             dates_found = re.findall(date_pattern, old_jql)
             
             if len(dates_found) >= 2:
-                # 假設第一個是開始日，第二個是結束日 (通常是這樣)
-                # 這裡做得更細緻一點：保留原本的時間 (09:30)，只換日期
-                # 但最簡單的方法是直接換掉整個日期字串
-                
                 # 替換第一個日期為本週一
                 new_jql = re.sub(dates_found[0], date_info['monday_str'], new_jql, count=1)
                 # 替換第二個日期為本週日
                 new_jql = re.sub(dates_found[1], date_info['sunday_str'], new_jql, count=1)
                 
-                print(f"更新 JQL: {dates_found} -> {date_info['monday_str']} ~ {date_info['sunday_str']}")
+                print(f"更新日期區間: {dates_found[0]}~{dates_found[1]} -> {date_info['monday_str']}~{date_info['sunday_str']}")
                 
                 # 6. 輸入新的 JQL
-                # 因為是 contenteditable，send_keys 容易出錯，建議先清空
                 jql_input.click()
-                
-                # 全選並刪除 (Mac 用 Command, Windows/Linux 用 Control)
-                # GitHub Actions 是 Linux 環境
+                # 全選並刪除 (Linux 環境用 Control+a)
                 jql_input.send_keys(Keys.CONTROL + "a")
                 jql_input.send_keys(Keys.BACK_SPACE)
                 time.sleep(0.5)
                 
-                # 輸入新文字
+                # 輸入新文字並按 Enter
                 jql_input.send_keys(new_jql)
-                jql_input.send_keys(Keys.ENTER) # 觸發驗證
+                jql_input.send_keys(Keys.ENTER)
                 time.sleep(1)
 
-                # 7. 點擊 Search (驗證) (利用您提供的 data-testid)
+                # 7. 點擊 Search 按鈕驗證 (使用 data-testid)
                 search_btn = driver.find_element(By.CSS_SELECTOR, "[data-testid='jql-editor-search']")
                 search_btn.click()
-                time.sleep(2) # 等待搜尋結果
+                time.sleep(2) # 等待搜尋結果刷新
 
-                # 8. 點擊 Insert Results (儲存)
-                # 這裡需要抓取 Insert 按鈕，通常在右下角
-                insert_btn = driver.find_element(By.XPATH, "//button[contains(., 'Insert') or contains(., 'Save')]")
+                # 8. 點擊 Insert/Save 按鈕
+                # 尋找含有 Insert 或 Save 文字的按鈕
+                insert_btn = driver.find_element(By.XPATH, "//button[contains(., 'Insert') or contains(., 'Save') or contains(., '插入')]")
                 insert_btn.click()
                 
-                # 等待 Modal 消失
+                # 等待編輯框消失，代表儲存成功
                 wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
-                time.sleep(2) # 等待頁面更新
+                time.sleep(2) 
                 
             else:
-                print("未在 JQL 中發現足夠的日期格式，跳過此區塊。")
-                # 按取消或 ESC 關閉視窗
+                print("JQL 中未發現足夠的日期格式，跳過此區塊。")
                 webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
 
         except Exception as e:
@@ -177,32 +193,32 @@ def update_jira_macros(driver, date_info):
 
 def main():
     dates = get_target_dates()
-    print(f"計算目標日期: 本週一 {dates['monday_str']}, 本週日 {dates['sunday_str']}")
+    print(f"=== 自動化任務開始 ===")
+    print(f"目標日期設定: 本週一 {dates['monday_str']}, 本週日 {dates['sunday_str']}, 檔名日期 {dates['friday_filename']}")
     
     driver = init_driver()
     try:
         login(driver)
         
-        # --- 自動導航邏輯 ---
-        # 1. 找到左側最新的 Report (假設已經在該 Space 下)
-        # 這部分需要根據實際 URL 調整，若 URL 固定則直接 driver.get(TARGET_PAGE)
+        # --- 自動化流程佔位符 ---
+        # 目前代碼會登入並進入首頁。
+        # 因為「複製頁面」與「重新命名」需要複雜的導航邏輯，
+        # 我們先測試能否成功登入。
         
-        # 模擬複製頁面邏輯 (需根據實際按鈕 ID 撰寫，以下為示意)
-        # driver.find_element(By.ID, "more-actions-menu").click()
-        # driver.find_element(By.ID, "copy-page").click()
+        # 如果您已經有目標頁面的編輯網址，可以解除下方註解並填入：
+        # TARGET_EDIT_URL = "https://qsiaiot.atlassian.net/wiki/spaces/YourSpace/pages/edit/YourPageID"
+        # driver.get(TARGET_EDIT_URL)
+        # time.sleep(5)
+        # update_jira_macros(driver, dates)
         
-        # 2. 進入編輯模式後...
-        # 假設現在已經在新頁面的編輯模式
+        print("登入測試完成。若要執行編輯，請設定目標網址。")
         
-        update_jira_macros(driver, dates)
-        
-        # 3. 發布頁面
-        # publish_btn = driver.find_element(By.ID, "publish-button")
-        # publish_btn.click()
-        
-        print("自動化流程結束。")
-        
+    except Exception as e:
+        print(f"執行過程中發生未預期的錯誤: {str(e)}")
+        # 截圖以供檢查
+        driver.save_screenshot("fatal_error.png")
     finally:
+        print("關閉瀏覽器...")
         driver.quit()
 
 if __name__ == "__main__":
