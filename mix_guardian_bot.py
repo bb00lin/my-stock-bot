@@ -29,7 +29,7 @@ WORKSHEET_PROMO = 'promotion'
 # ⚠️⚠️⚠️【請務必修改這裡】⚠️⚠️⚠️
 # 請將下方的網址換成您實際 Google Sheet 的網址 (瀏覽器網址列那串)
 # 否則信件中的連結會失效
-SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/您的試算表ID/edit"
+SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgpoiwGE7tO-QSY2-kC_ecf868cY/edit?gid=1727836519#gid=1727836519"
 
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
