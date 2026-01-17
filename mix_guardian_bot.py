@@ -26,7 +26,7 @@ WORKSHEET_MAIN = '工作表1'
 WORKSHEET_MIX = 'Mix_Match_Check' 
 WORKSHEET_PROMO = 'promotion'
 
-# [已修正] 使用您提供的正確 Google Sheet 網址
+# [已修正] 您的正確 Google Sheet 網址
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgpoiwGE7tO-QSY2-kC_ecf868cY/edit?gid=1727836519#gid=1727836519"
 
 CREDENTIALS_FILE = 'google_key.json'
@@ -105,7 +105,7 @@ def handle_popups(driver):
     except: pass
 
 def empty_cart(driver):
-    print("🧹 正在清空購物車 (Cookies)...")
+    print("🧹 正在清空購物車...")
     try:
         if "guardian.com.sg" not in driver.current_url:
              driver.get("https://guardian.com.sg/")
@@ -129,7 +129,6 @@ def get_total_price_safely(driver):
     return None
 
 def check_item_exists(driver, sku):
-    """ 檢查商品是否存在 """
     try:
         driver.get(URL)
         time.sleep(2)
@@ -160,7 +159,6 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         driver.get(URL)
         time.sleep(3)
         handle_popups(driver)
-
         search_input = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, "input[placeholder*='Search'], input[name='q']")))
         driver.execute_script("arguments[0].value = '';", search_input)
         search_input.send_keys(sku)
@@ -168,21 +166,16 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         search_input.send_keys(Keys.RETURN)
         time.sleep(3)
         handle_popups(driver)
-
         try:
             xpath_sku = f"//a[contains(@href, '{sku}')]"
             xpath_generic = "(//div[contains(@class, 'product')]//a)[1]"
-            try:
-                link = driver.find_element(By.XPATH, xpath_sku)
-            except:
-                link = driver.find_element(By.XPATH, xpath_generic)
+            try: link = driver.find_element(By.XPATH, xpath_sku)
+            except: link = driver.find_element(By.XPATH, xpath_generic)
             driver.execute_script("arguments[0].click();", link)
         except:
             print(f"      ❌ 找不到商品 {sku}")
             return False
-
         time.sleep(3)
-        
         try:
             add_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Add to Cart'], button.action.tocart")))
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", add_btn)
@@ -192,374 +185,203 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
         except:
             print(f"      ❌ 無法點擊加入購物車 {sku}")
             return False
-            
     except Exception as e:
         print(f"      ❌ 加入過程發生錯誤: {e}")
         return False
 
-# ================= Task 2: Mix & Match =================
+# ================= Task 2: Mix & Match 邏輯 =================
 def sync_mix_match_data(client):
-    print("🔄 [Task 2] 同步 Mix & Match 資料 (擴充 Qty 2~5)...")
+    print("🔄 同步 Mix & Match 資料...")
     promo_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_PROMO)
-    try:
-        mix_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_MIX)
-    except:
-        mix_sheet = client.open(SPREADSHEET_FILE_NAME).add_worksheet(title=WORKSHEET_MIX, rows=100, cols=20)
-
+    try: mix_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_MIX)
+    except: mix_sheet = client.open(SPREADSHEET_FILE_NAME).add_worksheet(title=WORKSHEET_MIX, rows=100, cols=20)
     mix_sheet.clear()
     headers = ["Main SKU", "Product Name", "Promo Rule", "Target Qty", "Mix Strategy", "Expected Price", "Web Total Price", "Result", "Update Time", "Main Link"]
-    
     rows = promo_sheet.get_all_values()
     new_data = [headers]
     today = get_taiwan_time_now().date()
-
     for row in rows[6:]:
         desc = safe_get(row, 6) 
         if "Mix & Match" in desc:
-            start_str = safe_get(row, 8)
-            end_str = safe_get(row, 9)
-            d_start = parse_date(start_str)
-            d_end = parse_date(end_str)
-            
-            is_valid_date = True
-            date_note = ""
+            start_str = safe_get(row, 8); end_str = safe_get(row, 9)
+            d_start = parse_date(start_str); d_end = parse_date(end_str)
+            is_valid_date = True; date_note = ""
             if d_start and d_end and not (d_start <= today <= d_end):
-                is_valid_date = False
-                date_note = f"⚠️主商品非上架期間 ({d_start.strftime('%m/%d')}~{d_end.strftime('%m/%d')})"
+                is_valid_date = False; date_note = f"⚠️主商品非上架期間 ({d_start.strftime('%m/%d')}~{d_end.strftime('%m/%d')})"
             elif d_start and not d_end and today < d_start:
-                is_valid_date = False
-                date_note = f"⚠️主商品非上架期間 (尚未開始)"
-
+                is_valid_date = False; date_note = f"⚠️主商品非上架期間 (尚未開始)"
             main_sku = safe_get(row, 11).replace("'", "").strip()
             if len(main_sku) > 6: main_sku = main_sku[-6:]
-            prod_name = safe_get(row, 12)
-
-            matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', desc)
-            rule_text_display = desc[:20] + "..." if len(desc)>20 else desc
-            if matches:
-                rule_text_display = f"{matches[-1][0]} For ${matches[-1][1]}"
-
+            prod_name = safe_get(row, 12); matches = re.findall(r'(\d+)\s+[Ff]or\s*\$?([\d\.]+)', desc)
             if not is_valid_date:
-                row_data = [main_sku, prod_name, rule_text_display, "", "", "", "", date_note, "", ""]
-                new_data.append(row_data)
-                continue 
-
+                new_data.append([main_sku, prod_name, desc[:15], "", "", "", "", date_note, "", ""]); continue 
             partners = []
             match_partners = re.search(r'Mix & Match\s*([\d,]+)', desc)
             if match_partners:
-                raw_partners = match_partners.group(1).split(',')
-                for p in raw_partners:
+                for p in match_partners.group(1).split(','):
                     p = p.strip()
                     if len(p) > 6: p = p[-6:]
                     if p != main_sku: partners.append(p)
-            
-            if not partners: continue 
-            if not matches: continue
-            
-            price_map = {}
-            for q_str, p_str in matches:
-                try: price_map[int(q_str)] = float(p_str)
-                except: continue
-            if not price_map: continue
-
+            if not partners or not matches: continue 
+            price_map = {int(q): float(p) for q, p in matches}
             best_unit_price = min([p/q for q, p in price_map.items()])
             pool = [main_sku] + partners
-            
             for target_qty in range(2, 6):
-                expected_price = 0.0
-                rule_text = ""
-                
-                if target_qty in price_map:
-                    expected_price = price_map[target_qty]
-                    rule_text = f"{target_qty} For ${expected_price}"
-                else:
-                    raw_total = best_unit_price * target_qty
-                    expected_price = int(raw_total * 10) / 10.0
-                    rule_text = f"Calculated (Unit: {best_unit_price:.2f})"
-
-                current_cycle = cycle(pool)
-                strategy_dict = {}
-                for _ in range(target_qty):
-                    item = next(current_cycle)
-                    strategy_dict[item] = strategy_dict.get(item, 0) + 1
-                
-                strategy_str = "; ".join([f"{k}:{v}" for k, v in strategy_dict.items()])
-
-                row_data = [main_sku, prod_name, rule_text, target_qty, strategy_str, str(expected_price), "", "", "", ""]
-                new_data.append(row_data)
-
+                expected_price = price_map[target_qty] if target_qty in price_map else int(best_unit_price * target_qty * 10) / 10.0
+                rule_text = f"{target_qty} For ${expected_price}" if target_qty in price_map else f"Calculated (Unit: {best_unit_price:.2f})"
+                c = cycle(pool); s_dict = {}
+                for _ in range(target_qty): item = next(c); s_dict[item] = s_dict.get(item, 0) + 1
+                strategy_str = "; ".join([f"{k}:{v}" for k, v in s_dict.items()])
+                new_data.append([main_sku, prod_name, rule_text, target_qty, strategy_str, str(expected_price), "", "", "", ""])
     mix_sheet.update(values=new_data, range_name="A1")
-    print(f"✅ [Task 2] 已生成 {len(new_data)-1} 筆混搭測試案例")
     return len(new_data)-1
 
 def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
-    empty_cart(driver)
-    
-    raw_items = strategy_str.split(';')
-    unique_skus_planned = []
-    for item in raw_items:
-        s = item.split(':')[0].strip()
-        if s not in unique_skus_planned: unique_skus_planned.append(s)
-        
-    folder_name = "mix_temp"
+    empty_cart(driver); folder_name = "mix_temp"
     if not os.path.exists(folder_name): os.makedirs(folder_name)
-    
-    available_skus = []
-    missing_skus = [] 
-    
-    print(f"   🕵️ 正在檢查商品庫存狀況...")
-    
+    planned_skus = [item.split(':')[0].strip() for item in strategy_str.split(';')]
+    available_skus = []; missing_skus = []
+    print(f"   🕵️ 檢查商品庫存...")
     if not check_item_exists(driver, main_sku):
-        print(f"   🛑 主商品 {main_sku} 搜尋不到")
         return "Main Missing", "URL Not Found", None, [main_sku], strategy_str
-    
     available_skus.append(main_sku)
-    
-    for sku in unique_skus_planned:
+    for sku in planned_skus:
         if sku == main_sku: continue 
-        if check_item_exists(driver, sku):
-            available_skus.append(sku)
-        else:
-            print(f"   ⚠️ 混搭商品 {sku} 搜尋不到，將移除")
-            missing_skus.append(sku)
+        if check_item_exists(driver, sku): available_skus.append(sku)
+        else: missing_skus.append(sku)
+    if len(available_skus) == 1 and len(planned_skus) > 1:
+        return "Only Main", "", None, missing_skus, "; ".join([f"{s}:1" if s==main_sku else f"{s}:0" for s in planned_skus])
     
-    if len(available_skus) == 1 and len(unique_skus_planned) > 1:
-        print(f"   🛑 所有 MIX 商品皆從缺，只剩主料，停止比較")
-        final_display_parts = []
-        for s in unique_skus_planned:
-            if s == main_sku: final_display_parts.append(f"{s}:1")
-            else: final_display_parts.append(f"{s}:0")
-        final_display_str = "; ".join(final_display_parts)
-        
-        return "Only Main", "", None, missing_skus, final_display_str
-
-    final_strategy = {sku: 0 for sku in unique_skus_planned} 
-    
-    final_strategy[main_sku] = 1
-    current_count = 1
-    
+    final_strategy = {sku: 0 for sku in planned_skus}; final_strategy[main_sku] = 1; current_count = 1
     partners_pool = [s for s in available_skus if s != main_sku]
-    
-    if not partners_pool:
-        fill_pool = [main_sku]
-    else:
-        fill_pool = partners_pool
-        
+    fill_pool = partners_pool if partners_pool else [main_sku]
     pool_cycle = cycle(fill_pool)
-    
     while current_count < target_total_qty:
-        next_item = next(pool_cycle)
-        final_strategy[next_item] = final_strategy.get(next_item, 0) + 1
-        current_count += 1
-
-    final_display_parts = []
-    for s in unique_skus_planned:
-        qty = final_strategy.get(s, 0)
-        final_display_parts.append(f"{s}:{qty}")
-    final_display_str = "; ".join(final_display_parts)
+        next_item = next(pool_cycle); final_strategy[next_item] = final_strategy.get(next_item, 0) + 1; current_count += 1
+    actual_strategy = "; ".join([f"{s}:{final_strategy[s]}" for s in planned_skus])
     
-    print(f"   🔄 實際執行策略: {final_display_str}")
-
     items_to_add = []
-    for sku, qty in final_strategy.items():
-        for _ in range(qty):
-            items_to_add.append(sku)
-            
-    empty_cart(driver)
-    main_url = ""
-    
+    for s, q in final_strategy.items():
+        for _ in range(q): items_to_add.append(s)
+    empty_cart(driver); main_url = ""
     for sku in items_to_add:
         success = add_single_item_to_cart(driver, sku, 1)
-        if not success:
-            driver.save_screenshot(f"{folder_name}/Add_Fail_{sku}.png")
-            zip_path = create_zip_evidence("Mix_Error", folder_name)
-            return "Add Fail", "", zip_path, missing_skus, final_display_str
-        
+        if not success: return "Add Fail", "", None, missing_skus, actual_strategy
         if not main_url and sku == main_sku: main_url = driver.current_url
-
+    
     driver.get("https://guardian.com.sg/cart")
-    
-    print("   ⏳ 等待購物車計算 (Fetching Cart)...")
-    
-    # === [關鍵修正] 極致等待邏輯 ===
+    print("   ⏳ [極致等待] 等待購物車計算 (Fetching Cart)...")
     try:
-        # 1. 延長等待時間至 60 秒
-        # 2. 監聽 FETCHING CART 文字、loading-mask class、loader class
         WebDriverWait(driver, 60).until(
             EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')] | //div[contains(@class, 'loader')]"))
         )
-    except TimeoutException:
-        print("   ⚠️ 等待購物車載入超時 (60s)，嘗試直接抓取")
-    
-    # 3. 就算消失了，強制多等 5 秒，確保 DOM 穩定
+    except: print("   ⚠️ 等待超時，嘗試強制抓取")
     time.sleep(5) 
     
     total_price = "Error"
-    # 4. 重試 10 次 (原本 5 次)，每次間隔 3 秒
     for retry in range(10):
         price = get_total_price_safely(driver)
-        
-        # 簡單驗證：不是 Error 且長度 > 0
         if price and price != "Error" and len(price) > 0:
-            total_price = price
-            break
-        
-        # 如果沒抓到，再檢查一次是不是轉圈圈又跑出來了
-        try:
-             WebDriverWait(driver, 3).until(
-                EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')]"))
-            )
-        except: pass
-
+            total_price = price; break
         print(f"   ⚠️ 尚未抓到價格，重試 ({retry+1}/10)...")
         time.sleep(3)
-        
-    if not total_price: total_price = "Error"
-    
-    screenshot_name = f"Mix_{main_sku}_Total.png"
-    driver.save_screenshot(f"{folder_name}/{screenshot_name}")
-    
-    zip_path = create_zip_evidence("Mix_Evidence", folder_name)
-    
-    return total_price, main_url, zip_path, missing_skus, final_display_str
+    driver.save_screenshot(f"{folder_name}/Mix_{main_sku}_Total.png")
+    return total_price, main_url, create_zip_evidence("Mix_Evidence", folder_name), missing_skus, actual_strategy
 
 def run_mix_match_task(client, driver):
     row_count = sync_mix_match_data(client)
-    if row_count == 0: return [], [], True
-
     sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_MIX)
     all_values = sheet.get_all_values()
-    results_for_mail = []
-    attachments = []
-    all_match = True
-    error_summary = []
-
-    print(f"🚀 [Task 2] 開始執行混搭測試...")
+    results_for_mail = []; attachments = []; all_match = True; error_summary = []
 
     for i, row in enumerate(all_values[1:], start=2):
-        main_sku = row[0]
-        pre_result = safe_get(row, 7)
-        
+        main_sku = row[0]; pre_result = safe_get(row, 7)
         if "主商品非上架期間" in pre_result:
-            print(f"   ⚠️ {main_sku}: 非上架期間，跳過")
-            sheet.update_cell(i, 9, get_taiwan_time_display()) 
-            results_for_mail.append([main_sku, row[1], pre_result, get_taiwan_time_display()])
-            continue
-
-        original_strategy = row[4]
-        target_qty = int(row[3])
-        expected = float(row[5])
+            results_for_mail.append([main_sku, row[1], pre_result, get_taiwan_time_display()]); continue
         
-        print(f"   🧪 測試: {main_sku} Qty:{target_qty} (預期 ${expected})")
+        target_qty = int(row[3]); expected = float(row[5])
+        print(f"\n🚀 測試: {main_sku} Qty:{target_qty}")
+        web_total, link, zip_file, m_list, actual_s = process_mix_case_dynamic(driver, row[4], target_qty, main_sku)
+        sheet.update_cell(i, 5, actual_s) 
         
-        web_total, link, zip_file, missing_list, actual_strategy = process_mix_case_dynamic(driver, original_strategy, target_qty, main_sku)
+        missing_note = f" (⚠️缺: {','.join(m_list)})" if m_list else ""
+        is_error = False; result_text = ""
         
-        sheet.update_cell(i, 5, actual_strategy) 
-
-        missing_note = ""
-        if missing_list: missing_note = f" (⚠️缺: {','.join(missing_list)})"
-        
-        is_error = False
-        result_text = ""
-        
-        if web_total == "All Missing":
-            result_text = "⚠️全部商品尚未上架"
-            is_error = False
-        
-        elif web_total == "Main Missing":
-            result_text = f"⚠️主商品尚未上架: {main_sku}"
-            is_error = False 
-            
-        elif web_total == "Only Main":
-            result_text = f"⚠️MIX全缺: 只剩主料 (忽略比較)"
-            is_error = False
-            
+        if web_total == "All Missing": result_text = "⚠️全部商品尚未上架"
+        elif web_total == "Main Missing": result_text = f"⚠️主商品尚未上架: {main_sku}"
+        elif web_total == "Only Main": result_text = f"⚠️MIX全缺: 只剩主料 (忽略比較)"
         elif "Fail" in web_total or "Error" in web_total:
-            result_text = f"🔥 錯誤 ({web_total}){missing_note}"
-            is_error = True
+            result_text = f"🔥 錯誤 ({web_total}){missing_note}"; is_error = True
         else:
             try:
                 web_val = float(web_total)
-                if abs(web_val - expected) < 0.05:
-                    result_text = f"✅ 相符{missing_note}"
-                else:
-                    result_text = f"🔥 差異 (Exp:{expected} != Web:{web_val}){missing_note}"
-                    is_error = True
-            except:
-                result_text = f"🔥 錯誤 ({web_total}){missing_note}"
-                is_error = True
+                if abs(web_val - expected) < 0.05: result_text = f"✅ 相符{missing_note}"
+                else: result_text = f"🔥 差異 (Exp:{expected} != Web:{web_val}){missing_note}"; is_error = True
+            except: result_text = f"🔥 錯誤 ({web_total}){missing_note}"; is_error = True
 
         if is_error:
-            all_match = False
-            error_summary.append(f"{main_sku} (Qty{target_qty}): {result_text}")
+            all_match = False; error_summary.append(f"{main_sku}: {result_text}")
             if zip_file: attachments.append(zip_file)
-
+        
         update_time = get_taiwan_time_display()
         sheet.update(values=[[web_total, result_text, update_time, link]], range_name=f"G{i}:J{i}")
         results_for_mail.append([main_sku, row[1], result_text, update_time])
 
-    subject_prefix = "✅" if all_match else "🔥"
-    date_info = f"{get_taiwan_time_now().strftime('%m/%d(%a)')}"
-    subject = f"{date_info}{subject_prefix}[Ozio Mix & Match比對結果]"
-    
-    summary_text = "所有混搭組合價格均相符。" if all_match else f"發現混搭價格異常。<br>{'<br>'.join(error_summary)}"
-    if any("⚠️缺" in str(r) for r in results_for_mail):
-        summary_text += "<br>(註：部分結果含有缺貨商品遞補標記)"
-    
-    send_email_generic(subject, summary_text, results_for_mail, attachments)
+    # 寄信
+    subject = f"{get_taiwan_time_now().strftime('%m/%d')}{'✅' if all_match else '🔥'}[壓力測試結果]"
+    send_email_generic(subject, "壓力測試報告", results_for_mail, attachments)
 
 def send_email_generic(subject, summary, data_rows, attachments):
     if not MAIL_USERNAME or not MAIL_PASSWORD: return
-
-    table_html = "<table border='1' style='border-collapse:collapse;width:100%'>"
-    table_html += "<tr style='background:#f2f2f2'><th>SKU</th><th>商品</th><th>結果</th><th>時間</th></tr>"
+    msg = MIMEMultipart(); msg['From'] = MAIL_USERNAME; msg['To'] = ", ".join(MAIL_RECEIVER); msg['Subject'] = subject
+    table_html = "<table border='1' style='border-collapse:collapse;width:100%'><tr style='background:#f2f2f2'><th>SKU</th><th>商品</th><th>結果</th><th>時間</th></tr>"
     for r in data_rows:
-        bg = "#fff"
-        if "🔥" in r[2] or "Diff" in r[2] or "Error" in r[2] or "Limit" in r[2]: bg = "#ffebee"
-        elif "⚠️" in r[2]: bg = "#fff3e0"
-        
+        bg = "#ffebee" if "🔥" in r[2] else ("#fff3e0" if "⚠️" in r[2] else "#fff")
         table_html += f"<tr style='background:{bg}'><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td></tr>"
     table_html += "</table>"
-
-    msg = MIMEMultipart()
-    msg['From'] = MAIL_USERNAME
-    msg['To'] = ", ".join(MAIL_RECEIVER)
-    msg['Subject'] = subject
-    
     html = f"<html><body><h2>{subject}</h2><p>{summary}</p>{table_html}<br><a href='{SHEET_URL_FOR_MAIL}'>查看表格</a></body></html>"
     msg.attach(MIMEText(html, 'html'))
-
-    for fpath in attachments:
-        try:
-            with open(fpath, 'rb') as f:
-                part = MIMEApplication(f.read(), Name=os.path.basename(fpath))
-            part['Content-Disposition'] = f'attachment; filename="{os.path.basename(fpath)}"'
-            msg.attach(part)
-        except: pass
-
+    for f in attachments:
+        with open(f, 'rb') as fp: part = MIMEApplication(fp.read(), Name=os.path.basename(f))
+        part['Content-Disposition'] = f'attachment; filename="{os.path.basename(f)}"'
+        msg.attach(part)
     try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(MAIL_USERNAME, MAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print(f"📧 郵件已發送: {subject}")
+        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(MAIL_USERNAME, MAIL_PASSWORD)
+        s.send_message(msg); s.quit(); print(f"📧 郵件發送成功")
     except Exception as e: print(f"❌ 寄信失敗: {e}")
 
+# ================= 壓力測試主迴圈 =================
 def main():
+    round_count = 1
+    client = connect_google_sheet()
+    
+    print("🔥 壓力測試模式啟動！程式將不斷循環執行...")
+    print("🛑 若要停止測試，請在終端機按下 Ctrl + C")
+    
     try:
-        client = connect_google_sheet()
-        driver = init_driver()
-        
-        run_mix_match_task(client, driver)
-        
-        driver.quit()
-        print("\n🎉 Mix & Match 任務完成！")
-        
+        while True:
+            print(f"\n{'='*20} 開始第 {round_count} 輪測試 {'='*20}")
+            driver = None
+            try:
+                driver = init_driver()
+                run_mix_match_task(client, driver)
+                print(f"✅ 第 {round_count} 輪測試完成。")
+            except Exception as e:
+                print(f"⚠️ 這一輪發生錯誤: {e}")
+            finally:
+                if driver: 
+                    driver.quit()
+                    print("🧹 瀏覽器資源已回收。")
+            
+            round_count += 1
+            wait_time = 30
+            print(f"⏳ 冷卻中，{wait_time} 秒後開始下一輪...")
+            time.sleep(wait_time)
+            
+    except KeyboardInterrupt:
+        print("\n👋 收到停止指令，壓力測試結束。")
     except Exception as e:
-        print(f"💥 Fatal Error: {e}")
-        try: driver.quit()
-        except: pass
+        print(f"💥 發生重大錯誤: {e}")
 
 if __name__ == "__main__":
     main()
