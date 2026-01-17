@@ -2,8 +2,11 @@ import time
 import gspread
 import re
 import os
+import shutil
 from datetime import datetime, timedelta, timezone
 from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -18,29 +21,34 @@ SHEET_NAME = 'Guardian_Price_Check'
 CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
 
+# ★★★ 您的 Google Drive 資料夾 ID ★★★
+DRIVE_FOLDER_ID = '19ZAatbWczApRUMVbF0ZB6X-T36YY2w35'
+
 # ================= 輔助功能 =================
 def clean_price(price_text):
-    """ 清理價格字串，只留數字 """
     if not price_text:
         return ""
-    # 移除貨幣符號、逗號、換行、空格
     cleaned = str(price_text).replace("SGD", "").replace("$", "").replace(",", "").replace("\n", "").replace(" ", "").strip()
     return cleaned
 
-def get_taiwan_time():
-    """ 取得台灣時間 (UTC+8) 格式: YYYY-MM-DD HH:MM """
+def get_taiwan_time_str():
+    """ 用於檔名，格式 YYYYMMDDHHMM """
+    tz = timezone(timedelta(hours=8))
+    now = datetime.now(tz)
+    return now.strftime("%Y%m%d%H%M")
+
+def get_taiwan_time_display():
+    """ 用於表格顯示，格式 YYYY-MM-DD HH:MM """
     tz = timezone(timedelta(hours=8))
     now = datetime.now(tz)
     return now.strftime("%Y-%m-%d %H:%M")
 
 def safe_get(row_list, index):
-    """ 安全取得 List 中的值 """
     if index < len(row_list):
         return str(row_list[index])
     return ""
 
 def compare_prices(user_prices, web_prices):
-    """ 比對 User 輸入價格與 Web 抓取價格 """
     mismatches = []
     match_count = 0
     valid_comparison_count = 0
@@ -48,39 +56,76 @@ def compare_prices(user_prices, web_prices):
     for i in range(5):
         u_raw = user_prices[i]
         w_raw = web_prices[i]
-
         u_val = clean_price(u_raw)
         w_val = clean_price(w_raw)
 
-        # 如果 User 欄位是空的，跳過比對
         if not u_val:
             continue
-            
         valid_comparison_count += 1
 
-        # 嘗試數值比對 (避免 64.00 != 64 的文字誤差)
         try:
             u_num = float(u_val)
             w_num = float(w_val) if w_val and w_val not in ["Error", "N/A", "Limit Reached"] else -999
-            
             if abs(u_num - w_num) < 0.01: 
                 match_count += 1
             else:
-                mismatches.append(f"Qty{i+1}:User({u_val})!=Web({w_val})")
+                mismatches.append(f"Q{i+1}:User({u_val})!=Web({w_val})")
         except:
-            # 如果無法轉數字，進行文字比對
             if u_val == w_val:
                 match_count += 1
             else:
-                mismatches.append(f"Qty{i+1}:Diff")
+                mismatches.append(f"Q{i+1}:Diff")
 
     if valid_comparison_count == 0:
-        return "" # 無資料比對
+        return ""
     if not mismatches:
         return "均相符"
     else:
         return "; ".join(mismatches)
 
+# ================= Google Service 連線 =================
+def get_credentials():
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    return ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+
+def connect_google_sheet():
+    print("📊 正在連線 Google Sheet...")
+    creds = get_credentials()
+    client = gspread.authorize(creds)
+    sheet = client.open(SHEET_NAME).sheet1
+    return sheet
+
+def upload_to_drive(file_path, file_name):
+    """ 上傳檔案到 Google Drive 並回傳連結 """
+    print(f"☁️ 正在上傳 {file_name} 到 Google Drive...")
+    try:
+        creds = get_credentials()
+        # 建立 Drive API 服務
+        service = build('drive', 'v3', credentials=creds)
+        
+        file_metadata = {
+            'name': file_name,
+            'parents': [DRIVE_FOLDER_ID]
+        }
+        media = MediaFileUpload(file_path, mimetype='application/zip')
+        
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink'
+        ).execute()
+        
+        print(f"   ✅ 上傳成功! File ID: {file.get('id')}")
+        return file.get('webViewLink')
+        
+    except Exception as e:
+        print(f"   ❌ 上傳 Google Drive 失敗: {e}")
+        return "上傳失敗"
+
+# ================= Selenium 功能 =================
 def init_driver():
     options = webdriver.ChromeOptions()
     options.add_argument('--headless=new')
@@ -91,14 +136,6 @@ def init_driver():
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
-
-def connect_google_sheet():
-    print("📊 正在連線 Google Sheet...")
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
-    client = gspread.authorize(creds)
-    sheet = client.open(SHEET_NAME).sheet1
-    return sheet
 
 def empty_cart(driver):
     print("🧹 正在執行核彈級清空 (刪除 Cookies)...")
@@ -144,10 +181,11 @@ def process_sku(driver, sku):
     print(f"\n🔍 開始搜尋 SKU: {sku}")
     prices = [] 
     
-    # === 建立該 SKU 的截圖資料夾 ===
+    # === 建立暫存資料夾 ===
     sku_folder = str(sku)
-    if not os.path.exists(sku_folder):
-        os.makedirs(sku_folder)
+    if os.path.exists(sku_folder):
+        shutil.rmtree(sku_folder) # 確保乾淨
+    os.makedirs(sku_folder)
     
     try:
         driver.get(URL)
@@ -163,7 +201,7 @@ def process_sku(driver, sku):
             search_box.send_keys(Keys.RETURN)
         except TimeoutException:
             print("❌ 搜尋框載入超時")
-            return ["Search Fail"] * 5
+            return ["Search Fail"] * 5, ""
 
         time.sleep(5)
 
@@ -192,7 +230,7 @@ def process_sku(driver, sku):
 
         except NoSuchElementException:
             print(f"⚠️ 搜尋不到 SKU {sku}")
-            return ["Not Found"] * 5
+            return ["Not Found"] * 5, ""
 
         time.sleep(4)
 
@@ -205,14 +243,11 @@ def process_sku(driver, sku):
             time.sleep(1)
             driver.execute_script("arguments[0].click();", add_btn)
             print("🛒 已點擊加入購物車，等待處理...")
-            
             time.sleep(5) 
-            print("🚀 直接跳轉至購物車頁面...")
             driver.get("https://guardian.com.sg/cart")
-            
         except TimeoutException:
             print("❌ 加入購物車按鈕找不到")
-            return ["Add Fail"] * 5
+            return ["Add Fail"] * 5, ""
 
         time.sleep(5)
 
@@ -229,17 +264,11 @@ def process_sku(driver, sku):
             if current_price:
                 prices.append(current_price)
                 print(f"   💰 數量 {qty}: SGD {current_price}")
-                
-                # === 📸 截圖: 成功抓到價格後立即截圖 ===
-                # 檔名格式: SKU/SKU_qtyX.png
-                screenshot_path = f"{sku_folder}/{sku}_qty{qty}.png"
-                driver.save_screenshot(screenshot_path)
-                # ========================================
-                
+                # 截圖存入資料夾
+                driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}.png")
             else:
                 print("   ⚠️ 找不到價格欄位")
                 prices.append("Error")
-                # 失敗也要截圖存證
                 driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}_error.png")
 
             if qty < 5:
@@ -247,7 +276,6 @@ def process_sku(driver, sku):
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     driver.execute_script("arguments[0].click();", plus_btn)
                     time.sleep(4) 
-                    
                     try:
                         error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')]")
                         if error_msg.is_displayed():
@@ -263,21 +291,33 @@ def process_sku(driver, sku):
         
         while len(prices) < 5:
             prices.append("Error")
-
+        
         empty_cart(driver)
+
+        # === 打包與上傳 ===
+        print("📦 正在打包截圖...")
+        timestamp = get_taiwan_time_str()
+        zip_filename = f"{sku}_{timestamp}"
+        zip_path = shutil.make_archive(zip_filename, 'zip', sku_folder)
+        
+        # 上傳到 Google Drive
+        drive_link = upload_to_drive(zip_path, f"{zip_filename}.zip")
+        
+        # 清理暫存檔
+        shutil.rmtree(sku_folder)
+        os.remove(zip_path)
+
+        return prices, drive_link
 
     except Exception as e:
         print(f"❌ 發生錯誤: {e}")
         try:
-            # 發生錯誤時的截圖
-            if 'sku_folder' in locals():
-                driver.save_screenshot(f"{sku_folder}/{sku}_exception.png")
+            if 'sku_folder' in locals() and os.path.exists(sku_folder):
+                 driver.save_screenshot(f"{sku_folder}/{sku}_exception.png")
             empty_cart(driver)
         except:
             pass
-        return ["Error"] * 5
-
-    return prices
+        return ["Error"] * 5, "上傳失敗"
 
 # ================= 主程式 =================
 def main():
@@ -288,17 +328,15 @@ def main():
         print("--- 初始化檢查 ---")
         empty_cart(driver)
         
-        # 改用 get_all_values 以避免標題錯誤
         all_values = sheet.get_all_values()
         print(f"📋 共有 {len(all_values)-1} 筆資料待處理")
 
-        # 從 Index 1 (第2列) 開始
+        # 從第 2 列開始
         for i, row_data in enumerate(all_values[1:], start=2):
-            sku = safe_get(row_data, 0).strip() # A欄 (Index 0)
+            sku = safe_get(row_data, 0).strip()
             if not sku:
                 continue
             
-            # 讀取 C~G 欄 (User Prices)
             user_prices = [
                 safe_get(row_data, 2), # C
                 safe_get(row_data, 3), # D
@@ -307,22 +345,20 @@ def main():
                 safe_get(row_data, 6)  # G
             ]
 
-            # 執行爬蟲，回傳 5 個價格
-            web_prices = process_sku(driver, sku)
+            # 執行爬蟲，回傳 (價格List, Drive連結)
+            web_prices, drive_link = process_sku(driver, sku)
             
-            # 取得更新時間
-            update_time = get_taiwan_time()
-
-            # 執行比對
+            update_time = get_taiwan_time_display()
             comparison_result = compare_prices(user_prices, web_prices)
             
-            # 寫入資料: H~L (Web Price) + M (Time) + N (Result)
-            data_to_write = web_prices + [update_time, comparison_result]
+            # 寫入: H~L (Prices) + M (Time) + N (Result) + O (Link)
+            data_to_write = web_prices + [update_time, comparison_result, drive_link]
             
-            cell_range = f"H{i}:N{i}"
+            # 寫入到 O 欄 (第15欄)
+            cell_range = f"H{i}:O{i}"
             sheet.update(values=[data_to_write], range_name=cell_range)
             
-            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result}")
+            print(f"✅ SKU {sku} 完成 | 結果: {comparison_result} | Link: {drive_link}")
             print("-" * 30)
 
         print("🎉 所有任務完成！")
