@@ -1,0 +1,33 @@
+name: Confluence Weekly Automation
+
+on:
+  schedule:
+    # 設定每週一晚上 19:00 (台灣時間 GMT+8) 執行
+    # GitHub 使用 UTC 時間，所以 19:00 - 8 = 11:00 UTC
+    - cron: '0 11 * * 1'
+  workflow_dispatch: # 允許手動點擊按鈕觸發測試
+
+jobs:
+  run-python-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Automation Script
+        env:
+          # 這裡引用 GitHub Secrets，請勿將密碼直接寫在代碼中
+          CONF_URL: ${{ secrets.CONF_URL }}
+          CONF_USER: ${{ secrets.CONF_USER }}
+          CONF_PASS: ${{ secrets.CONF_PASS }}
+        run: python confluence_automation.py
