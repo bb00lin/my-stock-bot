@@ -8,9 +8,13 @@ from FinMind.data import DataLoader
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
 
+# ==========================================
 # 1. 設定環境參數
+# ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c" # 已根據您的紀錄設定
+# [優化] 改為優先讀取環境變數，若無則使用預設值
+LINE_USER_ID = os.getenv("LINE_USER_ID") or "U2e9b79c2f71cb2a3db62e5d75254270c"
+FINMIND_TOKEN = os.getenv("FINMIND_TOKEN") # [新增] 避免 API 限流
 
 def send_line_message(message):
     if not LINE_ACCESS_TOKEN: return
@@ -22,7 +26,11 @@ def send_line_message(message):
 
 def get_stock_info_map():
     try:
+        # [優化] 若有 Token 則帶入，增加穩定性
         dl = DataLoader()
+        if FINMIND_TOKEN:
+            dl = DataLoader(token=FINMIND_TOKEN)
+            
         df = dl.taiwan_stock_info()
         stock_map = {}
         m_col = 'market_type' if 'market_type' in df.columns else ('category' if 'category' in df.columns else None)
