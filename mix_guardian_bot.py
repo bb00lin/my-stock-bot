@@ -48,12 +48,14 @@ def get_taiwan_time_now():
 def get_taiwan_time_display():
     return get_taiwan_time_now().strftime("%Y-%m-%d %H:%M")
 
-def get_taiwan_time_str():
-    # 截圖檔名專用格式: 2026-01-18_10-15
+def get_filename_time_prefix():
+    # [修改] 檔名專用時間格式 (避免冒號，改用連字號)
+    # 範例: 2026-01-18_10-15
     return get_taiwan_time_now().strftime("%Y-%m-%d_%H-%M")
 
-def get_taiwan_date_str():
-    # 資料夾專用格式: 2026-01-18
+def get_folder_date_prefix():
+    # [修改] 資料夾專用日期格式
+    # 範例: 2026-01-18
     return get_taiwan_time_now().strftime("%Y-%m-%d")
 
 def safe_get(row_list, index):
@@ -71,9 +73,9 @@ def create_zip_evidence(sku, sku_folder):
     try:
         if not os.path.exists(sku_folder) or not os.listdir(sku_folder): return None
         
-        # [修改] Zip 檔名加上詳細日期時間
-        timestamp = get_taiwan_time_str()
-        zip_filename_base = f"{timestamp}_{sku}"
+        # Zip 檔名也加上時間戳記
+        ts = get_filename_time_prefix()
+        zip_filename_base = f"{ts}_{sku}"
         
         zip_path = shutil.make_archive(zip_filename_base, 'zip', sku_folder)
         shutil.rmtree(sku_folder) 
@@ -81,12 +83,10 @@ def create_zip_evidence(sku, sku_folder):
     except: return None
 
 # ================= Google Sheet 連線與格式化 =================
-# === [重要修正] 改為使用 GitHub Secrets 進行連線 ===
 def connect_google_sheet():
     print("📊 正在連線 Google Sheet (使用 Secrets)...")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     
-    # 從環境變數讀取 Secret
     json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
     
     if not json_key_str:
@@ -108,14 +108,13 @@ def format_group_colors(sheet, data_rows):
     """
     print("🎨 正在為表格上色 (依主商品分組)...")
     
+    # [修改] 加深顏色對比，確保肉眼可見
+    # COLOR_1: 白色
     COLOR_1 = {"red": 1.0, "green": 1.0, "blue": 1.0}
-    COLOR_2 = {"red": 0.94, "green": 0.97, "blue": 1.0}
+    # COLOR_2: 明顯的淺灰色 (原本的淡藍色太淺了)
+    COLOR_2 = {"red": 0.85, "green": 0.85, "blue": 0.85}
     
     requests = []
-    
-    # 假設 data_rows 包含標題，所以從第 2 行 (index 1) 開始處理
-    # sheet 的 startRowIndex 是 0-based，所以標題是 row 0，數據從 row 1 開始
-    start_row_index = 1 
     
     if len(data_rows) < 2:
         return
@@ -123,6 +122,8 @@ def format_group_colors(sheet, data_rows):
     current_sku = ""
     current_color_idx = 0
     colors = [COLOR_1, COLOR_2]
+    
+    start_row_index = 1 
     
     for i, row in enumerate(data_rows[1:]):
         sku = safe_get(row, 0)
@@ -382,12 +383,15 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     for item in raw_items:
         s = item.split(':')[0].strip()
         if s not in unique_skus_planned: unique_skus_planned.append(s)
-    
+        
     # [修改] 資料夾名稱增加日期前綴
-    date_str = get_taiwan_date_str()
-    folder_name = f"{date_str}_mix_{main_sku}"
+    date_prefix = get_folder_date_prefix()
+    folder_name = f"{date_prefix}_mix_{main_sku}"
     
     if not os.path.exists(folder_name): os.makedirs(folder_name)
+    
+    # 準備檔名用的時間戳記
+    ts_file = get_filename_time_prefix()
     
     available_skus = []
     missing_skus = [] 
@@ -453,11 +457,10 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     empty_cart(driver)
     main_url = ""
     
-    ts_file = get_taiwan_time_str() # 檔名用時間戳
-
     for sku in items_to_add:
         success = add_single_item_to_cart(driver, sku, 1)
         if not success:
+            # [修改] 截圖檔名加上時間
             driver.save_screenshot(f"{folder_name}/{ts_file}_Add_Fail_{sku}.png")
             zip_path = create_zip_evidence(f"Mix_Error_{main_sku}", folder_name)
             return "Add Fail", "", zip_path, missing_skus, final_display_str
@@ -476,7 +479,7 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     
     time.sleep(2) 
     
-    # === [新增] 點擊空白處 + 強制等待 6 秒 ===
+    # === 強制等待 6 秒讓彈窗消失 ===
     try:
         print("   ⏳ 等待 6 秒讓 Side Cart/Notification 彈窗完全消失...")
         time.sleep(6) # 強制等待
@@ -486,7 +489,7 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
         driver.execute_script("arguments[0].click();", body)
         time.sleep(1)
     except: pass
-    # ==========================================
+    # ==================================
     
     total_price = "Error"
     for retry in range(5):
@@ -499,11 +502,10 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
         
     if not total_price: total_price = "Error"
     
-    # 截圖檔名加上時間
+    # [修改] 截圖檔名加上時間
     screenshot_name = f"{ts_file}_Mix_{main_sku}_Total.png"
     driver.save_screenshot(f"{folder_name}/{screenshot_name}")
     
-    # 產生 Zip
     zip_path = create_zip_evidence(f"Mix_{main_sku}", folder_name)
     
     return total_price, main_url, zip_path, missing_skus, final_display_str
@@ -578,14 +580,14 @@ def run_mix_match_task(client, driver):
             all_match = False
             error_summary.append(f"{main_sku} (Qty{target_qty}): {result_text}")
         
-        # [修改] 無論成功失敗，都要加入附件 (需求 2)
+        # [修改] 無論成功或失敗，都加入附件 (因為使用者要求提供所有照片)
         if zip_file: attachments.append(zip_file)
 
         update_time = get_taiwan_time_display()
         sheet.update(values=[[web_total, result_text, update_time, link]], range_name=f"G{i}:J{i}")
         results_for_mail.append([main_sku, row[1], result_text, update_time])
 
-    # [修改] 任務結束前再執行一次上色，確保顏色正確 (需求 3)
+    # [修正] 確保結束時再執行一次上色
     format_group_colors(sheet, all_values)
 
     subject_prefix = "✅" if all_match else "🔥"
@@ -606,7 +608,7 @@ def send_email_generic(subject, summary, data_rows, attachments):
     
     current_sku = ""
     current_color_idx = 0
-    colors = ["#ffffff", "#f9f9f9"] 
+    colors = ["#ffffff", "#f0f0f0"] # Email 表格顏色也設深一點點
     
     for r in data_rows:
         sku = r[0]
