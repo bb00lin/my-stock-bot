@@ -591,8 +591,13 @@ def process_sku(driver, sku):
             try: WebDriverWait(driver, 15).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
             except: pass
             
-            # === [防遮擋] 點擊空白處關閉視窗 ===
+            # === [強化] 點擊空白處 + 強制等待 ===
             try:
+                # 1. 強制等待 6 秒，讓 Side Cart 自動消失
+                print("   ⏳ 等待 6 秒讓 Side Cart 彈窗消失...")
+                time.sleep(6)
+                
+                # 2. 嘗試點擊 Body 以關閉任何殘留的 Overlay
                 body = driver.find_element(By.TAG_NAME, "body")
                 body.send_keys(Keys.ESCAPE)
                 driver.execute_script("arguments[0].click();", body)
@@ -648,6 +653,7 @@ def process_sku(driver, sku):
                     plus_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Increase Quantity']")
                     driver.execute_script("arguments[0].click();", plus_btn)
                     
+                    # 點擊後不立即檢查，先進入下一次迴圈的開頭進行 6 秒等待
                     time.sleep(1)
                     try:
                         error_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')] | //div[contains(@class, 'message-error')]")
@@ -658,7 +664,6 @@ def process_sku(driver, sku):
                             break 
                     except: pass
                     
-                    time.sleep(0.5) 
                     try: WebDriverWait(driver, 20).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
                     except TimeoutException: pass
                     
