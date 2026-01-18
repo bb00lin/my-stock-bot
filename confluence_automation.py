@@ -11,7 +11,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException, ElementNotInteractableException
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 設定區 ---
@@ -90,7 +90,6 @@ def navigate_and_copy_latest(driver):
     wait = WebDriverWait(driver, 30)
     
     try:
-        # 抓取包含 "WeeklyReport_20" 的連結
         xpath_query = "//a[contains(., 'WeeklyReport_20')]"
         links = wait.until(EC.presence_of_all_elements_located((By.XPATH, xpath_query)))
         
@@ -98,7 +97,6 @@ def navigate_and_copy_latest(driver):
         for l in links:
             try:
                 txt = l.text
-                # 【修正點】排除「副本」、「Copy」以及「草稿」、「Draft」
                 if all(x not in txt for x in ["Copy", "副本", "Template", "草稿", "Draft"]):
                     valid_links.append(l)
             except: continue
@@ -111,51 +109,35 @@ def navigate_and_copy_latest(driver):
         
         driver.execute_script("arguments[0].click();", latest_link)
         time.sleep(5)
-        # 等待網址包含 pages，代表已進入內容頁
         wait.until(EC.url_contains("pages"))
         
         current_url = driver.current_url
         print(f"當前網址: {current_url}")
         
-        # 【修正點】更強大的 ID 解析 Regex
-        # 支援: /pages/123, /pages/edit/123, /pages/viewpage.action?pageId=123
         match = re.search(r"pages(?:/.*?)?/(\d+)", current_url)
-        if not match:
-            # 嘗試另一種 Query String 格式 (pageId=123)
-            match = re.search(r"pageId=(\d+)", current_url)
-            
-        if not match:
-            raise Exception(f"無法解析 Page ID，網址格式不符: {current_url}")
+        if not match: match = re.search(r"pageId=(\d+)", current_url)
+        if not match: raise Exception(f"無法解析 Page ID: {current_url}")
             
         page_id = match.group(1)
         print(f"Page ID 解析成功: {page_id}")
         
-        # 這裡需要小心：如果網址本身包含 /wiki/spaces/... 我們要保留前面這段
-        # 安全做法：直接組建標準複製網址，假設前面是 /wiki/spaces/SPACE_KEY/...
-        # 我們試著從 current_url 擷取 /wiki/spaces/xxx/ 這一段
-        
         space_match = re.search(r"(/wiki/spaces/[^/]+)", current_url)
         if space_match:
-            url_prefix = space_match.group(1)
-            # 組合出標準 Cloud 複製網址
-            copy_url = f"{parsed_base_url(driver)}{url_prefix}/pages/create?copyPageId={page_id}"
+            copy_url = f"{parsed_base_url(driver)}{space_match.group(1)}/pages/create?copyPageId={page_id}"
         else:
-            # 如果抓不到 Space，退回到相對路徑替換法
-            # 假設結構是 .../pages/...
-            url_part = current_url.split('/pages/')[0]
-            copy_url = f"{url_part}/pages/create?copyPageId={page_id}"
+            copy_url = f"{current_url.split('/pages/')[0]}/pages/create?copyPageId={page_id}"
 
         print(f"跳轉至複製頁面: {copy_url}")
         driver.get(copy_url)
         
         wait_long = WebDriverWait(driver, 60)
-        title_box = find_element_omnibus(driver, wait_long, "標題輸入框", [
-            (By.ID, "content-title"),
-            (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']"),
-            (By.CSS_SELECTOR, "textarea[placeholder='Page title']")
+        # 這裡只確認載入，不進行操作，所以用 content-title 沒關係
+        title_box = find_element_omnibus(driver, wait_long, "標題載入檢測", [
+            (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']"), # 優先找 textarea
+            (By.ID, "content-title") # 備用
         ])
         
-        if not title_box: raise Exception("編輯器無法載入 (找不到標題框)")
+        if not title_box: raise Exception("編輯器無法載入")
         print("編輯器就緒！")
         
     except TimeoutException:
@@ -164,25 +146,53 @@ def navigate_and_copy_latest(driver):
         raise
 
 def parsed_base_url(driver):
-    """取得當前網址的 Scheme + Netloc (例如 https://site.atlassian.net)"""
     u = urlparse(driver.current_url)
     return f"{u.scheme}://{u.netloc}"
 
 def rename_page(driver, new_filename):
     print(f"重命名為: WeeklyReport_{new_filename}")
     wait = WebDriverWait(driver, 20)
-    title_area = find_element_omnibus(driver, wait, "標題輸入框", [
-        (By.ID, "content-title"),
-        (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
-    ])
-    try: title_area.click()
-    except: driver.execute_script("arguments[0].click();", title_area)
     
-    title_area.send_keys(Keys.CONTROL + "a")
-    title_area.send_keys(Keys.BACK_SPACE)
-    time.sleep(0.5)
-    title_area.send_keys(f"WeeklyReport_{new_filename}")
-    time.sleep(2)
+    # 【關鍵修正】在重命名階段，嚴格限制只尋找 textarea
+    # 絕對不能找 id="content-title" (因為它是不可互動的 DIV)
+    title_area = find_element_omnibus(driver, wait, "標題輸入框 (Textarea Only)", [
+        (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']"),
+        (By.CSS_SELECTOR, "textarea[placeholder='Page title']"),
+        (By.CSS_SELECTOR, "textarea[placeholder='頁面標題']"),
+        (By.CSS_SELECTOR, "h1 textarea") # 結構化備案
+    ])
+    
+    if not title_area:
+        raise Exception("找不到可編輯的標題輸入框 (textarea)！")
+
+    # 嘗試互動
+    try:
+        # 先嘗試點擊
+        try:
+            title_area.click()
+        except (ElementClickInterceptedException, ElementNotInteractableException):
+            # 如果被擋住或不可互動，用 JS 強制 Focus
+            driver.execute_script("arguments[0].focus();", title_area)
+        
+        time.sleep(0.5)
+        
+        # 清空並輸入
+        title_area.send_keys(Keys.CONTROL + "a")
+        title_area.send_keys(Keys.BACK_SPACE)
+        time.sleep(0.5)
+        title_area.send_keys(f"WeeklyReport_{new_filename}")
+        
+        # 觸發 React 事件 (確保儲存)
+        title_area.send_keys(Keys.ENTER) 
+        time.sleep(1)
+        # 刪除因為 Enter 產生的換行 (如果有的話)
+        title_area.send_keys(Keys.BACK_SPACE)
+        time.sleep(2)
+        
+    except Exception as e:
+        print(f"重命名操作失敗: {str(e)}")
+        driver.save_screenshot("rename_error.png")
+        raise
 
 def update_jira_macros(driver, date_info):
     wait = WebDriverWait(driver, 30)
@@ -210,7 +220,7 @@ def update_jira_macros(driver, date_info):
         time.sleep(2)
             
     if not macros:
-        print("警告：找不到 Jira 表格，可能載入失敗。")
+        print("警告：找不到 Jira 表格。")
         return
 
     for i, target in enumerate(macros):
@@ -273,14 +283,12 @@ def publish_page(driver):
         print("發布動作已觸發！")
         time.sleep(10)
     else:
-        print("!!! 找不到發布按鈕，傾印按鈕文字 !!!")
-        buttons = driver.find_elements(By.TAG_NAME, "button")
-        print([b.text for b in buttons if b.is_displayed()])
+        print("!!! 找不到發布按鈕 !!!")
         raise Exception("發布失敗")
 
 def main():
     dates = get_target_dates()
-    print(f"=== Confluence 自動週報腳本 (v12.0 穩定版) ===")
+    print(f"=== Confluence 自動週報腳本 (v13.0 標題互動修正版) ===")
     print(f"日期: {dates['monday_str']} ~ {dates['sunday_str']}")
     
     driver = init_driver()
