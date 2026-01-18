@@ -46,7 +46,12 @@ def get_taiwan_time_display():
     return get_taiwan_time_now().strftime("%Y-%m-%d %H:%M")
 
 def get_taiwan_time_str():
-    return get_taiwan_time_now().strftime("%Y%m%d%H%M")
+    # 檔名專用格式: 2026-01-18_10-15
+    return get_taiwan_time_now().strftime("%Y-%m-%d_%H-%M")
+
+def get_taiwan_date_str():
+    # 資料夾專用格式: 2026-01-18
+    return get_taiwan_time_now().strftime("%Y-%m-%d")
 
 def safe_get(row_list, index):
     if index < len(row_list): return str(row_list[index])
@@ -63,8 +68,10 @@ def create_zip_evidence(sku, sku_folder):
     try:
         if not os.path.exists(sku_folder) or not os.listdir(sku_folder):
             return None
+        
+        # Zip 檔名加上詳細時間
         timestamp = get_taiwan_time_str()
-        zip_filename_base = f"{sku}_{timestamp}"
+        zip_filename_base = f"{timestamp}_{sku}"
         zip_path = shutil.make_archive(zip_filename_base, 'zip', sku_folder)
         shutil.rmtree(sku_folder) 
         return zip_path
@@ -454,11 +461,17 @@ def process_sku(driver, sku):
     product_url = "" 
     previous_price_val = -1.0 
     
-    sku_folder = str(sku)
+    # [修改] 資料夾名稱增加日期
+    timestamp_folder = get_taiwan_date_str()
+    sku_folder = f"{timestamp_folder}_{sku}"
+    
     if os.path.exists(sku_folder): shutil.rmtree(sku_folder) 
     os.makedirs(sku_folder)
     
     generated_zip = None
+    
+    # 預先定義 timestamp 字串供檔名使用
+    ts_file = get_taiwan_time_str()
 
     try:
         driver.get(URL)
@@ -484,7 +497,7 @@ def process_sku(driver, sku):
         
         if not search_input:
             print("❌ 搜尋框載入超時")
-            driver.save_screenshot(f"{sku_folder}/{sku}_search_fail.png")
+            driver.save_screenshot(f"{sku_folder}/{ts_file}_{sku}_search_fail.png")
             generated_zip = create_zip_evidence(sku, sku_folder)
             return ["Search Fail"] * 5, "URL Not Found", generated_zip
 
@@ -523,13 +536,13 @@ def process_sku(driver, sku):
             
             if "search.html" in product_url:
                 print("❌ 點擊後仍停留在搜尋結果頁")
-                driver.save_screenshot(f"{sku_folder}/{sku}_click_fail.png")
+                driver.save_screenshot(f"{sku_folder}/{ts_file}_{sku}_click_fail.png")
                 generated_zip = create_zip_evidence(sku, sku_folder)
                 return ["Click Fail"] * 5, product_url, generated_zip
 
         except NoSuchElementException:
             print(f"⚠️ 搜尋不到 SKU {sku}")
-            driver.save_screenshot(f"{sku_folder}/{sku}_not_found.png")
+            driver.save_screenshot(f"{sku_folder}/{ts_file}_{sku}_not_found.png")
             generated_zip = create_zip_evidence(sku, sku_folder)
             return ["Not Found"] * 5, "URL Not Found", generated_zip
 
@@ -546,7 +559,7 @@ def process_sku(driver, sku):
             driver.get("https://guardian.com.sg/cart")
         except TimeoutException:
             print("❌ 加入購物車按鈕找不到")
-            driver.save_screenshot(f"{sku_folder}/{sku}_add_fail.png")
+            driver.save_screenshot(f"{sku_folder}/{ts_file}_{sku}_add_fail.png")
             generated_zip = create_zip_evidence(sku, sku_folder)
             return ["Add Fail"] * 5, product_url, generated_zip
 
@@ -625,7 +638,7 @@ def process_sku(driver, sku):
                     final_price = current_price_str
                     previous_price_val = current_val
                     print(f"   💰 數量 {qty}: SGD {final_price}")
-                    driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}.png")
+                    driver.save_screenshot(f"{sku_folder}/{ts_file}_{sku}_qty{qty}.png")
                     break
                 else:
                     time.sleep(2)
@@ -643,7 +656,7 @@ def process_sku(driver, sku):
 
             if final_price == "Error" and current_price_str:
                 final_price = current_price_str
-                driver.save_screenshot(f"{sku_folder}/{sku}_qty{qty}_abnormal.png")
+                driver.save_screenshot(f"{sku_folder}/{ts_file}_{sku}_qty{qty}_abnormal.png")
 
             if len(prices) < qty:
                 prices.append(final_price)
@@ -680,7 +693,8 @@ def process_sku(driver, sku):
         print(f"❌ 發生錯誤: {e}")
         try:
             if 'sku_folder' in locals() and os.path.exists(sku_folder):
-                 driver.save_screenshot(f"{sku_folder}/{sku}_exception.png")
+                 ts_ex = get_taiwan_time_str()
+                 driver.save_screenshot(f"{sku_folder}/{ts_ex}_{sku}_exception.png")
                  generated_zip = create_zip_evidence(sku, sku_folder)
             empty_cart(driver)
         except: pass
