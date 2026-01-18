@@ -4,26 +4,26 @@ on:
   schedule:
     # 每天 UTC 02:00 (台灣時間 10:00) 自動執行
     - cron: '0 2 * * *'
-  workflow_dispatch: # 提供手動執行按鈕
+  workflow_dispatch: # 手動執行按鈕
 
 jobs:
   run-search-job:
     runs-on: ubuntu-latest
     
     steps:
-      - name: 檢出倉庫代碼
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: 設定 Python 環境 (3.10)
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: 安裝自動化依賴套件
+      - name: Install dependencies
         run: |
           pip install gspread oauth2client selenium webdriver-manager
 
-      - name: 執行 CosIng 自動化腳本
+      - name: Execute CosIng automation
         env:
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: python cosing_automation.py
