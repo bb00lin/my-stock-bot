@@ -11,7 +11,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException, StaleElementReferenceException
+from selenium.common.exceptions import TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 設定區 ---
@@ -37,219 +37,163 @@ def init_driver():
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    return driver
+    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
 def inject_cookies(driver):
     print("正在注入 Cookies...")
-    if not COOKIES_JSON: raise Exception("錯誤：找不到 CONF_COOKIES Secret")
-    
+    if not COOKIES_JSON: raise Exception("找不到 COOKIES")
     cookies = json.loads(COOKIES_JSON)
-    parsed_url = urlparse(URL)
-    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    base_url = f"{urlparse(URL).scheme}://{urlparse(URL).netloc}"
     driver.get(f"{base_url}/robots.txt")
-    time.sleep(1)
-    
-    added = 0
-    for cookie in cookies:
-        if 'name' not in cookie or 'value' not in cookie: continue
-        new_cookie = {
-            'name': cookie['name'], 'value': cookie['value'],
-            'path': cookie.get('path', '/'), 'secure': cookie.get('secure', True)
-        }
-        if 'expirationDate' in cookie: new_cookie['expiry'] = int(cookie['expirationDate'])
-        elif 'expiry' in cookie: new_cookie['expiry'] = int(cookie['expiry'])
-        try: driver.add_cookie(new_cookie); added += 1
+    for c in cookies:
+        try:
+            driver.add_cookie({
+                'name': c['name'], 'value': c['value'],
+                'path': c.get('path', '/'), 'secure': c.get('secure', True),
+                'expiry': int(c.get('expirationDate', c.get('expiry', time.time()+86400)))
+            })
         except: pass
-            
-    print(f"成功注入 {added} 個 Cookies，前往目標頁面...")
     driver.get(URL)
     time.sleep(8)
 
 def navigate_and_copy_latest(driver):
-    print(f"正在搜尋側邊欄 (當前: {driver.title})...")
     wait = WebDriverWait(driver, 30)
+    print("正在搜尋基準週報...")
+    links = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//a[contains(., 'WeeklyReport_20')]")))
+    valid = sorted([l for l in links if all(x not in l.text for x in ["Copy", "副本", "草稿"])], key=lambda x: x.text)
+    latest_link = valid[-1]
+    print(f"選定: {latest_link.text}")
+    driver.execute_script("arguments[0].click();", latest_link)
+    time.sleep(5)
     
-    try:
-        xpath_query = "//a[contains(., 'WeeklyReport_20')]"
-        links = wait.until(EC.presence_of_all_elements_located((By.XPATH, xpath_query)))
-        valid_links = [l for l in links if all(x not in l.text for x in ["Copy", "副本", "Template", "草稿", "Draft"])]
-        
-        valid_links.sort(key=lambda x: x.text)
-        latest_link = valid_links[-1]
-        print(f"選定基準週報: {latest_link.text}，進入中...")
-        
-        driver.execute_script("arguments[0].click();", latest_link)
-        time.sleep(5)
-        wait.until(EC.url_contains("pages"))
-        
-        current_url = driver.current_url
-        match = re.search(r"pages(?:/.*?)?/(\d+)", current_url) or re.search(r"pageId=(\d+)", current_url)
-        if not match: raise Exception(f"無法解析 Page ID")
-        page_id = match.group(1)
-        
-        space_match = re.search(r"(/wiki/spaces/[^/]+)", current_url)
-        url_prefix = space_match.group(1) if space_match else current_url.split('/pages/')[0]
-        base = f"{urlparse(current_url).scheme}://{urlparse(current_url).netloc}"
-        if not url_prefix.startswith('/'): url_prefix = '/' + url_prefix
-            
-        copy_url = f"{base}{url_prefix}/pages/create?copyPageId={page_id}"
-        print(f"跳轉至複製頁面: {copy_url}")
-        driver.get(copy_url)
-        time.sleep(12) # 增加等待時間讓 Iframe 穩定
-        
-    except TimeoutException:
-        print("導航逾時！")
-        driver.save_screenshot("nav_error.png")
-        raise
+    match = re.search(r"pages(?:/.*?)?/(\d+)", driver.current_url) or re.search(r"pageId=(\d+)", driver.current_url)
+    page_id = match.group(1)
+    url_prefix = re.search(r"(/wiki/spaces/[^/]+)", driver.current_url).group(1)
+    copy_url = f"{urlparse(driver.current_url).scheme}://{urlparse(driver.current_url).netloc}{url_prefix}/pages/create?copyPageId={page_id}"
+    print(f"前往複製網址: {copy_url}")
+    driver.get(copy_url)
+    time.sleep(15)
 
-def rename_page(driver, new_filename):
-    print(f"=== 開始重命名流程 (v18.0 精準位址版) ===")
-    wait = WebDriverWait(driver, 15)
+def rename_page_js_force(driver, new_title):
+    """
+    使用 JS 強制在全域(含 Iframe) 尋找標題框並賦值
+    """
+    print(f"=== 執行 JS 強制重命名: {new_title} ===")
     
-    # 結合您提供的精確 Selector 與通用定位
-    title_locators = [
-        (By.CSS_SELECTOR, "#editor-title-id > textarea"), # 您提供的精確 Selector
-        (By.XPATH, '//*[@id="editor-title-id"]/textarea'), # 您提供的精確 XPath
-        (By.NAME, "editpages-title"),
-        (By.CSS_SELECTOR, "textarea[data-test-id='editor-title']")
-    ]
+    # 強力 JS 腳本：遍歷所有 textarea 並檢查父層 ID
+    js_script = """
+    function forceRename(val) {
+        var found = false;
+        // 1. 檢查主視窗
+        var tas = document.querySelectorAll('textarea');
+        for(var i=0; i<tas.length; i++) {
+            if(tas[i].closest('#editor-title-id') || tas[i].name == 'editpages-title') {
+                tas[i].value = val;
+                tas[i].dispatchEvent(new Event('input', { bubbles: true }));
+                tas[i].dispatchEvent(new Event('blur', { bubbles: true }));
+                found = true;
+            }
+        }
+        // 2. 檢查所有 Iframe
+        var frames = document.querySelectorAll('iframe');
+        for(var j=0; j<frames.length; j++) {
+            try {
+                var doc = frames[j].contentDocument || frames[j].contentWindow.document;
+                var ftas = doc.querySelectorAll('textarea');
+                for(var k=0; k<ftas.length; k++) {
+                    if(ftas[k].closest('#editor-title-id') || ftas[k].name == 'editpages-title') {
+                        ftas[k].value = val;
+                        ftas[k].dispatchEvent(new Event('input', { bubbles: true }));
+                        ftas[k].dispatchEvent(new Event('blur', { bubbles: true }));
+                        found = true;
+                    }
+                }
+            } catch(e) {}
+        }
+        return found;
+    }
+    return forceRename(arguments[0]);
+    """
     
-    target_input = None
-
-    # 階段 1: 主視窗搜尋
-    print("階段 1: 檢查主視窗...")
-    for method, query in title_locators:
-        try:
-            target_input = driver.find_element(method, query)
-            if target_input.is_displayed():
-                print(f"--> 成功於主視窗定位！")
-                break
-        except: continue
-
-    # 階段 2: Iframe 深度掃描
-    if not target_input:
-        print("階段 1 失敗，開始鑽入 Iframe...")
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
-        for i, frame in enumerate(iframes):
-            try:
-                driver.switch_to.default_content()
-                driver.switch_to.frame(frame)
-                for method, query in title_locators:
-                    try:
-                        elem = driver.find_element(method, query)
-                        target_input = elem
-                        print(f"--> 成功於 Iframe [{i}] 定位！")
-                        break
-                    except: continue
-                if target_input: break
-            except: continue
-
-    if not target_input:
-        driver.switch_to.default_content()
-        raise Exception("即便使用精確位址，仍找不到標題輸入框。")
-
-    # 執行操作
-    try:
-        driver.execute_script("arguments[0].focus();", target_input)
-        target_input.send_keys(Keys.CONTROL + "a")
-        target_input.send_keys(Keys.BACK_SPACE)
-        time.sleep(0.5)
-        target_input.send_keys(f"WeeklyReport_{new_filename}")
-        time.sleep(2)
-        print("重命名完成。")
-        driver.switch_to.default_content()
-    except Exception as e:
-        driver.switch_to.default_content()
-        raise e
+    success = driver.execute_script(js_script, f"WeeklyReport_{new_title}")
+    if success:
+        print("✅ JS 回報標題修改成功")
+    else:
+        print("❌ JS 未能找到標題框，嘗試盲打補救...")
+        driver.execute_script("window.scrollTo(0,0);")
+        webdriver.ActionChains(driver).send_keys(Keys.TAB).send_keys(Keys.CONTROL + "a").send_keys(Keys.BACK_SPACE).send_keys(f"WeeklyReport_{new_title}").perform()
 
 def update_jira_macros(driver, date_info):
-    wait = WebDriverWait(driver, 30)
-    print("正在更新 Jira 表格日期...")
-    # 此部分邏輯與 v17 相同，包含 Iframe 支援
-    # ... (省略重複代碼，確保完整性)
-    driver.switch_to.default_content()
+    print("正在處理 Jira 表格日期...")
+    time.sleep(5)
+    # 捲動以觸發載入
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
     time.sleep(2)
     
-    macro_locators = [(By.CSS_SELECTOR, "div.datasourceView-content-wrap"), (By.CSS_SELECTOR, "div[data-prosemirror-node-name='blockCard']")]
-    macros = []
+    # 簡單點擊「編輯」按鈕的 JS 版 (更穩定)
+    js_click_edit = """
+    var btns = document.querySelectorAll('button');
+    for(var i=0; i<btns.length; i++) {
+        if(btns[i].innerText.includes('編輯') || btns[i].innerText.includes('Edit')) {
+            btns[i].click(); return true;
+        }
+    }
+    return false;
+    """
     
-    # 嘗試主視窗與 Iframe
-    for locator in macro_locators:
-        macros = driver.find_elements(*locator)
-        if macros: break
-    
-    if not macros:
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
-        for frame in iframes:
-            try:
-                driver.switch_to.default_content()
-                driver.switch_to.frame(frame)
-                for locator in macro_locators:
-                    macros = driver.find_elements(*locator)
-                    if macros: break
-                if macros: break
-            except: pass
-            
-    if not macros:
-        print("警告：未發現 Jira 表格。")
-        driver.switch_to.default_content()
-        return
-
-    for i, target in enumerate(macros):
+    # 這裡我們只處理第一個表格作為範例，若有多個可迴圈
+    macros = driver.find_elements(By.CSS_SELECTOR, "div.datasourceView-content-wrap")
+    if macros:
+        driver.execute_script("arguments[0].click();", macros[0])
+        time.sleep(1)
+        driver.execute_script(js_click_edit)
+        time.sleep(3)
         try:
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
-            time.sleep(1)
-            driver.execute_script("arguments[0].click();", target)
-            edit_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., '編輯') or contains(., 'Edit')]")))
-            edit_btn.click()
-            jql_input = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
+            jql_input = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
             old_jql = jql_input.text
             dates = re.findall(r"\d{4}-\d{1,2}-\d{1,2}", old_jql)
             if len(dates) >= 2:
                 new_jql = old_jql.replace(dates[0], date_info['monday_str']).replace(dates[1], date_info['sunday_str'])
                 jql_input.click()
-                jql_input.send_keys(Keys.CONTROL + "a")
-                jql_input.send_keys(Keys.BACK_SPACE)
+                jql_input.send_keys(Keys.CONTROL + "a" + Keys.BACK_SPACE)
                 jql_input.send_keys(new_jql + Keys.ENTER)
                 time.sleep(2)
                 driver.find_element(By.XPATH, "//button[contains(., 'Insert') or contains(., 'Save') or contains(., '插入')]").click()
-                time.sleep(2)
-        except: continue
-    driver.switch_to.default_content()
+        except: print("表格更新跳過")
 
 def publish_page(driver):
-    print("準備發佈...")
-    driver.switch_to.default_content()
-    wait = WebDriverWait(driver, 15)
-    publish_locators = [(By.CSS_SELECTOR, "[data-testid='publish-button']"), (By.XPATH, "//button[contains(., '發佈')]")]
-    for m, q in publish_locators:
-        try:
-            btn = wait.until(EC.element_to_be_clickable((m, q)))
-            driver.execute_script("arguments[0].click();", btn)
-            print("發佈成功！")
-            time.sleep(10)
-            return
-        except: continue
-    raise Exception("發佈按鈕失效。")
+    print("執行發佈...")
+    driver.execute_script("window.scrollTo(0,0);")
+    time.sleep(2)
+    publish_js = """
+    var buttons = document.querySelectorAll('button');
+    for(var i=0; i<buttons.length; i++) {
+        if(buttons[i].getAttribute('data-testid') == 'publish-button' || buttons[i].innerText.includes('發佈')) {
+            buttons[i].click(); return true;
+        }
+    }
+    return false;
+    """
+    if driver.execute_script(publish_js):
+        print("✅ 已觸發發佈按鈕")
+        time.sleep(10)
+    else:
+        print("❌ 找不到發佈按鈕")
 
 def main():
     dates = get_target_dates()
-    print(f"=== Confluence 自動週報 (v18.0) ===")
+    print(f"=== Confluence 自動週報 (v19.0 JS 威力加強版) ===")
     driver = init_driver()
     try:
         inject_cookies(driver)
         navigate_and_copy_latest(driver)
-        rename_page(driver, dates['friday_filename'])
+        rename_page_js_force(driver, dates['friday_filename'])
         update_jira_macros(driver, dates)
         publish_page(driver)
-        print("=== 任務成功完成 ===")
+        print("=== 任務執行結束 ===")
     except Exception as e:
-        print(f"失敗: {str(e)}")
-        driver.save_screenshot("error.png")
+        print(f"發生錯誤: {str(e)}")
+        driver.save_screenshot("v19_error.png")
     finally:
         driver.quit()
 
