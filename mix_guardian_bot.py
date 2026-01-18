@@ -6,7 +6,7 @@ import shutil
 import smtplib
 import math
 import json
-from itertools import cycle
+from itertools import cycle, combinations_with_replacement  # [修改] 新增 combinations_with_replacement
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication 
@@ -32,10 +32,11 @@ SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgp
 
 URL = "https://guardian.com.sg/"
 
-# [新增] 測試方案選擇
+# [修改] 測試方案選擇
 # 'A': 基本模式 (每個數量只測 1 種平均分配) -> 速度快，省時間
 # 'B': 極端模式 (每個數量測 2 種：平均 + 集中於單一贈品) -> 測試庫存極限 (推薦)
-TEST_PLAN = 'B'
+# 'C': 全組合模式 (窮舉所有可能的排列組合) -> 測試最完整，但耗時極長 (慎用)
+TEST_PLAN = 'C'
 
 # Email 設定 (從 Secrets 讀取)
 MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
@@ -358,27 +359,41 @@ def sync_mix_match_data(client):
                 # === [新增] 根據 TEST_PLAN 產生不同策略組合 ===
                 strategies_list = []
                 
-                # 策略 1: 平均分配 (Plan A 基本款)
-                # 使用 cycle 輪詢 pool 中的所有商品
-                current_cycle = cycle(pool)
-                strat_avg = {}
-                for _ in range(target_qty):
-                    item = next(current_cycle)
-                    strat_avg[item] = strat_avg.get(item, 0) + 1
-                strategies_list.append(strat_avg)
-                
-                # 策略 2: 集中分配 (Plan B 加強款)
-                if TEST_PLAN == 'B' and partners:
-                    # 主商品固定 1 個
-                    strat_conc = {main_sku: 1}
-                    # 剩下的數量全部集中在第 1 個搭配商品上
-                    remaining = target_qty - 1
-                    target_p = partners[0]
-                    strat_conc[target_p] = strat_conc.get(target_p, 0) + remaining
+                if TEST_PLAN == 'C':
+                    # === Plan C: 全組合 (Exhaustive) ===
+                    # 規則: 主商品固定 1 個，剩餘 (Target-1) 個位置從 Pool 中任選
+                    slots_to_fill = target_qty - 1
+                    if slots_to_fill > 0:
+                        combos = combinations_with_replacement(pool, slots_to_fill)
+                        for combo in combos:
+                            strat_c = {main_sku: 1} # 固定主商品
+                            for item in combo:
+                                strat_c[item] = strat_c.get(item, 0) + 1
+                            strategies_list.append(strat_c)
+                    else:
+                        # 如果 Target=1 (理論上不會跑到這，因為 loop 從 2 開始)，就只有主商品
+                        strategies_list.append({main_sku: 1})
+                        
+                else:
+                    # === Plan A / B ===
                     
-                    # 避免重複 (例如 Qty=2 時，平均和集中可能長一樣)
-                    if strat_conc != strat_avg:
-                        strategies_list.append(strat_conc)
+                    # 策略 1: 平均分配 (Plan A 基本款)
+                    current_cycle = cycle(pool)
+                    strat_avg = {}
+                    for _ in range(target_qty):
+                        item = next(current_cycle)
+                        strat_avg[item] = strat_avg.get(item, 0) + 1
+                    strategies_list.append(strat_avg)
+                    
+                    # 策略 2: 集中分配 (Plan B 加強款)
+                    if TEST_PLAN == 'B' and partners:
+                        strat_conc = {main_sku: 1}
+                        remaining = target_qty - 1
+                        target_p = partners[0]
+                        strat_conc[target_p] = strat_conc.get(target_p, 0) + remaining
+                        
+                        if strat_conc != strat_avg:
+                            strategies_list.append(strat_conc)
                 
                 # 將所有策略寫入清單
                 for strat in strategies_list:
@@ -391,7 +406,7 @@ def sync_mix_match_data(client):
     # 初始上色
     format_group_colors(mix_sheet, new_data)
     
-    print(f"✅ [Task 2] 已生成 {len(new_data)-1} 筆混搭測試案例")
+    print(f"✅ [Task 2] 已生成 {len(new_data)-1} 筆混搭測試案例 (模式 {TEST_PLAN})")
     return len(new_data)-1
 
 def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
@@ -442,21 +457,16 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     final_strategy = {sku: 0 for sku in unique_skus_planned} 
     
     # 解析 strategy_str 內的數量設定
-    # 格式範例: "621325:1; 632202:1"
     for item in raw_items:
         parts = item.split(':')
         s_code = parts[0].strip()
         s_qty = int(parts[1].strip())
         
-        # 只有在 available_skus 裡面的才算數
         if s_code in available_skus:
             final_strategy[s_code] = s_qty
         else:
-            # 如果缺貨，嘗試用 pool 裡的其他人補 (這裡簡化處理：若缺貨則該數量不補，或可選擇用主商品補)
-            # 目前邏輯：缺貨商品數量直接歸零，但會標記 "缺"
             final_strategy[s_code] = 0
 
-    # 重新組裝實際要加入的清單
     final_display_parts = []
     for s in unique_skus_planned:
         qty = final_strategy.get(s, 0)
