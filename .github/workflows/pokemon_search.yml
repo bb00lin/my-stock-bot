@@ -2,13 +2,11 @@ name: Pokemon Center Search
 
 on:
   workflow_dispatch: # 手動觸發
-  # 如果需要定時執行，可取消下方註解
-  # schedule:
-  #   - cron: '0 3 * * *'
 
 jobs:
   run-pokemon-search:
-    runs-on: ubuntu-latest
+    # [關鍵修正] 使用 macOS 環境以繞過 IP 封鎖
+    runs-on: macos-13
     
     steps:
       - name: Checkout repository
