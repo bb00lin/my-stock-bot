@@ -20,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10'
 
       # 3. 安裝必要套件 (包含 Selenium、gspread 與認證工具)
       - name: Install dependencies
