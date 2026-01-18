@@ -61,69 +61,55 @@ def init_driver():
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--window-size=1920,1080')
     
-    # [關鍵升級] 隱藏自動化控制特徵，偽裝成一般瀏覽器
+    # [反偵測設定] 模擬真實瀏覽器
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
     
-    # 使用最新的 Chrome User-Agent
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    # 加入語系設定，讓網站認為我們是正常用戶
+    options.add_argument("--lang=ja-JP")
+    options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    
-    # 額外腳本：覆蓋 navigator.webdriver 屬性
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    
     return driver
 
-# 捲動截圖函式
 def capture_scrolling_screenshots(driver, directory, base_filename):
     try:
         total_height = driver.execute_script("return document.body.scrollHeight")
         viewport_height = driver.execute_script("return window.innerHeight")
         if total_height == 0: total_height = viewport_height
-
         scroll_pos = 0
         part = 1
-        
         while scroll_pos < total_height:
             driver.execute_script(f"window.scrollTo(0, {scroll_pos});")
             time.sleep(1) 
-            
-            file_path = f"{directory}/{base_filename}-{part}.png"
-            driver.save_screenshot(file_path)
-            
+            driver.save_screenshot(f"{directory}/{base_filename}-{part}.png")
             scroll_pos += viewport_height
             part += 1
-            if part > 8: break # 限制最多截 8 張
-            
+            if part > 8: break
     except Exception as e:
         print(f"⚠️ 截圖失敗: {e}", flush=True)
 
 def send_email(subject, body, attachment_path=None):
     mail_user = os.environ.get('MAIL_USERNAME')
     mail_pass = os.environ.get('MAIL_PASSWORD')
-    
     if not mail_user or not mail_pass:
         print("⚠️ 未設定 Email 帳密，跳過寄信", flush=True)
         return
-
     print(f"📧 正在發送郵件: {subject}", flush=True)
     msg = MIMEMultipart()
     msg['From'] = mail_user
     msg['To'] = ", ".join(MAIL_RECEIVERS)
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'html'))
-
     if attachment_path and os.path.exists(attachment_path):
         try:
             with open(attachment_path, 'rb') as f:
                 part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
             part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment_path)}"'
             msg.attach(part)
-        except Exception as e:
-            print(f"⚠️ 附件夾帶失敗: {e}", flush=True)
-
+        except: pass
     try:
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
@@ -135,24 +121,19 @@ def send_email(subject, body, attachment_path=None):
         print(f"❌ 郵件發送失敗: {e}", flush=True)
 
 def find_search_input(driver, wait):
-    # [修正] 根據您的截圖，input 結構為 class="form-control search-field" name="q"
-    # 我們使用更精確的 CSS Selector
+    # [修正] 針對 Pokemon Center 的 name="q"
     selectors = [
         (By.NAME, "q"),
-        (By.CSS_SELECTOR, "input.search-field"), 
-        (By.CSS_SELECTOR, "input[placeholder*='検索']"),
-        (By.XPATH, "//input[@type='text' and @name='q']")
+        (By.CSS_SELECTOR, "input.search-field"),
+        (By.CSS_SELECTOR, "input[type='text']")
     ]
-    
     for by_type, selector_str in selectors:
         try:
             element = wait.until(EC.element_to_be_clickable((by_type, selector_str)))
             return element
-        except:
-            continue
+        except: continue
     return None
 
-# ================= 主程式邏輯 =================
 def main():
     client = connect_google_sheet()
     if not client: return
@@ -166,18 +147,16 @@ def main():
 
     try:
         spreadsheet = client.open(SPREADSHEET_FILE_NAME)
-        
         try:
             worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
         except gspread.WorksheetNotFound:
             print(f"❌ 錯誤：找不到名為 '{WORKSHEET_NAME}' 的分頁！", flush=True)
             return
 
-        print("🧹 清理舊資料 (C欄到H欄)...", flush=True)
+        print("🧹 清理舊資料...", flush=True)
         worksheet.batch_clear(["C2:H1000"])
 
         product_ids = worksheet.col_values(1)[1:] 
-        
         total_items = 0
         success_items = 0
         not_found_items = 0
@@ -191,99 +170,84 @@ def main():
             total_items += 1
             print(f"🔍 [{i+1}] 搜尋商品編號: {clean_pid}", flush=True)
             
+            # 強制清除 Cookies 以避免被追蹤
+            driver.delete_all_cookies()
             driver.get(POKEMON_URL)
             update_time = get_display_time()
             
-            # [診斷] 印出標題以確認是否被擋
-            print(f"   👉 當前頁面標題: {driver.title}", flush=True)
+            print(f"   👉 頁面標題: {driver.title}", flush=True)
             
             try:
-                # 1. 搜尋
                 search_box = find_search_input(driver, wait)
                 
                 if not search_box:
-                    # 截圖並報錯
-                    error_shot = f"{screenshot_dir}/debug_no_search_{clean_pid}.png"
-                    driver.save_screenshot(error_shot)
-                    
-                    # 檢查網頁內容是否包含錯誤訊息
-                    page_src = driver.page_source
-                    if "Access Denied" in page_src or "Forbidden" in page_src:
-                        print(f"🚫 嚴重警告：IP 被網站封鎖 (Access Denied)，無法載入搜尋框。", flush=True)
-                        print(f"   已儲存證據截圖: {error_shot}", flush=True)
-                        break # 被鎖IP後續也不會成功，直接跳出迴圈
-                    
-                    raise Exception(f"Search Box Not Found (Title: {driver.title})")
+                    if "Restricted" in driver.title or "Access Denied" in driver.page_source:
+                        print(f"🚫 嚴重警告：IP 被封鎖 (Restricted access)。請確認已切換至 macOS runner。", flush=True)
+                        break 
+                    raise Exception("Search Box Not Found")
 
                 search_box.clear()
                 search_box.send_keys(clean_pid)
                 search_box.send_keys(Keys.ENTER)
-                
-                time.sleep(5) # 增加等待時間
+                time.sleep(5) 
 
-                # 2. 判斷是否無結果
-                page_source = driver.page_source
-                if "該当する商品は見つかりませんでした" in page_source or "0件" in page_source:
-                    print(f"ℹ️ {clean_pid}: 商品不存在 (Not Found)", flush=True)
+                if "該当する商品は見つかりませんでした" in driver.page_source or "0件" in driver.page_source:
+                    print(f"ℹ️ {clean_pid}: Not Found", flush=True)
                     worksheet.update(range_name=f"D{row_idx}", values=[["Not Found"]])
                     worksheet.update(range_name=f"H{row_idx}", values=[[update_time]])
                     not_found_items += 1
                     summary_list.append(f"{clean_pid}: Not Found")
                     continue
 
-                # 3. 點擊第一個商品
+                # [修正] 點擊商品邏輯 (li.product a)
                 try:
-                    first_product = driver.find_element(By.CSS_SELECTOR, "div.product-list a, .item-list a, .search-result-item a")
+                    first_product = driver.find_element(By.CSS_SELECTOR, "li.product a, div.product-list a")
                     product_link = first_product.get_attribute("href")
                     driver.get(product_link)
                     time.sleep(3)
                 except NoSuchElementException:
-                    print(f"⚠️ 搜尋有結果但找不到商品連結", flush=True)
+                    print(f"⚠️ 找不到商品連結", flush=True)
                     worksheet.update(range_name=f"D{row_idx}", values=[["Click Error"]])
                     continue
 
-                # 4. 抓取資料
                 current_url = driver.current_url
                 
-                # (1) 次分類
-                sub_category = ""
-                try:
-                    sub_cat_elem = driver.find_element(By.CSS_SELECTOR, ".product-header__category, .category-tag, ol.breadcrumb li:last-child")
-                    sub_category = sub_cat_elem.text.strip()
-                except:
-                    sub_category = "N/A"
-
-                # (2) 商品名稱 (D欄)
+                # [修正] 標題與分類抓取邏輯
+                # 您的截圖: <h1>標題<span>分類</span></h1>
                 product_name = ""
+                sub_category = "N/A"
                 try:
-                    name_elem = driver.find_element(By.TAG_NAME, "h1")
-                    product_name = name_elem.text.strip()
+                    h1_elem = driver.find_element(By.CSS_SELECTOR, "h1.lead")
+                    # 嘗試抓取內部的 span (分類)
+                    try:
+                        span_elem = h1_elem.find_element(By.TAG_NAME, "span")
+                        sub_category = span_elem.text.strip()
+                        # 商品名稱 = 完整文字 - 分類文字
+                        full_text = h1_elem.text.strip()
+                        product_name = full_text.replace(sub_category, "").strip()
+                    except:
+                        # 如果沒有 span，則整串都是名稱
+                        product_name = h1_elem.text.strip()
                 except:
                     product_name = "Unknown Name"
 
-                # (3) 尺寸與重量 (E, F欄)
+                # 尺寸與重量
                 size_val = ""
                 weight_val = "未標示"
-                
                 try:
                     spec_td = driver.find_element(By.XPATH, "//th[contains(text(), 'サイズ') or contains(text(), '重量')]/following-sibling::td")
                     spec_text = spec_td.text.strip()
-                    
                     if "\u3000" in spec_text:
                         parts = spec_text.split("\u3000")
                         size_val = parts[0].strip()
-                        if len(parts) > 1:
-                            weight_val = parts[1].strip()
+                        if len(parts) > 1: weight_val = parts[1].strip()
                     else:
                         size_val = spec_text
-                        
-                except NoSuchElementException:
+                except:
                     size_val = "規格未找到"
 
-                # 5. 截圖
                 capture_scrolling_screenshots(driver, screenshot_dir, clean_pid)
 
-                # 6. 寫入
                 data_to_write = [
                     sub_category,   # C
                     product_name,   # D
@@ -292,18 +256,16 @@ def main():
                     current_url,    # G
                     update_time     # H
                 ]
-                
                 worksheet.update(range_name=f"C{row_idx}:H{row_idx}", values=[data_to_write])
-                print(f"✅ {clean_pid}: 更新完成", flush=True)
+                print(f"✅ {clean_pid}: 更新完成 ({product_name})", flush=True)
                 success_items += 1
                 summary_list.append(f"{clean_pid}: {product_name}")
 
             except Exception as e:
-                print(f"❌ {clean_pid} 處理失敗: {str(e)[:100]}", flush=True)
+                print(f"❌ {clean_pid} 失敗: {str(e)[:100]}", flush=True)
                 driver.save_screenshot(f"{screenshot_dir}/error_{clean_pid}.png")
                 worksheet.update(range_name=f"D{row_idx}", values=[["Error"]])
 
-        # 7. 打包與寄信
         zip_filename = f"Pokemon_{get_time_str_for_filename()}.zip"
         print(f"📦 打包截圖: {zip_filename}", flush=True)
         with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -311,27 +273,13 @@ def main():
                 for file in files:
                     zipf.write(os.path.join(root, file), file)
 
-        subject = f"Pokemon商品查詢結果-共{total_items}筆，成功{success_items}筆，未找到{not_found_items}筆"
-        
+        subject = f"Pokemon商品查詢結果-共{total_items}筆，成功{success_items}筆"
         html_list = "".join([f"<li>{s}</li>" for s in summary_list])
-        body = f"""
-        <html><body>
-            <h2>Pokemon Center 商品查詢報告</h2>
-            <p><b>執行時間:</b> {get_display_time()}</p>
-            <ul>
-                <li>查詢總數: {total_items}</li>
-                <li>成功抓取: {success_items}</li>
-                <li>無此商品: {not_found_items}</li>
-            </ul>
-            <p><b>處理明細:</b></p>
-            <ul>{html_list}</ul>
-            <br>
-            <p>截圖檔案請參閱附件。</p>
-        </body></html>
-        """
-        
+        body = f"""<html><body><h2>Pokemon Center 商品查詢報告</h2>
+            <ul><li>查詢總數: {total_items}</li><li>成功: {success_items}</li><li>未找到: {not_found_items}</li></ul>
+            <p><b>明細:</b></p><ul>{html_list}</ul></body></html>"""
         send_email(subject, body, zip_filename)
-        print("🎉 任務全部完成！", flush=True)
+        print("🎉 任務完成！", flush=True)
 
     except Exception as main_e:
         print(f"💥 程式崩潰: {main_e}", flush=True)
