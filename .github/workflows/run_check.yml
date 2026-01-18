@@ -1,26 +1,35 @@
-name: Daily Ingredient Check
+name: CosIng Ingredient Search
 
+# 設定觸發條件
 on:
   schedule:
-    - cron: '0 0 * * *' # 每天 UTC 00:00 執行
-  workflow_dispatch: # 也可以手動觸發
+    # 每天台灣時間上午 10:00 執行 (UTC 02:00)
+    - cron: '0 2 * * *'
+  workflow_dispatch: # 允許手動從 Actions 頁面按鈕觸發
 
 jobs:
-  build:
+  run-search:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v3
+      # 1. 檢出倉庫代碼
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2. 設定 Python 環境
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
+      # 3. 安裝必要套件 (包含 Selenium、gspread 與認證工具)
       - name: Install dependencies
         run: |
-          pip install gspread google-auth selenium webdriver-manager
-      - name: Run script
+          pip install gspread oauth2client selenium webdriver-manager
+
+      # 4. 執行爬蟲與資料同步腳本
+      - name: Execute CosIng automation
         env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: |
-          # 這裡需要一段代碼將 ENV 轉回 credentials.json 檔案供 Python 讀取
-          echo $GOOGLE_CREDENTIALS > credentials.json
-          python cosing_automation.py
+          # 從 GitHub Secrets 讀取 Google 試算表金鑰
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+        run: python cosing_automation.py
