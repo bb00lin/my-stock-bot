@@ -32,6 +32,11 @@ SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgp
 
 URL = "https://guardian.com.sg/"
 
+# [新增] 測試方案選擇
+# 'A': 基本模式 (每個數量只測 1 種平均分配) -> 速度快，省時間
+# 'B': 極端模式 (每個數量測 2 種：平均 + 集中於單一贈品) -> 測試庫存極限 (推薦)
+TEST_PLAN = 'B'
+
 # Email 設定 (從 Secrets 讀取)
 MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
 MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
@@ -49,13 +54,11 @@ def get_taiwan_time_display():
     return get_taiwan_time_now().strftime("%Y-%m-%d %H:%M")
 
 def get_filename_time_prefix():
-    # [修改] 檔名專用時間格式 (避免冒號，改用連字號以容錯)
-    # 範例: 2026-01-18_10-15
+    # 檔名專用時間格式 (避免冒號)
     return get_taiwan_time_now().strftime("%Y-%m-%d_%H-%M")
 
 def get_folder_date_prefix():
-    # [修改] 資料夾專用日期格式
-    # 範例: 2026-01-18
+    # 資料夾專用日期格式
     return get_taiwan_time_now().strftime("%Y-%m-%d")
 
 def safe_get(row_list, index):
@@ -73,8 +76,7 @@ def create_zip_evidence(sku, sku_folder):
     try:
         if not os.path.exists(sku_folder) or not os.listdir(sku_folder): return None
         
-        # [修改] Zip 檔名加上詳細日期時間
-        # 範例: 2026-01-18_10-15_SKU123456.zip
+        # Zip 檔名加上詳細日期時間
         ts = get_filename_time_prefix()
         zip_filename_base = f"{ts}_{sku}"
         
@@ -109,9 +111,8 @@ def format_group_colors(sheet, data_rows):
     """
     print("🎨 正在為表格上色 (依主商品分組)...")
     
-    # [修改] 使用您截圖中那種明顯的對比色
     COLOR_1 = {"red": 1.0, "green": 1.0, "blue": 1.0}      # 白色
-    COLOR_2 = {"red": 0.9, "green": 0.9, "blue": 0.9}      # 淺灰色 (比之前的淡藍更穩重)
+    COLOR_2 = {"red": 0.9, "green": 0.9, "blue": 0.9}      # 淺灰色
     
     requests = []
     start_row_index = 1 
@@ -152,7 +153,6 @@ def format_group_colors(sheet, data_rows):
 
     try:
         if requests:
-            # [重要修正] 改為 spreadsheet.batch_update 確保格式化 100% 成功
             sheet.spreadsheet.batch_update({"requests": requests})
             print("✅ 表格上色完成")
     except Exception as e:
@@ -277,7 +277,7 @@ def add_single_item_to_cart(driver, sku, qty_needed=1):
 
 # ================= Task 2: Mix & Match =================
 def sync_mix_match_data(client):
-    print("🔄 [Task 2] 同步 Mix & Match 資料 (擴充 Qty 2~5)...")
+    print(f"🔄 [Task 2] 同步 Mix & Match 資料 (擴充 Qty 2~5 | 模式: {TEST_PLAN})...")
     promo_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_PROMO)
     try:
         mix_sheet = client.open(SPREADSHEET_FILE_NAME).worksheet(WORKSHEET_MIX)
@@ -355,16 +355,36 @@ def sync_mix_match_data(client):
                     expected_price = int(raw_total * 10) / 10.0
                     rule_text = f"Calculated (Unit: {best_unit_price:.2f})"
 
+                # === [新增] 根據 TEST_PLAN 產生不同策略組合 ===
+                strategies_list = []
+                
+                # 策略 1: 平均分配 (Plan A 基本款)
+                # 使用 cycle 輪詢 pool 中的所有商品
                 current_cycle = cycle(pool)
-                strategy_dict = {}
+                strat_avg = {}
                 for _ in range(target_qty):
                     item = next(current_cycle)
-                    strategy_dict[item] = strategy_dict.get(item, 0) + 1
+                    strat_avg[item] = strat_avg.get(item, 0) + 1
+                strategies_list.append(strat_avg)
                 
-                strategy_str = "; ".join([f"{k}:{v}" for k, v in strategy_dict.items()])
-
-                row_data = [main_sku, prod_name, rule_text, target_qty, strategy_str, str(expected_price), "", "", "", ""]
-                new_data.append(row_data)
+                # 策略 2: 集中分配 (Plan B 加強款)
+                if TEST_PLAN == 'B' and partners:
+                    # 主商品固定 1 個
+                    strat_conc = {main_sku: 1}
+                    # 剩下的數量全部集中在第 1 個搭配商品上
+                    remaining = target_qty - 1
+                    target_p = partners[0]
+                    strat_conc[target_p] = strat_conc.get(target_p, 0) + remaining
+                    
+                    # 避免重複 (例如 Qty=2 時，平均和集中可能長一樣)
+                    if strat_conc != strat_avg:
+                        strategies_list.append(strat_conc)
+                
+                # 將所有策略寫入清單
+                for strat in strategies_list:
+                    strategy_str = "; ".join([f"{k}:{v}" for k, v in strat.items()])
+                    row_data = [main_sku, prod_name, rule_text, target_qty, strategy_str, str(expected_price), "", "", "", ""]
+                    new_data.append(row_data)
 
     mix_sheet.update(values=new_data, range_name="A1")
     
@@ -383,13 +403,11 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
         s = item.split(':')[0].strip()
         if s not in unique_skus_planned: unique_skus_planned.append(s)
         
-    # [修改] 資料夾名稱加上日期 (2026-01-18_mix_SKU)
     date_prefix = get_folder_date_prefix()
     folder_name = f"{date_prefix}_mix_{main_sku}"
     
     if not os.path.exists(folder_name): os.makedirs(folder_name)
     
-    # [修改] 準備檔名時間戳 (2026-01-18_10-15)
     ts_file = get_filename_time_prefix()
     
     available_skus = []
@@ -423,23 +441,22 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
 
     final_strategy = {sku: 0 for sku in unique_skus_planned} 
     
-    final_strategy[main_sku] = 1
-    current_count = 1
-    
-    partners_pool = [s for s in available_skus if s != main_sku]
-    
-    if not partners_pool:
-        fill_pool = [main_sku]
-    else:
-        fill_pool = partners_pool
+    # 解析 strategy_str 內的數量設定
+    # 格式範例: "621325:1; 632202:1"
+    for item in raw_items:
+        parts = item.split(':')
+        s_code = parts[0].strip()
+        s_qty = int(parts[1].strip())
         
-    pool_cycle = cycle(fill_pool)
-    
-    while current_count < target_total_qty:
-        next_item = next(pool_cycle)
-        final_strategy[next_item] = final_strategy.get(next_item, 0) + 1
-        current_count += 1
+        # 只有在 available_skus 裡面的才算數
+        if s_code in available_skus:
+            final_strategy[s_code] = s_qty
+        else:
+            # 如果缺貨，嘗試用 pool 裡的其他人補 (這裡簡化處理：若缺貨則該數量不補，或可選擇用主商品補)
+            # 目前邏輯：缺貨商品數量直接歸零，但會標記 "缺"
+            final_strategy[s_code] = 0
 
+    # 重新組裝實際要加入的清單
     final_display_parts = []
     for s in unique_skus_planned:
         qty = final_strategy.get(s, 0)
@@ -459,7 +476,6 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     for sku in items_to_add:
         success = add_single_item_to_cart(driver, sku, 1)
         if not success:
-            # [修改] 錯誤截圖也加上時間戳
             driver.save_screenshot(f"{folder_name}/{ts_file}_Add_Fail_{sku}.png")
             zip_path = create_zip_evidence(f"Mix_Error_{main_sku}", folder_name)
             return "Add Fail", "", zip_path, missing_skus, final_display_str
@@ -478,9 +494,9 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     
     time.sleep(2) 
     
-    # === [強化] 強制等待 6 秒讓 Side Cart/Notification 彈窗完全消失 ===
+    # === 強制等待 6 秒 ===
     try:
-        print("   ⏳ 等待 6 秒讓 Side Cart 彈窗消失...")
+        print("   ⏳ 等待 6 秒讓 Side Cart/Notification 彈窗完全消失...")
         time.sleep(6) 
         
         body = driver.find_element(By.TAG_NAME, "body")
@@ -488,7 +504,7 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
         driver.execute_script("arguments[0].click();", body)
         time.sleep(1)
     except: pass
-    # =================================================================
+    # =====================
     
     total_price = "Error"
     for retry in range(5):
@@ -501,7 +517,6 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
         
     if not total_price: total_price = "Error"
     
-    # [修改] 結果截圖加上時間戳
     screenshot_name = f"{ts_file}_Mix_{main_sku}_Total.png"
     driver.save_screenshot(f"{folder_name}/{screenshot_name}")
     
@@ -579,14 +594,12 @@ def run_mix_match_task(client, driver):
             all_match = False
             error_summary.append(f"{main_sku} (Qty{target_qty}): {result_text}")
         
-        # [修改] 這裡改為無條件加入附件 (滿足您「提供25張照片」的需求)
         if zip_file: attachments.append(zip_file)
 
         update_time = get_taiwan_time_display()
         sheet.update(values=[[web_total, result_text, update_time, link]], range_name=f"G{i}:J{i}")
         results_for_mail.append([main_sku, row[1], result_text, update_time])
 
-    # [重要] 任務結束前再執行一次上色，確保顏色正確
     format_group_colors(sheet, all_values)
 
     subject_prefix = "✅" if all_match else "🔥"
