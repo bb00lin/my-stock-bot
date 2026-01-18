@@ -41,18 +41,18 @@ def get_display_time():
     return get_taiwan_time_now().strftime("%Y-%m-%d %H:%M")
 
 def connect_google_sheet():
-    print("📊 正在連線 Google Sheet...")
+    print("📊 正在連線 Google Sheet...", flush=True)
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
     if not json_key_str:
-        print("❌ 錯誤：找不到 GOOGLE_SHEETS_JSON 環境變數")
+        print("❌ 錯誤：找不到 GOOGLE_SHEETS_JSON 環境變數", flush=True)
         return None
     try:
         creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_key_str), scope)
         client = gspread.authorize(creds)
         return client
     except Exception as e:
-        print(f"❌ 連線失敗: {e}")
+        print(f"❌ 連線失敗: {e}", flush=True)
         return None
 
 def init_driver():
@@ -70,10 +70,10 @@ def send_email(subject, body, attachment_path=None):
     mail_pass = os.environ.get('MAIL_PASSWORD')
     
     if not mail_user or not mail_pass:
-        print("⚠️ 未設定 Email 帳密，跳過寄信")
+        print("⚠️ 未設定 Email 帳密，跳過寄信", flush=True)
         return
 
-    print(f"📧 正在發送郵件: {subject}")
+    print(f"📧 正在發送郵件: {subject}", flush=True)
     msg = MIMEMultipart()
     msg['From'] = mail_user
     msg['To'] = ", ".join(MAIL_RECEIVERS)
@@ -87,7 +87,7 @@ def send_email(subject, body, attachment_path=None):
             part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment_path)}"'
             msg.attach(part)
         except Exception as e:
-            print(f"⚠️ 附件夾帶失敗: {e}")
+            print(f"⚠️ 附件夾帶失敗: {e}", flush=True)
 
     try:
         server = smtplib.SMTP('smtp.gmail.com', 587)
@@ -95,9 +95,9 @@ def send_email(subject, body, attachment_path=None):
         server.login(mail_user, mail_pass)
         server.send_message(msg)
         server.quit()
-        print("✅ 郵件發送成功")
+        print("✅ 郵件發送成功", flush=True)
     except Exception as e:
-        print(f"❌ 郵件發送失敗: {e}")
+        print(f"❌ 郵件發送失敗: {e}", flush=True)
 
 # ================= 核心邏輯 =================
 def main():
@@ -119,7 +119,7 @@ def main():
         restrict_sheet_id = restrict_sheet.id
         restrict_gid = restrict_sheet.id
 
-        print(f"🧹 清理舊資料...")
+        print(f"🧹 清理舊資料...", flush=True)
         main_sheet.batch_clear(["C2:E100"]) 
         restrict_sheet.batch_clear(["A2:G1000"]) 
 
@@ -141,7 +141,7 @@ def main():
             
             clean_name = str(name).strip()
             total_checked += 1
-            print(f"🔍 [{i+1}] 搜尋: {clean_name}")
+            print(f"🔍 [{i+1}] 搜尋: {clean_name}", flush=True)
             
             driver.get(COSING_URL)
             update_time = get_display_time()
@@ -167,7 +167,7 @@ def main():
                 driver.save_screenshot(screenshot_path)
 
                 if "No matching results found" in driver.page_source:
-                    print(f"ℹ️ {clean_name}: 無結果")
+                    print(f"ℹ️ {clean_name}: 無結果", flush=True)
                     main_sheet.update(range_name=f"C{row_idx}:E{row_idx}", 
                                       values=[["No matching results found", "", update_time]])
                 else:
@@ -232,22 +232,22 @@ def main():
                         # 切換下一次的顏色
                         is_yellow_bg = not is_yellow_bg
                         current_restrict_row += num_rows
-                        print(f"✅ {clean_name}: 抓取 {num_rows} 筆")
+                        print(f"✅ {clean_name}: 抓取 {num_rows} 筆", flush=True)
                     else:
                         main_sheet.update_acell(f"C{row_idx}", "Format Error")
 
             except Exception as e:
-                print(f"❌ {clean_name} 錯誤: {str(e)[:50]}")
+                print(f"❌ {clean_name} 錯誤: {str(e)[:50]}", flush=True)
                 main_sheet.update_acell(f"C{row_idx}", "Error")
 
         # 3. 執行批次上色 (如果有的話)
         if formatting_requests:
-            print("🎨 正在執行表格上色...")
+            print("🎨 正在執行表格上色...", flush=True)
             spreadsheet.batch_update({"requests": formatting_requests})
 
         # 4. 打包截圖
         zip_filename = f"Search_{get_time_str_for_filename()}.zip"
-        print(f"📦 正在打包截圖: {zip_filename}")
+        print(f"📦 正在打包截圖: {zip_filename}", flush=True)
         with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(screenshot_dir):
                 for file in files:
@@ -277,10 +277,10 @@ def main():
         
         send_email(subject, body, zip_filename)
 
-        print("🎉 所有任務完成！")
+        print("🎉 所有任務完成！", flush=True)
 
     except Exception as main_e:
-        print(f"💥 程式崩潰: {main_e}")
+        print(f"💥 程式崩潰: {main_e}", flush=True)
     finally:
         driver.quit()
         # 清理暫存
