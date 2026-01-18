@@ -5,8 +5,8 @@ on:
 
 jobs:
   run-pokemon-search:
-    # [關鍵修正] 使用 macOS 環境以繞過 IP 封鎖
-    runs-on: macos-13
+    # [修正] macOS-13 已淘汰，更新為 macos-latest 以維持 IP 防護並符合新規定
+    runs-on: macos-latest
     
     steps:
       - name: Checkout repository
