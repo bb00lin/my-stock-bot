@@ -70,6 +70,7 @@ def inject_cookies(driver):
 
 def ensure_editor_active(driver):
     try:
+        driver.switch_to.default_content() # 確保在主視窗操作 body
         driver.find_element(By.TAG_NAME, "body").click()
         webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
     except: pass
@@ -115,10 +116,9 @@ def navigate_and_copy_latest(driver):
         print(f"跳轉至複製頁面: {copy_url}")
         driver.get(copy_url)
         
-        wait_long = WebDriverWait(driver, 60)
-        # 等待按鈕出現代表 DOM 載入 (不論是否為標題)
-        wait_long.until(EC.presence_of_element_located((By.TAG_NAME, "button")))
-        print("編輯器 DOM 已載入！")
+        # 這裡改用比較寬鬆的等待，因為有可能在 iframe 裡
+        time.sleep(10)
+        print("等待頁面載入完成...")
         
     except TimeoutException:
         print("導航逾時！")
@@ -126,80 +126,96 @@ def navigate_and_copy_latest(driver):
         raise
 
 def rename_page(driver, new_filename):
-    print(f"=== 開始重命名流程 (v16.0 精準定位版) ===")
+    print(f"=== 開始重命名流程 (v17.0 Iframe 穿透版) ===")
     print(f"目標檔名: WeeklyReport_{new_filename}")
-    wait = WebDriverWait(driver, 20)
-    time.sleep(3) 
+    wait = WebDriverWait(driver, 10)
     
-    # 【關鍵修正】根據您的 HTML 提供的精確定位器
     title_locators = [
-        (By.NAME, "editpages-title"),                     # 最穩定的定位
-        (By.CSS_SELECTOR, "textarea[data-test-id='editor-title']"), # 注意 test-id 有連字號
-        (By.CSS_SELECTOR, "textarea[placeholder='給此頁面一個標題']"), # 中文 Placeholder
-        (By.CSS_SELECTOR, "textarea[aria-label='給此頁面一個標題']"),
-        (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']") # 保留舊版備用
+        (By.NAME, "editpages-title"),
+        (By.CSS_SELECTOR, "textarea[data-test-id='editor-title']"),
+        (By.CSS_SELECTOR, "textarea[placeholder='給此頁面一個標題']"),
+        (By.TAG_NAME, "textarea") # 只要是 textarea 都試試看
     ]
-
+    
     target_input = None
 
-    # 策略 1: 精準定位
-    print("策略 1: 嘗試使用精確 Selector...")
+    # --- 階段 1: 在主視窗尋找 ---
+    print("階段 1: 檢查主視窗...")
     for method, query in title_locators:
         try:
-            elem = wait.until(EC.visibility_of_element_located((method, query)))
-            target_input = elem
-            print(f"--> 成功定位標題框！ (策略: {query})")
-            break
+            elem = driver.find_element(method, query)
+            if elem.is_displayed():
+                target_input = elem
+                print(f"--> 在主視窗找到標題框！(策略: {query})")
+                break
         except: continue
 
-    # 策略 2: 遍歷 Textarea (如果策略 1 失敗)
+    # --- 階段 2: 鑽入 Iframe 尋找 ---
     if not target_input:
-        print("策略 1 失敗，切換至策略 2 (遍歷 Textarea)...")
-        try:
-            textareas = driver.find_elements(By.TAG_NAME, "textarea")
-            for i, ta in enumerate(textareas):
-                if ta.is_displayed():
-                    # 印出屬性以供除錯
-                    attrs = f"name={ta.get_attribute('name')}, test-id={ta.get_attribute('data-test-id')}"
-                    print(f"檢查 Textarea [{i}]: {attrs}")
-                    
-                    if "title" in attrs or "editor" in attrs:
-                        target_input = ta
-                        print("--> 鎖定目標 Textarea！")
-                        break
-        except Exception as e:
-            print(f"搜尋 Textarea 錯誤: {e}")
+        print("階段 1 失敗，開始掃描所有 Iframes...")
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        print(f"發現 {len(iframes)} 個 Iframe。")
+        
+        for i, frame in enumerate(iframes):
+            try:
+                driver.switch_to.default_content() # 先回主層
+                driver.switch_to.frame(frame) # 跳進去
+                print(f"正在檢查 Iframe [{i}]...")
+                
+                for method, query in title_locators:
+                    try:
+                        elem = driver.find_element(method, query)
+                        # 檢查是否為標題框特徵 (排除不相關的 textarea)
+                        ph = elem.get_attribute("placeholder") or ""
+                        tid = elem.get_attribute("data-test-id") or ""
+                        nm = elem.get_attribute("name") or ""
+                        
+                        if "title" in ph or "title" in tid or "title" in nm or "標題" in ph:
+                            target_input = elem
+                            print(f"--> 在 Iframe [{i}] 找到標題框！(策略: {query})")
+                            break
+                    except: continue
+                
+                if target_input: break # 找到了就跳出 iframe 迴圈
+            except Exception as e:
+                print(f"Iframe [{i}] 存取失敗: {e}")
+                continue
 
     if not target_input:
-        raise Exception("找不到任何可編輯的標題輸入框！")
+        # 切回主視窗再報錯
+        driver.switch_to.default_content()
+        raise Exception("遍歷主視窗與所有 Iframe，仍找不到標題輸入框！")
 
     # 執行輸入
     try:
-        # 確保可點擊
+        # 注意：此時 driver 可能還停留在某個 iframe 內，直接操作即可
         try: target_input.click()
         except: driver.execute_script("arguments[0].click();", target_input)
         
-        # 清除舊標題
         target_input.send_keys(Keys.CONTROL + "a")
         target_input.send_keys(Keys.BACK_SPACE)
         time.sleep(0.5)
         
-        # 輸入新標題
         target_input.send_keys(f"WeeklyReport_{new_filename}")
         time.sleep(1)
         
-        # 觸發 React 更新
         target_input.send_keys(Keys.ENTER)
         target_input.send_keys(Keys.BACK_SPACE)
         print("重命名動作完成。")
         
+        # 操作完畢切回主視窗
+        driver.switch_to.default_content()
+        
     except Exception as e:
         print(f"重命名輸入失敗: {str(e)}")
+        driver.switch_to.default_content()
         driver.save_screenshot("rename_fatal.png")
         raise
 
 def update_jira_macros(driver, date_info):
     wait = WebDriverWait(driver, 30)
+    driver.switch_to.default_content() # 確保在主層
+    
     print("捲動頁面喚醒內容...")
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
     time.sleep(3)
@@ -207,27 +223,52 @@ def update_jira_macros(driver, date_info):
     ensure_editor_active(driver)
     
     print("搜尋 Jira 表格...")
+    # 增加針對 Iframe 的支援
+    # 如果內容在 Iframe 裡，我們也需要切換
+    # 這裡先假設在主視窗，如果找不到再去 Iframe
+    
     macro_locators = [
         (By.CSS_SELECTOR, "div.datasourceView-content-wrap"),
         (By.CSS_SELECTOR, "div[data-prosemirror-node-name='blockCard']")
     ]
     
     macros = []
-    for attempt in range(5):
+    
+    # 嘗試在主視窗找
+    for _ in range(2):
         for locator in macro_locators:
             found = driver.find_elements(*locator)
             if found:
                 macros = found
-                print(f"找到 {len(found)} 個表格")
                 break
         if macros: break
-        print(f"嘗試 {attempt+1}/5: 尚未找到表格，等待中...")
-        time.sleep(3)
-            
+        time.sleep(2)
+
+    # 如果主視窗沒有，嘗試去 Iframe 找 (通常編輯器只有一個主要 Iframe)
     if not macros:
+        print("主視窗找不到表格，嘗試檢查 Iframe...")
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        for frame in iframes:
+            driver.switch_to.default_content()
+            try:
+                driver.switch_to.frame(frame)
+                for locator in macro_locators:
+                    found = driver.find_elements(*locator)
+                    if found:
+                        macros = found
+                        print("在 Iframe 中找到表格！")
+                        # 保持在 Iframe 中不要切換出去
+                        break
+            except: pass
+            if macros: break
+    
+    if not macros:
+        driver.switch_to.default_content()
         print("警告：逾時仍找不到 Jira 表格。")
         return
 
+    print(f"找到 {len(macros)} 個表格，開始更新...")
+    
     for i, target in enumerate(macros):
         try:
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
@@ -268,16 +309,19 @@ def update_jira_macros(driver, date_info):
             print(f"[{i+1}] 略過: {str(e)}")
             webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
             continue
+            
+    # 操作結束切回主視窗
+    driver.switch_to.default_content()
 
 def publish_page(driver):
     print("準備發布頁面...")
+    driver.switch_to.default_content() # 發布按鈕通常在最外層，不在 Iframe 裡
     wait = WebDriverWait(driver, 15)
     ensure_editor_active(driver)
     
-    # 根據您提供的 HTML，data-testid 是正確的
     publish_locators = [
         (By.CSS_SELECTOR, "[data-testid='publish-button']"),
-        (By.XPATH, "//button[contains(., '發佈')]"), # 使用您提供的 '發佈'
+        (By.XPATH, "//button[contains(., '發佈')]"),
         (By.XPATH, "//button[contains(., 'Publish')]"),
         (By.CSS_SELECTOR, "button[appearance='primary']")
     ]
@@ -297,7 +341,6 @@ def publish_page(driver):
             time.sleep(1)
             target_btn.click()
         except Exception as e:
-            print(f"點擊失敗，嘗試 JS 強制點擊: {e}")
             driver.execute_script("arguments[0].click();", target_btn)
             
         print("發布動作已觸發！等待跳轉...")
@@ -308,7 +351,7 @@ def publish_page(driver):
 
 def main():
     dates = get_target_dates()
-    print(f"=== Confluence 自動週報腳本 (v16.0 精準定位版) ===")
+    print(f"=== Confluence 自動週報腳本 (v17.0 Iframe 穿透版) ===")
     print(f"日期: {dates['monday_str']} ~ {dates['sunday_str']}")
     
     driver = init_driver()
