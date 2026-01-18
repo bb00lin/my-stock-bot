@@ -4,6 +4,7 @@ import re
 import os
 import shutil
 import smtplib
+import json  # [新增] 必須匯入 json 模組
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication 
@@ -26,10 +27,9 @@ WORKSHEET_PROMO = 'promotion'
 # 請確認此網址正確
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgpoiwGE7tO-QSY2-kC_ecf868cY/edit?gid=0#gid=0" 
 
-CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
 
-# Email 設定
+# Email 設定 (從 Secrets 讀取)
 MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
 MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
 MAIL_RECEIVER = ['bb00lin@gmail.com', 'helen.chen.168@gmail.com']
@@ -375,12 +375,26 @@ def compare_prices(user_prices, web_prices, product_url):
     if not mismatches: return "均相符"
     else: return "; ".join(mismatches)
 
+# === [重要修正] 改為使用 GitHub Secrets 進行連線 ===
 def connect_google_sheet():
-    print("📊 正在連線 Google Sheet...")
+    print("📊 正在連線 Google Sheet (使用 Secrets)...")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
-    client = gspread.authorize(creds)
-    return client
+    
+    # 這裡請確認您的 Secret 名稱，根據之前的對話應該是 'GOOGLE_SHEETS_JSON'
+    json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
+    
+    if not json_key_str:
+        print("❌ 錯誤：找不到 GOOGLE_SHEETS_JSON 環境變數！")
+        return None
+
+    try:
+        creds_dict = json.loads(json_key_str)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        print(f"❌ 解析金鑰或連線失敗: {e}")
+        return None
 
 # ================= Selenium 功能 =================
 def init_driver():
@@ -540,7 +554,7 @@ def process_sku(driver, sku):
 
         for qty in range(1, 6):
             
-            # === [已補回] 數量嚴格驗證機制 (先前遺漏的部分) ===
+            # === 數量嚴格驗證機制 ===
             try:
                 actual_qty_on_page = -1
                 qty_input = None
@@ -570,22 +584,21 @@ def process_sku(driver, sku):
                 # 若驗證失敗，印出警告 (但不強制中斷，避免誤判)
                 if qty > 1 and actual_qty_on_page != -1 and actual_qty_on_page != qty:
                      print(f"   ❌ 嚴重錯誤：網頁數量 ({actual_qty_on_page}) 與預期 ({qty}) 不符！可能導致價格抓錯")
-                     # 可以在這裡加入截圖做為證據
             except Exception as e:
                 print(f"   ⚠️ 數量驗證過程發生錯誤: {e}")
-            # =================================================
+            # =======================
 
             try: WebDriverWait(driver, 15).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
             except: pass
             
-            # === [已補回] 點擊空白處關閉遮擋視窗 (修復遮擋問題) ===
+            # === [防遮擋] 點擊空白處關閉視窗 ===
             try:
                 body = driver.find_element(By.TAG_NAME, "body")
                 body.send_keys(Keys.ESCAPE)
                 driver.execute_script("arguments[0].click();", body)
                 time.sleep(1)
             except: pass
-            # ====================================================
+            # =================================
 
             final_price = "Error"
             max_retries = 10
