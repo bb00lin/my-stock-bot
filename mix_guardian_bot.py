@@ -100,21 +100,12 @@ def format_group_colors(sheet, data_rows):
     """
     print("🎨 正在為表格上色 (依主商品分組)...")
     
+    # 兩種交替顏色 (白色 vs 淡藍色)
     COLOR_1 = {"red": 1.0, "green": 1.0, "blue": 1.0}
     COLOR_2 = {"red": 0.94, "green": 0.97, "blue": 1.0}
     
     requests = []
     
-    requests.append({
-        "updateCells": {
-            "range": {
-                "sheetId": sheet.id,
-                "startRowIndex": 1, 
-            },
-            "fields": "userEnteredFormat.backgroundColor"
-        }
-    })
-
     if len(data_rows) < 2:
         return
 
@@ -122,6 +113,8 @@ def format_group_colors(sheet, data_rows):
     current_color_idx = 0
     colors = [COLOR_1, COLOR_2]
     
+    # 假設 data_rows 包含標題，所以從第 2 行 (index 1) 開始處理
+    # sheet 的 startRowIndex 是 0-based，所以標題是 row 0，數據從 row 1 開始
     start_row_index = 1 
     
     for i, row in enumerate(data_rows[1:]):
@@ -153,6 +146,7 @@ def format_group_colors(sheet, data_rows):
 
     try:
         if requests:
+            # 批次更新以節省 API 配額
             sheet.batch_update({"requests": requests})
             print("✅ 表格上色完成")
     except Exception as e:
@@ -368,7 +362,7 @@ def sync_mix_match_data(client):
 
     mix_sheet.update(values=new_data, range_name="A1")
     
-    # 上色
+    # 初始上色 (確保剛生成時有顏色)
     format_group_colors(mix_sheet, new_data)
     
     print(f"✅ [Task 2] 已生成 {len(new_data)-1} 筆混搭測試案例")
@@ -471,12 +465,16 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     
     time.sleep(2) 
     
-    # === [防遮擋] 點擊空白處關閉遮擋視窗 (如 PWP / Free Gift) ===
+    # === [修正與強化] 強制等待 6 秒讓彈窗消失 ===
     try:
+        print("   ⏳ 等待 6 秒讓 Side Cart/Notification 彈窗完全消失...")
+        time.sleep(6) # 強制等待，避免彈窗遮擋 Total 金額或被截圖捕捉
+        
+        # 嘗試點擊 Body 關閉任何殘留的 Overlay
         body = driver.find_element(By.TAG_NAME, "body")
         body.send_keys(Keys.ESCAPE)
         driver.execute_script("arguments[0].click();", body)
-        time.sleep(1) # 等待視窗淡出
+        time.sleep(1)
     except: pass
     # ====================================================
     
@@ -573,8 +571,8 @@ def run_mix_match_task(client, driver):
         sheet.update(values=[[web_total, result_text, update_time, link]], range_name=f"G{i}:J{i}")
         results_for_mail.append([main_sku, row[1], result_text, update_time])
 
-    # 執行結束後，可以再刷一次顏色確保一致性 (選用)
-    # format_group_colors(sheet, all_values)
+    # [修正] 確保結束時再執行一次上色，保證顏色正確
+    format_group_colors(sheet, all_values)
 
     subject_prefix = "✅" if all_match else "🔥"
     date_info = f"{get_taiwan_time_now().strftime('%m/%d(%a)')}"
