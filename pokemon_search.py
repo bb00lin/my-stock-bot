@@ -60,9 +60,20 @@ def init_driver():
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--window-size=1920,1080')
-    # 使用真實瀏覽器的 User-Agent 以降低被阻擋機率
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    # [關鍵升級] 隱藏自動化控制特徵，偽裝成一般瀏覽器
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    
+    # 使用最新的 Chrome User-Agent
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    
+    # 額外腳本：覆蓋 navigator.webdriver 屬性
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    
     return driver
 
 # 捲動截圖函式
@@ -123,14 +134,14 @@ def send_email(subject, body, attachment_path=None):
     except Exception as e:
         print(f"❌ 郵件發送失敗: {e}", flush=True)
 
-# [修正] 搜尋框定位函式
 def find_search_input(driver, wait):
-    # 根據您提供的 HTML，優先嘗試 name="q" 和 class="search-field"
+    # [修正] 根據您的截圖，input 結構為 class="form-control search-field" name="q"
+    # 我們使用更精確的 CSS Selector
     selectors = [
-        (By.NAME, "q"),                  # 最準確 (根據您的截圖)
-        (By.CLASS_NAME, "search-field"), # 次準確
+        (By.NAME, "q"),
+        (By.CSS_SELECTOR, "input.search-field"), 
         (By.CSS_SELECTOR, "input[placeholder*='検索']"),
-        (By.CSS_SELECTOR, ".searchbox input")
+        (By.XPATH, "//input[@type='text' and @name='q']")
     ]
     
     for by_type, selector_str in selectors:
@@ -147,9 +158,8 @@ def main():
     if not client: return
 
     driver = init_driver()
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 25)
 
-    # 建立截圖目錄
     screenshot_dir = "pokemon_screenshots"
     if os.path.exists(screenshot_dir): shutil.rmtree(screenshot_dir)
     os.makedirs(screenshot_dir)
@@ -161,19 +171,13 @@ def main():
             worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
         except gspread.WorksheetNotFound:
             print(f"❌ 錯誤：找不到名為 '{WORKSHEET_NAME}' 的分頁！", flush=True)
-            print("📋 目前試算表中的所有分頁名稱如下：", flush=True)
-            for ws in spreadsheet.worksheets():
-                print(f"   👉 '{ws.title}'", flush=True)
             return
 
         print("🧹 清理舊資料 (C欄到H欄)...", flush=True)
-        # 清除 C, D, E, F, G, H 欄位 (保留 B 欄)
         worksheet.batch_clear(["C2:H1000"])
 
-        # 讀取 A 欄商品編號
         product_ids = worksheet.col_values(1)[1:] 
         
-        # 統計
         total_items = 0
         success_items = 0
         not_found_items = 0
@@ -190,32 +194,37 @@ def main():
             driver.get(POKEMON_URL)
             update_time = get_display_time()
             
+            # [診斷] 印出標題以確認是否被擋
+            print(f"   👉 當前頁面標題: {driver.title}", flush=True)
+            
             try:
                 # 1. 搜尋
                 search_box = find_search_input(driver, wait)
                 
                 if not search_box:
-                    # 如果還是找不到，截圖以供除錯
+                    # 截圖並報錯
                     error_shot = f"{screenshot_dir}/debug_no_search_{clean_pid}.png"
                     driver.save_screenshot(error_shot)
-                    print(f"❌ 無法定位搜尋框，已截圖: {error_shot}", flush=True)
                     
-                    if "Access Denied" in driver.page_source or "403" in driver.title:
-                        print("🚫 警告：可能被網站封鎖 (Access Denied/403)", flush=True)
+                    # 檢查網頁內容是否包含錯誤訊息
+                    page_src = driver.page_source
+                    if "Access Denied" in page_src or "Forbidden" in page_src:
+                        print(f"🚫 嚴重警告：IP 被網站封鎖 (Access Denied)，無法載入搜尋框。", flush=True)
+                        print(f"   已儲存證據截圖: {error_shot}", flush=True)
+                        break # 被鎖IP後續也不會成功，直接跳出迴圈
                     
-                    raise Exception("Search Box Not Found")
+                    raise Exception(f"Search Box Not Found (Title: {driver.title})")
 
                 search_box.clear()
                 search_box.send_keys(clean_pid)
                 search_box.send_keys(Keys.ENTER)
                 
-                time.sleep(4) # 等待搜尋結果
+                time.sleep(5) # 增加等待時間
 
                 # 2. 判斷是否無結果
                 page_source = driver.page_source
                 if "該当する商品は見つかりませんでした" in page_source or "0件" in page_source:
                     print(f"ℹ️ {clean_pid}: 商品不存在 (Not Found)", flush=True)
-                    # D欄寫 Not Found, H欄寫時間
                     worksheet.update(range_name=f"D{row_idx}", values=[["Not Found"]])
                     worksheet.update(range_name=f"H{row_idx}", values=[[update_time]])
                     not_found_items += 1
@@ -224,13 +233,12 @@ def main():
 
                 # 3. 點擊第一個商品
                 try:
-                    # 嘗試定位第一個商品圖片或標題連結
                     first_product = driver.find_element(By.CSS_SELECTOR, "div.product-list a, .item-list a, .search-result-item a")
                     product_link = first_product.get_attribute("href")
                     driver.get(product_link)
                     time.sleep(3)
                 except NoSuchElementException:
-                    print(f"⚠️ 搜尋有結果但找不到商品連結，可能網頁結構改變", flush=True)
+                    print(f"⚠️ 搜尋有結果但找不到商品連結", flush=True)
                     worksheet.update(range_name=f"D{row_idx}", values=[["Click Error"]])
                     continue
 
@@ -240,7 +248,6 @@ def main():
                 # (1) 次分類
                 sub_category = ""
                 try:
-                    # 抓取標題上方的標籤或 Breadcrumb
                     sub_cat_elem = driver.find_element(By.CSS_SELECTOR, ".product-header__category, .category-tag, ol.breadcrumb li:last-child")
                     sub_category = sub_cat_elem.text.strip()
                 except:
@@ -259,11 +266,9 @@ def main():
                 weight_val = "未標示"
                 
                 try:
-                    # 根據影片，尋找包含 "サイズ・重量" 的表格行
                     spec_td = driver.find_element(By.XPATH, "//th[contains(text(), 'サイズ') or contains(text(), '重量')]/following-sibling::td")
                     spec_text = spec_td.text.strip()
                     
-                    # 依全形空格切割
                     if "\u3000" in spec_text:
                         parts = spec_text.split("\u3000")
                         size_val = parts[0].strip()
@@ -278,8 +283,7 @@ def main():
                 # 5. 截圖
                 capture_scrolling_screenshots(driver, screenshot_dir, clean_pid)
 
-                # 6. 寫入 Google Sheet
-                # 順序: C(次分類), D(名稱), E(尺寸), F(重量), G(網址), H(時間)
+                # 6. 寫入
                 data_to_write = [
                     sub_category,   # C
                     product_name,   # D
