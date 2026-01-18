@@ -21,7 +21,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # ================= 設定區 =================
 SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
-WORKSHEET_NAME = 'Pokemon'  # 工作表名稱
+WORKSHEET_NAME = 'Pokemon'  # 請確認這個名稱與分頁完全一致
 POKEMON_URL = "https://www.pokemoncenter-online.com/"
 
 # Email 設定
@@ -137,7 +137,16 @@ def main():
 
     try:
         spreadsheet = client.open(SPREADSHEET_FILE_NAME)
-        worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+        
+        # [修改] 增加防呆機制：如果找不到分頁，列出所有現有分頁
+        try:
+            worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+        except gspread.WorksheetNotFound:
+            print(f"❌ 錯誤：找不到名為 '{WORKSHEET_NAME}' 的分頁！", flush=True)
+            print("📋 目前試算表中的所有分頁名稱如下 (請檢查大小寫/空白)：", flush=True)
+            for ws in spreadsheet.worksheets():
+                print(f"   👉 '{ws.title}'", flush=True)
+            return
 
         print("🧹 清理舊資料 (C欄到H欄)...", flush=True)
         # 清除 C, D, E, F, G, H 欄位 (保留 B 欄)
@@ -165,13 +174,12 @@ def main():
             
             try:
                 # 1. 搜尋
-                # 尋找搜尋框 (根據網站結構，通常有 placeholder 或 class)
                 search_box = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='text']")))
                 search_box.clear()
                 search_box.send_keys(clean_pid)
                 search_box.send_keys(Keys.ENTER)
                 
-                time.sleep(3) # 等待結果載入
+                time.sleep(3) 
 
                 # 2. 判斷是否無結果
                 page_source = driver.page_source
@@ -185,10 +193,8 @@ def main():
                     continue
 
                 # 3. 點擊第一個商品
-                # 通常是列表中的第一個 <a> 標籤
                 try:
                     first_product = driver.find_element(By.CSS_SELECTOR, "div.product-list a, .item-list a")
-                    # 取得連結並跳轉
                     product_link = first_product.get_attribute("href")
                     driver.get(product_link)
                     time.sleep(3)
@@ -200,11 +206,9 @@ def main():
                 # 4. 抓取資料
                 current_url = driver.current_url
                 
-                # (1) 次分類 (Breadcrumb 或 Category tag)
-                # 嘗試抓取標題上方的分類標籤
+                # (1) 次分類
                 sub_category = ""
                 try:
-                    # 嘗試多種 selector
                     sub_cat_elem = driver.find_element(By.CSS_SELECTOR, ".product-header__category, .category-tag, ul.breadcrumb li:last-child")
                     sub_category = sub_cat_elem.text.strip()
                 except:
@@ -219,23 +223,19 @@ def main():
                     product_name = "Unknown Name"
 
                 # (3) 尺寸與重量 (E, F欄)
-                # 尋找規格表格中的 "サイズ・重量"
                 size_val = ""
                 weight_val = "未標示"
                 
                 try:
-                    # 使用 XPath 定位包含 "サイズ・重量" 的 th，並抓取其後的 td
                     spec_td = driver.find_element(By.XPATH, "//th[contains(text(), 'サイズ') or contains(text(), '重量')]/following-sibling::td")
                     spec_text = spec_td.text.strip()
                     
-                    # 切割邏輯：全形空格
                     if "\u3000" in spec_text:
                         parts = spec_text.split("\u3000")
                         size_val = parts[0].strip()
                         if len(parts) > 1:
                             weight_val = parts[1].strip()
                     else:
-                        # 嘗試半形空格切割，或直接整串視為尺寸
                         size_val = spec_text
                         
                 except NoSuchElementException:
@@ -245,8 +245,6 @@ def main():
                 capture_scrolling_screenshots(driver, screenshot_dir, clean_pid)
 
                 # 6. 寫入 Google Sheet
-                # 欄位順序: C(次分類), D(名稱), E(尺寸), F(重量), G(網址), H(時間)
-                # Google Sheet update 使用 row 更新比較快
                 data_to_write = [
                     sub_category,   # C
                     product_name,   # D
@@ -275,7 +273,6 @@ def main():
 
         subject = f"Pokemon商品查詢結果-共{total_items}筆，成功{success_items}筆，未找到{not_found_items}筆"
         
-        # 產生 HTML 列表
         html_list = "".join([f"<li>{s}</li>" for s in summary_list])
         body = f"""
         <html><body>
