@@ -1,6 +1,7 @@
 import os, yfinance as yf, pandas as pd, requests, time, datetime
 import numpy as np
 import gspread
+import json  # [新增] 必須匯入 json 模組
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
@@ -18,15 +19,31 @@ def send_line(msg):
     try: requests.post(url, headers=headers, json=payload)
     except: pass
 
+# === [重要修正] 改為使用 GitHub Secrets 進行連線 ===
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name('google_key.json', scope)
-    return gspread.authorize(creds)
+    
+    # 從環境變數讀取 Secret
+    json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
+    
+    if not json_key_str:
+        print("❌ 錯誤：找不到 GOOGLE_SHEETS_JSON 環境變數！")
+        return None
+
+    try:
+        creds_dict = json.loads(json_key_str)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        print(f"❌ 解析金鑰或連線失敗: {e}")
+        return None
 
 def sync_to_sheets(data_list):
     """將結果寫入 '法人精選監測' Google Sheets"""
     try:
         client = get_gspread_client()
+        if not client: return 
         sheet = client.open("法人精選監測").get_worksheet(0)
         sheet.append_rows(data_list)
         print(f"✅ 成功同步 {len(data_list)} 筆數據至 '法人精選監測'")
@@ -39,6 +56,8 @@ def update_watch_list_sheet(recommended_stocks):
 
     try:
         client = get_gspread_client()
+        if not client: return
+
         try:
             sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
         except:
