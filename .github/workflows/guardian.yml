@@ -1,7 +1,7 @@
 name: Guardian Price Check Bot
 
 on:
-  workflow_dispatch:      # 保留這個，讓您可以手動按按鈕
+  workflow_dispatch:       # 保留這個，讓您可以手動按按鈕
   #schedule:
     # 範例 1：每 40 分鐘執行一次
     #- cron: '*/40 * * * *'
@@ -29,23 +29,15 @@ jobs:
         run: |
           pip install selenium gspread oauth2client webdriver-manager google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      - name: Create JSON Key
-        env:
-          GOOGLE_KEY: ${{ secrets.GOOGLE_SHEETS_JSON }}
-        run: |
-          echo "$GOOGLE_KEY" > google_key.json
-          if [ ! -s google_key.json ] || [ "$(cat google_key.json)" == "" ]; then
-            echo "❌ 錯誤：google_key.json 是空的！請確認 Secret 名稱是否為 GOOGLE_SHEETS_JSON。"
-            exit 1
-          else
-            echo "✅ 金鑰檔案建立成功！"
-          fi
+      # [已移除] Create JSON Key 步驟 (因為 Python 改成直接讀變數，不需要實體檔案了)
 
       - name: Run Python Script
         env:
-          # 傳遞 Email 帳密給 Python (請確保已在 GitHub Secrets 設定)
+          # 傳遞 Email 帳密
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          # [新增] 必須把金鑰 Secret 傳進環境變數，Python 才讀得到
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: python guardian_bot.py
 
       - name: Generate Timestamp
