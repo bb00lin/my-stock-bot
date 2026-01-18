@@ -11,7 +11,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException, ElementNotInteractableException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException, StaleElementReferenceException
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 設定區 ---
@@ -90,7 +90,7 @@ def navigate_and_copy_latest(driver):
                     valid_links.append(l)
             except: continue
         
-        if not valid_links: raise Exception("找不到任何符合的已發布週報連結")
+        if not valid_links: raise Exception("找不到任何符合的已發布週報連結 (已過濾草稿)")
         
         valid_links.sort(key=lambda x: x.text)
         latest_link = valid_links[-1]
@@ -100,105 +100,91 @@ def navigate_and_copy_latest(driver):
         time.sleep(5)
         wait.until(EC.url_contains("pages"))
         
-        current_url = driver.current_url
-        print(f"當前網址: {current_url}")
-        
-        match = re.search(r"pages(?:/.*?)?/(\d+)", current_url)
-        if not match: match = re.search(r"pageId=(\d+)", current_url)
-        if not match: raise Exception(f"無法解析 Page ID: {current_url}")
+        match = re.search(r"pages(?:/.*?)?/(\d+)", driver.current_url)
+        if not match: match = re.search(r"pageId=(\d+)", driver.current_url)
+        if not match: raise Exception(f"無法解析 Page ID: {driver.current_url}")
             
         page_id = match.group(1)
         
-        space_match = re.search(r"(/wiki/spaces/[^/]+)", current_url)
-        if space_match:
-            copy_url = f"{parsed_base_url(driver)}{space_match.group(1)}/pages/create?copyPageId={page_id}"
-        else:
-            copy_url = f"{current_url.split('/pages/')[0]}/pages/create?copyPageId={page_id}"
-
+        # 組建複製網址
+        space_match = re.search(r"(/wiki/spaces/[^/]+)", driver.current_url)
+        url_prefix = space_match.group(1) if space_match else driver.current_url.split('/pages/')[0]
+        base = f"{urlparse(driver.current_url).scheme}://{urlparse(driver.current_url).netloc}"
+        
+        # 確保 prefix 開頭有 /
+        if not url_prefix.startswith('/'): url_prefix = '/' + url_prefix
+            
+        copy_url = f"{base}{url_prefix}/pages/create?copyPageId={page_id}"
         print(f"跳轉至複製頁面: {copy_url}")
         driver.get(copy_url)
         
-        # 等待標題容器載入 (這是我們目前唯一確定存在的東西)
+        # 等待頁面核心載入 (檢測 publish-button 是否存在於 DOM，即使不可見)
         wait_long = WebDriverWait(driver, 60)
-        wait_long.until(EC.presence_of_element_located((By.ID, "content-title")))
-        print("編輯器容器已載入！")
+        wait_long.until(EC.presence_of_element_located((By.TAG_NAME, "button")))
+        print("編輯器 DOM 已載入！")
         
     except TimeoutException:
         print("導航逾時！")
         driver.save_screenshot("nav_error.png")
         raise
 
-def parsed_base_url(driver):
-    u = urlparse(driver.current_url)
-    return f"{u.scheme}://{u.netloc}"
-
 def rename_page(driver, new_filename):
-    print(f"=== 開始重命名流程 (v14.0 結構診斷版) ===")
+    print(f"=== 開始重命名流程 (v15.0 全域搜尋版) ===")
     print(f"目標檔名: WeeklyReport_{new_filename}")
     wait = WebDriverWait(driver, 20)
+    time.sleep(5) # 讓編輯器完全 render 出來
     
-    # 1. 先抓取標題容器
+    target_input = None
+    
+    # 【策略 1】尋找頁面上第一個可見的 Textarea
+    # 標題通常是頁面上第一個且最大的 textarea
     try:
-        container = wait.until(EC.presence_of_element_located((By.ID, "content-title")))
-        print("已定位標題容器 (content-title)。")
+        textareas = driver.find_elements(By.TAG_NAME, "textarea")
+        print(f"頁面上共發現 {len(textareas)} 個 Textarea。")
         
-        # 【診斷】印出容器內部的 HTML，這行 Log 會救我們一命
-        print("--- DEBUG: 標題容器內部 HTML ---")
-        print(container.get_attribute('innerHTML'))
-        print("--------------------------------")
-        
-        # 2. 嘗試在容器內尋找任何看起來像輸入框的東西
-        input_element = None
+        for i, ta in enumerate(textareas):
+            if ta.is_displayed():
+                # 簡單過濾：標題的高度通常比較高，或者 placeholder 包含 Title/標題
+                ph = ta.get_attribute("placeholder") or ""
+                tid = ta.get_attribute("data-testid") or ""
+                
+                print(f"Textarea [{i}]: id={ta.get_attribute('id')}, testid={tid}, ph={ph}")
+                
+                if "title" in tid or "title" in ph.lower() or "標題" in ph or i == 0:
+                    target_input = ta
+                    print("--> 鎖定目標 Textarea！")
+                    break
+    except Exception as e:
+        print(f"搜尋 Textarea 錯誤: {e}")
+
+    # 【策略 2】如果策略 1 失敗，嘗試 CSS Selector
+    if not target_input:
+        print("策略 1 失敗，嘗試 CSS Selector...")
         try:
-            # 優先找 textarea
-            input_element = container.find_element(By.TAG_NAME, "textarea")
-            print("策略 A: 找到 textarea")
-        except:
-            try:
-                # 其次找 input
-                input_element = container.find_element(By.TAG_NAME, "input")
-                print("策略 B: 找到 input")
-            except:
-                try:
-                    # 最後找 contenteditable div
-                    input_element = container.find_element(By.CSS_SELECTOR, "[contenteditable='true']")
-                    print("策略 C: 找到 contenteditable")
-                except:
-                    print("策略失敗: 容器內找不到明顯的輸入元件。")
+            target_input = wait.until(EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, "textarea[data-testid='page-title-text-area']")
+            ))
+        except: pass
 
-        # 3. 執行輸入
-        if input_element:
-            print("正在對找到的元件執行輸入...")
-            try:
-                input_element.click()
-            except:
-                driver.execute_script("arguments[0].click();", input_element)
-            
-            input_element.send_keys(Keys.CONTROL + "a")
-            input_element.send_keys(Keys.BACK_SPACE)
-            time.sleep(0.5)
-            input_element.send_keys(f"WeeklyReport_{new_filename}")
-            time.sleep(1)
-        else:
-            # 【盲打策略】如果找不到輸入框，嘗試點擊容器並對「當前焦點」打字
-            print("啟動【盲打模式】: 點擊容器並發送按鍵...")
-            driver.execute_script("arguments[0].click();", container)
-            time.sleep(1)
-            
-            # 使用 ActionChains 對 active element 打字
-            actions = webdriver.ActionChains(driver)
-            actions.send_keys(Keys.CONTROL + "a")
-            actions.send_keys(Keys.BACK_SPACE)
-            actions.pause(0.5)
-            actions.send_keys(f"WeeklyReport_{new_filename}")
-            actions.perform()
-            
-            print("盲打指令發送完畢。")
+    if not target_input:
+        raise Exception("找不到任何可編輯的標題輸入框！")
 
-        time.sleep(2) # 等待生效
+    # 執行輸入
+    try:
+        try: target_input.click()
+        except: driver.execute_script("arguments[0].click();", target_input)
+        
+        target_input.send_keys(Keys.CONTROL + "a")
+        target_input.send_keys(Keys.BACK_SPACE)
+        time.sleep(0.5)
+        target_input.send_keys(f"WeeklyReport_{new_filename}")
+        time.sleep(1)
+        # 按一下 Enter 確保 React 狀態更新
+        target_input.send_keys(Keys.ENTER)
+        target_input.send_keys(Keys.BACK_SPACE)
         
     except Exception as e:
-        print(f"重命名流程嚴重錯誤: {str(e)}")
+        print(f"重命名輸入失敗: {str(e)}")
         driver.save_screenshot("rename_fatal.png")
         raise
 
@@ -206,7 +192,7 @@ def update_jira_macros(driver, date_info):
     wait = WebDriverWait(driver, 30)
     print("捲動頁面喚醒內容...")
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(2)
+    time.sleep(3) # 增加等待時間
     driver.execute_script("window.scrollTo(0, 0);")
     ensure_editor_active(driver)
     
@@ -217,7 +203,8 @@ def update_jira_macros(driver, date_info):
     ]
     
     macros = []
-    for _ in range(3):
+    # 增加重試次數到 5 次，每次間隔 3 秒
+    for attempt in range(5):
         for locator in macro_locators:
             found = driver.find_elements(*locator)
             if found:
@@ -225,10 +212,11 @@ def update_jira_macros(driver, date_info):
                 print(f"找到 {len(found)} 個表格")
                 break
         if macros: break
-        time.sleep(2)
+        print(f"嘗試 {attempt+1}/5: 尚未找到表格，等待中...")
+        time.sleep(3)
             
     if not macros:
-        print("警告：找不到 Jira 表格。")
+        print("警告：逾時仍找不到 Jira 表格。")
         return
 
     for i, target in enumerate(macros):
@@ -277,25 +265,48 @@ def publish_page(driver):
     wait = WebDriverWait(driver, 15)
     ensure_editor_active(driver)
     
+    # 【修正點】加入正確的 '發佈' (佈)
     publish_locators = [
         (By.CSS_SELECTOR, "[data-testid='publish-button']"),
-        (By.ID, "publish-button"),
-        (By.XPATH, "//button[contains(., '發布')]"),
+        (By.XPATH, "//button[@data-testid='publish-button']"), # XPATH 版的 testid
+        (By.XPATH, "//button[contains(., '發佈')]"), # 正確的中文字
+        (By.XPATH, "//button[contains(., 'Publish')]"),
         (By.CSS_SELECTOR, "button[appearance='primary']")
     ]
     
-    btn = None
+    target_btn = None
+    
+    # 策略 A: 依序尋找 Locator
     for method, query in publish_locators:
         try:
             element = wait.until(EC.presence_of_element_located((method, query)))
-            btn = element
+            target_btn = element
+            print(f"找到發布按鈕 (策略: {query})")
             break
         except: continue
 
-    if btn:
-        try: btn.click()
-        except: driver.execute_script("arguments[0].click();", btn)
-        print("發布動作已觸發！")
+    # 策略 B: 暴力遍歷所有按鈕
+    if not target_btn:
+        print("策略 A 失敗，開始暴力搜尋按鈕文字...")
+        buttons = driver.find_elements(By.TAG_NAME, "button")
+        for btn in buttons:
+            txt = btn.text
+            if "Publish" in txt or "發佈" in txt or "發布" in txt:
+                target_btn = btn
+                print(f"暴力搜尋找到按鈕: {txt}")
+                break
+
+    if target_btn:
+        try:
+            # 捲動到按鈕
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_btn)
+            time.sleep(1)
+            target_btn.click()
+        except Exception as e:
+            print(f"點擊失敗，嘗試 JS 強制點擊: {e}")
+            driver.execute_script("arguments[0].click();", target_btn)
+            
+        print("發布動作已觸發！等待跳轉...")
         time.sleep(10)
     else:
         print("!!! 找不到發布按鈕，傾印按鈕文字 !!!")
@@ -305,7 +316,7 @@ def publish_page(driver):
 
 def main():
     dates = get_target_dates()
-    print(f"=== Confluence 自動週報腳本 (v14.0 結構診斷版) ===")
+    print(f"=== Confluence 自動週報腳本 (v15.0 最終修正版) ===")
     print(f"日期: {dates['monday_str']} ~ {dates['sunday_str']}")
     
     driver = init_driver()
