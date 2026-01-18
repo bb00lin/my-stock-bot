@@ -1,0 +1,33 @@
+name: Confluence Weekly Automation
+
+on:
+  schedule:
+    # 每週一 19:00 (GMT+8) -> UTC 11:00
+    - cron: '0 11 * * 1'
+  workflow_dispatch: # 允許手動觸發
+
+jobs:
+  run-python-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11' # 建議使用 3.11
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Automation Script
+        env:
+          # 【關鍵修改】這裡必須把 Secrets 傳給環境變數，Python 才讀得到
+          CONF_URL: ${{ secrets.CONF_URL }}
+          CONF_USER: ${{ secrets.CONF_USER }}
+          CONF_PASS: ${{ secrets.CONF_PASS }}     # 雖然用 Cookie 模式，保留著也沒關係
+          CONF_COOKIES: ${{ secrets.CONF_COOKIES }} # <--- 這是這次新增的關鍵行
+        run: python confluence_automation.py
