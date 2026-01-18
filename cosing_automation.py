@@ -24,7 +24,7 @@ SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
 WORKSHEET_MAIN = '成分表'
 WORKSHEET_RESTRICT = '限制成分'
 
-# [修正] 更新為指定分頁的連結
+# 報表連結
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgpoiwGE7tO-QSY2-kC_ecf868cY/edit?gid=115296460#gid=115296460"
 COSING_URL = "https://ec.europa.eu/growth/tools-databases/cosing/index.cfm?fuseaction=search.simple"
 
@@ -61,10 +61,46 @@ def init_driver():
     options.add_argument('--headless=new')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--window-size=1920,1080') # 設定初始視窗大小
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
+
+# [新增] 捲動截圖功能
+def capture_scrolling_screenshots(driver, directory, base_filename):
+    """
+    偵測頁面高度，若超過視窗大小則分段截圖。
+    儲存格式: base_filename-1.png, base_filename-2.png ...
+    """
+    try:
+        # 取得頁面總高度與視窗高度
+        total_height = driver.execute_script("return document.body.scrollHeight")
+        viewport_height = driver.execute_script("return window.innerHeight")
+        
+        # 確保至少截一張
+        if total_height == 0: total_height = viewport_height
+
+        scroll_pos = 0
+        part = 1
+        
+        while scroll_pos < total_height:
+            # 捲動到指定位置
+            driver.execute_script(f"window.scrollTo(0, {scroll_pos});")
+            time.sleep(1) # 等待畫面渲染
+            
+            # 截圖
+            file_path = f"{directory}/{base_filename}-{part}.png"
+            driver.save_screenshot(file_path)
+            
+            # 準備下一次捲動
+            scroll_pos += viewport_height
+            part += 1
+            
+            # 安全機制：避免超長頁面導致無限迴圈 (限制最多 10 張)
+            if part > 10: break
+            
+    except Exception as e:
+        print(f"⚠️ 截圖失敗: {e}", flush=True)
 
 def send_email(subject, body, attachment_path=None):
     mail_user = os.environ.get('MAIL_USERNAME')
@@ -160,10 +196,10 @@ def main():
                                        len(d.find_elements(By.TAG_NAME, "table")) > 0)
                 except TimeoutException: pass
 
-                # 截圖
+                # === [更新] 呼叫捲動截圖函式 ===
                 safe_filename = "".join([c for c in clean_name if c.isalpha() or c.isdigit() or c==' ']).strip()
-                screenshot_path = f"{screenshot_dir}/{safe_filename}.png"
-                driver.save_screenshot(screenshot_path)
+                capture_scrolling_screenshots(driver, screenshot_dir, safe_filename)
+                # ==============================
 
                 if "No matching results found" in driver.page_source:
                     print(f"ℹ️ {clean_name}: 無結果", flush=True)
@@ -178,25 +214,23 @@ def main():
                         for r in rows:
                             cols = r.find_elements(By.TAG_NAME, "td")
                             if len(cols) >= 5:
-                                # [修正重點] Type 欄位轉換邏輯
+                                # Type 欄位修正邏輯
                                 raw_type_text = cols[0].get_attribute("textContent").strip()
-                                
-                                # 將完整文字轉換為代號
                                 if "Ingredient" in raw_type_text:
                                     final_type = "I"
                                 elif "Substance" in raw_type_text:
                                     final_type = "S"
                                 else:
-                                    final_type = raw_type_text # 若非這兩者則保留原樣
+                                    final_type = raw_type_text
                                 
                                 scraped_batch.append([
                                     clean_name,           # A
                                     update_time,          # B
-                                    final_type,           # C (已轉換為 I/S)
-                                    cols[1].text.strip(), # D (INCI)
-                                    cols[2].text.strip(), # E (CAS)
-                                    cols[3].text.strip(), # F (EC)
-                                    cols[4].text.strip()  # G (Annex)
+                                    final_type,           # C
+                                    cols[1].text.strip(), # D
+                                    cols[2].text.strip(), # E
+                                    cols[3].text.strip(), # F
+                                    cols[4].text.strip()  # G
                                 ])
                     
                     if scraped_batch:
@@ -272,7 +306,7 @@ def main():
             <ul>{found_html_list}</ul>
             <br>
             <p>👉 <a href="{SHEET_URL}">點擊查看完整 Google Sheet 報表</a></p>
-            <p><i>截圖檔案請參閱附件。</i></p>
+            <p><i>截圖檔案請參閱附件 (已自動分頁)。</i></p>
         </body></html>
         """
         
