@@ -2,9 +2,9 @@ name: CosIng Ingredient Search
 
 on:
   schedule:
-    # 每天 UTC 02:00 (台灣時間 10:00) 自動執行
+    # 每天 UTC 02:00 (台灣時間 10:00) 執行
     - cron: '0 2 * * *'
-  workflow_dispatch: # 手動執行按鈕
+  workflow_dispatch: # 允許手動執行
 
 jobs:
   run-search-job:
@@ -26,4 +26,15 @@ jobs:
       - name: Execute CosIng automation
         env:
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
         run: python cosing_automation.py
+
+      # 新增：將截圖 ZIP 檔上傳到 GitHub Artifacts
+      - name: Upload Screenshots Artifact
+        uses: actions/upload-artifact@v4
+        if: always() # 即使程式報錯也嘗試上傳
+        with:
+          name: search-screenshots
+          path: Search_*.zip
+          retention-days: 5
