@@ -2,7 +2,6 @@ name: CosIng Ingredient Search
 
 on:
   schedule:
-    # 每天 UTC 02:00 (台灣時間 10:00) 執行
     - cron: '0 2 * * *'
   workflow_dispatch: # 允許手動執行
 
