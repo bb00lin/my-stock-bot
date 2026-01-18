@@ -32,8 +32,6 @@ URL = "https://guardian.com.sg/"
 # Email 設定
 MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
 MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
-
-# === 修改：改為列表以支援多個收件人 ===
 MAIL_RECEIVER = ['bb00lin@gmail.com', 'helen.chen.168@gmail.com']
 
 # ================= 輔助功能 =================
@@ -165,11 +163,11 @@ def sync_promotion_data(client):
     print("✅ 資料同步完成")
     return True
 
-# ================= 郵件通知功能 (僅修改此處) =================
+# ================= 郵件通知功能 (格式優化) =================
 def generate_html_table(data_rows):
     if not data_rows: return ""
     
-    # === [修改] 擴充欄位以顯示所有價格 ===
+    # 擴充欄位標題：包含 User Q1~5 與 Web Q1~5
     headers = [
         "SKU", "Product Name", 
         "User Q1 Price", "User Q2 Price", "User Q3 Price", "User Q4 Price", "User Q5 Price",
@@ -186,8 +184,6 @@ def generate_html_table(data_rows):
     
     for row in data_rows:
         # row 的結構是 [SKU, Name, U1...U5, W1...W5, Time, Result, Link]
-        # 共 2+5+5+3 = 15 個元素
-        
         sku = safe_get(row, 0)
         name = safe_get(row, 1)
         
@@ -275,7 +271,6 @@ def send_notification_email(all_match, error_summary, full_data, attachment_file
 
     msg = MIMEMultipart()
     msg['From'] = MAIL_USERNAME
-    # === 修改：加入多個收件人 ===
     msg['To'] = ", ".join(MAIL_RECEIVER)
     msg['Subject'] = final_subject
 
@@ -292,7 +287,6 @@ def send_notification_email(all_match, error_summary, full_data, attachment_file
     """
     msg.attach(MIMEText(html, 'html'))
 
-    # 夾帶附件
     total_size = 0
     max_size = 24 * 1024 * 1024 
     
@@ -328,12 +322,10 @@ def send_notification_email(all_match, error_summary, full_data, attachment_file
 def validate_user_inputs(user_prices):
     clean_prices = [clean_price(p) for p in user_prices]
     if all(not p for p in clean_prices): return "異常:User價格全空"
-    valid_numbers = []
     for p in clean_prices:
         if not p: continue 
         try:
-            val = float(p)
-            valid_numbers.append(val)
+            float(p)
         except: return f"異常:User含非數值({p})"
     return None
 
@@ -547,7 +539,8 @@ def process_sku(driver, sku):
         time.sleep(5)
 
         for qty in range(1, 6):
-            # 數量嚴格驗證機制
+            
+            # === [已補回] 數量嚴格驗證機制 (先前遺漏的部分) ===
             try:
                 actual_qty_on_page = -1
                 qty_input = None
@@ -559,11 +552,13 @@ def process_sku(driver, sku):
                     except: pass
                 
                 if qty_input:
+                    # 等待數值跳轉 (最多等 5 秒)
                     for _ in range(10): 
                         val = qty_input.get_attribute("value")
                         if val and int(val) == qty:
                             actual_qty_on_page = int(val)
                             break
+                        # 檢查是否被限購阻擋
                         try:
                             err = driver.find_element(By.XPATH, "//*[contains(text(), 'maximum purchase quantity')] | //div[contains(@class, 'message-error')]")
                             if err.is_displayed():
@@ -572,14 +567,26 @@ def process_sku(driver, sku):
                         except: pass
                         time.sleep(0.5)
                 
+                # 若驗證失敗，印出警告 (但不強制中斷，避免誤判)
                 if qty > 1 and actual_qty_on_page != -1 and actual_qty_on_page != qty:
-                     print(f"   ❌ 嚴重錯誤：網頁數量 ({actual_qty_on_page}) 與預期 ({qty}) 不符！")
-                     pass 
-            except: pass
+                     print(f"   ❌ 嚴重錯誤：網頁數量 ({actual_qty_on_page}) 與預期 ({qty}) 不符！可能導致價格抓錯")
+                     # 可以在這裡加入截圖做為證據
+            except Exception as e:
+                print(f"   ⚠️ 數量驗證過程發生錯誤: {e}")
+            # =================================================
 
             try: WebDriverWait(driver, 15).until_not(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]")))
             except: pass
             
+            # === [已補回] 點擊空白處關閉遮擋視窗 (修復遮擋問題) ===
+            try:
+                body = driver.find_element(By.TAG_NAME, "body")
+                body.send_keys(Keys.ESCAPE)
+                driver.execute_script("arguments[0].click();", body)
+                time.sleep(1)
+            except: pass
+            # ====================================================
+
             final_price = "Error"
             max_retries = 10
             
@@ -723,8 +730,7 @@ def main():
                 overall_status_match = False
                 error_summary_list.append(f"SKU {sku}: {comparison_result}")
             
-            # [修正] 這裡組裝完整的 row data 供郵件使用
-            # 格式: [SKU, Name, UserQ1~5, WebQ1~5, Time, Result, Link]
+            # 組裝完整的 row data 供郵件使用
             updated_row = row_data[:7] + web_prices + [update_time, comparison_result, product_url]
             full_data_for_mail.append(updated_row)
 
