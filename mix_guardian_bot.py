@@ -26,7 +26,7 @@ WORKSHEET_MAIN = '工作表1'
 WORKSHEET_MIX = 'Mix_Match_Check' 
 WORKSHEET_PROMO = 'promotion'
 
-# [已修正] 使用您提供的正確 Google Sheet 網址
+# 請確認此網址正確
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgpoiwGE7tO-QSY2-kC_ecf868cY/edit?gid=1727836519#gid=1727836519"
 
 CREDENTIALS_FILE = 'google_key.json'
@@ -72,13 +72,77 @@ def create_zip_evidence(sku, sku_folder):
         return zip_path
     except: return None
 
-# ================= Google Sheet 連線 =================
+# ================= Google Sheet 連線與格式化 =================
 def connect_google_sheet():
     print("📊 正在連線 Google Sheet...")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
     client = gspread.authorize(creds)
     return client
+
+def format_group_colors(sheet, data_rows):
+    """
+    根據 Main SKU (第1欄) 為 Google Sheet 添加交替顏色
+    """
+    print("🎨 正在為表格上色 (依主商品分組)...")
+    
+    COLOR_1 = {"red": 1.0, "green": 1.0, "blue": 1.0}
+    COLOR_2 = {"red": 0.94, "green": 0.97, "blue": 1.0}
+    
+    requests = []
+    
+    requests.append({
+        "updateCells": {
+            "range": {
+                "sheetId": sheet.id,
+                "startRowIndex": 1, 
+            },
+            "fields": "userEnteredFormat.backgroundColor"
+        }
+    })
+
+    if len(data_rows) < 2:
+        return
+
+    current_sku = ""
+    current_color_idx = 0
+    colors = [COLOR_1, COLOR_2]
+    
+    start_row_index = 1 
+    
+    for i, row in enumerate(data_rows[1:]):
+        sku = safe_get(row, 0)
+        
+        if sku != current_sku:
+            current_sku = sku
+            current_color_idx = (current_color_idx + 1) % 2
+        
+        bg_color = colors[current_color_idx]
+        
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet.id,
+                    "startRowIndex": start_row_index + i,
+                    "endRowIndex": start_row_index + i + 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 10 
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": bg_color
+                    }
+                },
+                "fields": "userEnteredFormat.backgroundColor"
+            }
+        })
+
+    try:
+        if requests:
+            sheet.batch_update({"requests": requests})
+            print("✅ 表格上色完成")
+    except Exception as e:
+        print(f"⚠️ 表格上色失敗 (可能是權限或API問題): {e}")
 
 # ================= 共用 Selenium 功能 =================
 def init_driver():
@@ -289,6 +353,10 @@ def sync_mix_match_data(client):
                 new_data.append(row_data)
 
     mix_sheet.update(values=new_data, range_name="A1")
+    
+    # 上色
+    format_group_colors(mix_sheet, new_data)
+    
     print(f"✅ [Task 2] 已生成 {len(new_data)-1} 筆混搭測試案例")
     return len(new_data)-1
 
@@ -380,39 +448,32 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     driver.get("https://guardian.com.sg/cart")
     
     print("   ⏳ 等待購物車計算 (Fetching Cart)...")
-    
-    # === [關鍵修正] 極致等待邏輯 ===
     try:
-        # 1. 延長等待時間至 60 秒
-        # 2. 監聽 FETCHING CART 文字、loading-mask class、loader class
-        WebDriverWait(driver, 60).until(
-            EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')] | //div[contains(@class, 'loader')]"))
+        WebDriverWait(driver, 20).until_not(
+            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')] | //div[contains(@class, 'loading-mask')]"))
         )
     except TimeoutException:
-        print("   ⚠️ 等待購物車載入超時 (60s)，嘗試直接抓取")
+        print("   ⚠️ 等待購物車載入超時")
     
-    # 3. 就算消失了，強制多等 5 秒，確保 DOM 穩定
-    time.sleep(5) 
+    time.sleep(2) 
+    
+    # === [新增] 點擊空白處關閉遮擋視窗 (如 PWP / Free Gift) ===
+    try:
+        body = driver.find_element(By.TAG_NAME, "body")
+        body.send_keys(Keys.ESCAPE)
+        driver.execute_script("arguments[0].click();", body)
+        time.sleep(1) # 等待視窗淡出
+    except: pass
+    # ====================================================
     
     total_price = "Error"
-    # 4. 重試 10 次 (原本 5 次)，每次間隔 3 秒
-    for retry in range(10):
+    for retry in range(5):
         price = get_total_price_safely(driver)
-        
-        # 簡單驗證：不是 Error 且長度 > 0
-        if price and price != "Error" and len(price) > 0:
+        if price and price != "Error":
             total_price = price
             break
-        
-        # 如果沒抓到，再檢查一次是不是轉圈圈又跑出來了
-        try:
-             WebDriverWait(driver, 3).until(
-                EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), 'FETCHING CART')]"))
-            )
-        except: pass
-
-        print(f"   ⚠️ 尚未抓到價格，重試 ({retry+1}/10)...")
-        time.sleep(3)
+        print(f"   ⚠️ 尚未抓到價格，重試 ({retry+1}/5)...")
+        time.sleep(2)
         
     if not total_price: total_price = "Error"
     
@@ -498,6 +559,9 @@ def run_mix_match_task(client, driver):
         sheet.update(values=[[web_total, result_text, update_time, link]], range_name=f"G{i}:J{i}")
         results_for_mail.append([main_sku, row[1], result_text, update_time])
 
+    # 執行結束後，可以再刷一次顏色確保一致性 (選用)
+    # format_group_colors(sheet, all_values)
+
     subject_prefix = "✅" if all_match else "🔥"
     date_info = f"{get_taiwan_time_now().strftime('%m/%d(%a)')}"
     subject = f"{date_info}{subject_prefix}[Ozio Mix & Match比對結果]"
@@ -513,12 +577,29 @@ def send_email_generic(subject, summary, data_rows, attachments):
 
     table_html = "<table border='1' style='border-collapse:collapse;width:100%'>"
     table_html += "<tr style='background:#f2f2f2'><th>SKU</th><th>商品</th><th>結果</th><th>時間</th></tr>"
+    
+    current_sku = ""
+    current_color_idx = 0
+    colors = ["#ffffff", "#f9f9f9"] 
+    
     for r in data_rows:
-        bg = "#fff"
-        if "🔥" in r[2] or "Diff" in r[2] or "Error" in r[2] or "Limit" in r[2]: bg = "#ffebee"
-        elif "⚠️" in r[2]: bg = "#fff3e0"
+        sku = r[0]
+        result = r[2]
         
-        table_html += f"<tr style='background:{bg}'><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td></tr>"
+        if sku != current_sku:
+            current_sku = sku
+            current_color_idx = (current_color_idx + 1) % 2
+        
+        base_bg = colors[current_color_idx]
+        
+        if "🔥" in result or "Diff" in result or "Error" in result:
+            final_bg = "#ffebee" 
+        elif "⚠️" in result:
+            final_bg = "#fff3e0"
+        else:
+            final_bg = base_bg
+        
+        table_html += f"<tr style='background:{final_bg}'><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td></tr>"
     table_html += "</table>"
 
     msg = MIMEMultipart()
