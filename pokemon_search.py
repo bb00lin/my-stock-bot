@@ -60,7 +60,7 @@ def init_driver():
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--window-size=1920,1080')
-    # [強化] 更真實的 User-Agent
+    # 使用真實瀏覽器的 User-Agent 以降低被阻擋機率
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
@@ -123,14 +123,14 @@ def send_email(subject, body, attachment_path=None):
     except Exception as e:
         print(f"❌ 郵件發送失敗: {e}", flush=True)
 
-# [新增] 智慧搜尋框定位函式
+# [修正] 搜尋框定位函式
 def find_search_input(driver, wait):
-    # 定義可能的搜尋框選擇器 (根據常見結構)
+    # 根據您提供的 HTML，優先嘗試 name="q" 和 class="search-field"
     selectors = [
-        (By.NAME, "keyword"),           # 嘗試 name="keyword" (最常見)
-        (By.CSS_SELECTOR, "input[placeholder*='検索']"), # 嘗試 placeholder
-        (By.CSS_SELECTOR, ".search__input"), # 嘗試 class
-        (By.CSS_SELECTOR, "input[type='text']") # 最後嘗試通用
+        (By.NAME, "q"),                  # 最準確 (根據您的截圖)
+        (By.CLASS_NAME, "search-field"), # 次準確
+        (By.CSS_SELECTOR, "input[placeholder*='検索']"),
+        (By.CSS_SELECTOR, ".searchbox input")
     ]
     
     for by_type, selector_str in selectors:
@@ -167,10 +167,13 @@ def main():
             return
 
         print("🧹 清理舊資料 (C欄到H欄)...", flush=True)
+        # 清除 C, D, E, F, G, H 欄位 (保留 B 欄)
         worksheet.batch_clear(["C2:H1000"])
 
+        # 讀取 A 欄商品編號
         product_ids = worksheet.col_values(1)[1:] 
         
+        # 統計
         total_items = 0
         success_items = 0
         not_found_items = 0
@@ -192,12 +195,11 @@ def main():
                 search_box = find_search_input(driver, wait)
                 
                 if not search_box:
-                    # [除錯重點] 如果找不到搜尋框，截圖並拋出錯誤
+                    # 如果還是找不到，截圖以供除錯
                     error_shot = f"{screenshot_dir}/debug_no_search_{clean_pid}.png"
                     driver.save_screenshot(error_shot)
                     print(f"❌ 無法定位搜尋框，已截圖: {error_shot}", flush=True)
                     
-                    # 檢查是否被封鎖
                     if "Access Denied" in driver.page_source or "403" in driver.title:
                         print("🚫 警告：可能被網站封鎖 (Access Denied/403)", flush=True)
                     
@@ -207,12 +209,13 @@ def main():
                 search_box.send_keys(clean_pid)
                 search_box.send_keys(Keys.ENTER)
                 
-                time.sleep(4) # 等待結果載入 (稍微加長)
+                time.sleep(4) # 等待搜尋結果
 
                 # 2. 判斷是否無結果
                 page_source = driver.page_source
                 if "該当する商品は見つかりませんでした" in page_source or "0件" in page_source:
                     print(f"ℹ️ {clean_pid}: 商品不存在 (Not Found)", flush=True)
+                    # D欄寫 Not Found, H欄寫時間
                     worksheet.update(range_name=f"D{row_idx}", values=[["Not Found"]])
                     worksheet.update(range_name=f"H{row_idx}", values=[[update_time]])
                     not_found_items += 1
@@ -221,12 +224,13 @@ def main():
 
                 # 3. 點擊第一個商品
                 try:
-                    first_product = driver.find_element(By.CSS_SELECTOR, "div.product-list a, .item-list a")
+                    # 嘗試定位第一個商品圖片或標題連結
+                    first_product = driver.find_element(By.CSS_SELECTOR, "div.product-list a, .item-list a, .search-result-item a")
                     product_link = first_product.get_attribute("href")
                     driver.get(product_link)
                     time.sleep(3)
                 except NoSuchElementException:
-                    print(f"⚠️ 找不到商品連結", flush=True)
+                    print(f"⚠️ 搜尋有結果但找不到商品連結，可能網頁結構改變", flush=True)
                     worksheet.update(range_name=f"D{row_idx}", values=[["Click Error"]])
                     continue
 
@@ -236,12 +240,13 @@ def main():
                 # (1) 次分類
                 sub_category = ""
                 try:
-                    sub_cat_elem = driver.find_element(By.CSS_SELECTOR, ".product-header__category, .category-tag, ul.breadcrumb li:last-child")
+                    # 抓取標題上方的標籤或 Breadcrumb
+                    sub_cat_elem = driver.find_element(By.CSS_SELECTOR, ".product-header__category, .category-tag, ol.breadcrumb li:last-child")
                     sub_category = sub_cat_elem.text.strip()
                 except:
                     sub_category = "N/A"
 
-                # (2) 商品名稱
+                # (2) 商品名稱 (D欄)
                 product_name = ""
                 try:
                     name_elem = driver.find_element(By.TAG_NAME, "h1")
@@ -249,14 +254,16 @@ def main():
                 except:
                     product_name = "Unknown Name"
 
-                # (3) 尺寸與重量
+                # (3) 尺寸與重量 (E, F欄)
                 size_val = ""
                 weight_val = "未標示"
                 
                 try:
+                    # 根據影片，尋找包含 "サイズ・重量" 的表格行
                     spec_td = driver.find_element(By.XPATH, "//th[contains(text(), 'サイズ') or contains(text(), '重量')]/following-sibling::td")
                     spec_text = spec_td.text.strip()
                     
+                    # 依全形空格切割
                     if "\u3000" in spec_text:
                         parts = spec_text.split("\u3000")
                         size_val = parts[0].strip()
@@ -271,7 +278,8 @@ def main():
                 # 5. 截圖
                 capture_scrolling_screenshots(driver, screenshot_dir, clean_pid)
 
-                # 6. 寫入
+                # 6. 寫入 Google Sheet
+                # 順序: C(次分類), D(名稱), E(尺寸), F(重量), G(網址), H(時間)
                 data_to_write = [
                     sub_category,   # C
                     product_name,   # D
@@ -288,7 +296,6 @@ def main():
 
             except Exception as e:
                 print(f"❌ {clean_pid} 處理失敗: {str(e)[:100]}", flush=True)
-                # 發生錯誤時也截圖
                 driver.save_screenshot(f"{screenshot_dir}/error_{clean_pid}.png")
                 worksheet.update(range_name=f"D{row_idx}", values=[["Error"]])
 
