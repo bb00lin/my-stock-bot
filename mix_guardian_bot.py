@@ -36,7 +36,7 @@ URL = "https://guardian.com.sg/"
 # 'A': 基本模式 (每個數量只測 1 種平均分配) -> 速度快，省時間
 # 'B': 極端模式 (每個數量測 2 種：平均 + 集中於單一贈品) -> 測試庫存極限 (推薦)
 # 'C': 全組合模式 (窮舉所有可能的排列組合) -> 測試最完整，但耗時極長 (慎用)
-TEST_PLAN = 'C'
+TEST_PLAN = 'A'
 
 # Email 設定 (從 Secrets 讀取)
 MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
