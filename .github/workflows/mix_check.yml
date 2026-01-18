@@ -1,7 +1,7 @@
 name: Mix Match Check
 
 on:
-  workflow_dispatch:      # 保留這個，讓您可以手動按按鈕
+  workflow_dispatch:       # 保留這個，讓您可以手動按按鈕
   #schedule:
     # 範例 1：每 40 分鐘執行一次
     #- cron: '*/40 * * * *'
@@ -23,7 +23,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11' # 配合您原本成功的版本
+        python-version: '3.11' 
 
     - name: Install Chrome
       uses: browser-actions/setup-chrome@latest
@@ -33,27 +33,14 @@ jobs:
         python -m pip install --upgrade pip
         pip install selenium webdriver-manager gspread oauth2client
 
-    # === ✨ 關鍵修正：參照您成功的 YML 寫法 ✨ ===
-    - name: Create credentials file
-      env:
-        # 將 Secret 先存入環境變數，避免格式跑掉
-        GOOGLE_KEY: ${{ secrets.GOOGLE_SHEETS_JSON }}
-      run: |
-        echo "$GOOGLE_KEY" > google_key.json
-        
-        # 檢查檔案是否建立成功
-        if [ ! -s google_key.json ]; then
-          echo "❌ Error: google_key.json is empty! Check Secret Name."
-          exit 1
-        else
-          echo "✅ google_key.json created successfully."
-        fi
-    # ============================================
+    # [已移除] Create credentials file 步驟 (不需要了)
 
     - name: Run Mix Match Bot
       env:
         MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
         MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        # [新增] 必須加入這行，Python 才能透過 os.environ 讀取金鑰
+        GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
       run: python mix_guardian_bot.py 
 
     - name: Upload Artifacts (Optional)
@@ -61,5 +48,5 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: mix_screenshots
-        path: "*.zip" # 抓取所有產生的 zip 檔
+        path: "*.zip" 
         retention-days: 5
