@@ -72,7 +72,8 @@ def navigate_and_copy_latest(driver):
     copy_url = f"{urlparse(driver.current_url).scheme}://{urlparse(driver.current_url).netloc}{space_prefix}/pages/create?copyPageId={page_id}"
     print(f"前往複製網址: {copy_url}")
     driver.get(copy_url)
-    time.sleep(20) # 增加等待時間確保編輯器載入
+    # 這裡給予充分時間讓 React 元件載入
+    time.sleep(25) 
 
 def rename_page_js_force(driver, new_title):
     print(f"=== 執行 JS 強制重命名: WeeklyReport_{new_title} ===")
@@ -85,7 +86,6 @@ def rename_page_js_force(driver, new_title):
     }
     function scan(val) {
         let found = false;
-        // 搜尋主視窗與所有 Frame 中的標題輸入框
         const searchDocs = [document];
         document.querySelectorAll('iframe').forEach(f => {
             try { searchDocs.push(f.contentDocument || f.contentWindow.document); } catch(e) {}
@@ -93,7 +93,8 @@ def rename_page_js_force(driver, new_title):
         
         searchDocs.forEach(doc => {
             doc.querySelectorAll('textarea').forEach(ta => {
-                if (ta.name === 'editpages-title' || ta.getAttribute('data-test-id') === 'editor-title' || ta.placeholder.includes('標題')) {
+                // 根據您的 HTML 結構，匹配 data-test-id 或 editor-title
+                if (ta.getAttribute('data-test-id') === 'editor-title' || ta.name === 'editpages-title' || ta.placeholder.includes('標題')) {
                     setVal(ta, val);
                     found = true;
                 }
@@ -103,63 +104,76 @@ def rename_page_js_force(driver, new_title):
     }
     return scan(arguments[0]);
     """
-    success = driver.execute_script(js_script, f"WeeklyReport_{new_title}")
-    if success:
-        print("✅ JS 標題設定成功")
-    else:
-        print("⚠️ JS 未能鎖定標題框，執行盲打補救...")
-        driver.execute_script("window.scrollTo(0,0);")
-        webdriver.ActionChains(driver).send_keys(Keys.TAB).pause(0.5).send_keys(Keys.CONTROL + "a").send_keys(Keys.BACK_SPACE).send_keys(f"WeeklyReport_{new_title}").perform()
+    # 執行多次嘗試以應對非同步載入
+    for i in range(3):
+        success = driver.execute_script(js_script, f"WeeklyReport_{new_title}")
+        if success:
+            print(f"✅ 第 {i+1} 次嘗試：標題設定成功")
+            return
+        time.sleep(3)
+        
+    print("⚠️ JS 標題設定失敗，執行盲打補救...")
+    driver.execute_script("window.scrollTo(0,0);")
+    webdriver.ActionChains(driver).send_keys(Keys.TAB).pause(0.5).send_keys(Keys.CONTROL + "a").send_keys(Keys.BACK_SPACE).send_keys(f"WeeklyReport_{new_title}").perform()
 
 def update_jira_macros(driver, date_info):
     print("開始自動更新頁面所有 Jira 表格日期...")
-    time.sleep(5)
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
+    # 增加捲動次數確保觸發內容渲染
+    for _ in range(2):
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(2)
     
-    # 取得所有 Jira 表格區塊
-    macros = driver.find_elements(By.CSS_SELECTOR, "div.datasourceView-content-wrap, div[data-prosemirror-node-name='blockCard']")
+    # 循環嘗試搜尋表格
+    macros = []
+    for i in range(5):
+        macros = driver.find_elements(By.CSS_SELECTOR, "div.datasourceView-content-wrap, div[data-prosemirror-node-name='blockCard']")
+        if macros:
+            break
+        print(f"第 {i+1} 次嘗試尋找表格中...")
+        time.sleep(3)
+
     print(f"發現 {len(macros)} 個 Jira 表格")
     
     for i in range(len(macros)):
         try:
-            # 重新取得 element 以免 stale
             current_macros = driver.find_elements(By.CSS_SELECTOR, "div.datasourceView-content-wrap, div[data-prosemirror-node-name='blockCard']")
             target = current_macros[i]
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
             target.click()
-            time.sleep(1)
+            time.sleep(1.5)
             
-            # 尋找並點擊編輯按鈕
+            # 使用 JS 搜尋並點擊編輯按鈕
             driver.execute_script("""
                 var btns = document.querySelectorAll('button');
-                for(var b of btns) { if(b.innerText.includes('編輯') || b.innerText.includes('Edit')) { b.click(); break; } }
+                for(var b of btns) { 
+                    if(b.innerText.includes('編輯') || b.innerText.includes('Edit')) { b.click(); break; } 
+                }
             """)
             
-            # 等待 JQL 輸入框出現
-            wait = WebDriverWait(driver, 15)
+            wait = WebDriverWait(driver, 20)
             jql_input = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='jql-editor-input']")))
             old_jql = jql_input.text
             
-            # 正則替換日期
             dates = re.findall(r"\d{4}-\d{1,2}-\d{1,2}", old_jql)
             if len(dates) >= 2:
                 new_jql = old_jql.replace(dates[0], date_info['monday_str']).replace(dates[1], date_info['sunday_str'])
                 jql_input.click()
                 jql_input.send_keys(Keys.CONTROL + "a" + Keys.BACK_SPACE)
                 jql_input.send_keys(new_jql + Keys.ENTER)
-                time.sleep(2)
-                # 儲存/插入
+                time.sleep(3)
                 driver.find_element(By.XPATH, "//button[contains(., 'Insert') or contains(., 'Save') or contains(., '插入')]").click()
                 print(f"✅ 表格 {i+1} 更新完成")
-            time.sleep(2)
+            time.sleep(3)
         except Exception as e:
-            print(f"❌ 表格 {i+1} 更新失敗: {str(e)}")
+            print(f"❌ 表格 {i+1} 更新跳過: {str(e)}")
             webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
 
 def publish_page(driver):
     print("執行發佈流程...")
     driver.execute_script("window.scrollTo(0,0);")
-    time.sleep(2)
+    time.sleep(3)
     publish_js = """
     var found = false;
     document.querySelectorAll('button').forEach(btn => {
@@ -172,16 +186,14 @@ def publish_page(driver):
     """
     if driver.execute_script(publish_js):
         print("✅ 已點擊發佈按鈕")
-        time.sleep(12) # 等待發佈轉圈完成
+        time.sleep(15) 
     else:
-        print("❌ 找不到發佈按鈕，嘗試快捷鍵 Ctrl+Enter")
+        print("❌ 找不到按鈕，嘗試快捷鍵發佈")
         webdriver.ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.ENTER).key_up(Keys.CONTROL).perform()
 
 def main():
     dates = get_target_dates()
-    print(f"=== Confluence 自動週報 (v20.0 最終調教版) ===")
-    print(f"更新週期: {dates['monday_str']} ~ {dates['sunday_str']}")
-    
+    print(f"=== Confluence 自動週報 (v21.0 穩定強化版) ===")
     driver = init_driver()
     try:
         inject_cookies(driver)
@@ -189,10 +201,10 @@ def main():
         rename_page_js_force(driver, dates['friday_filename'])
         update_jira_macros(driver, dates)
         publish_page(driver)
-        print("=== 任務執行成功結束 ===")
+        print("=== 任務執行結束 ===")
     except Exception as e:
         print(f"發生嚴重錯誤: {str(e)}")
-        driver.save_screenshot("v20_final_error.png")
+        driver.save_screenshot("v21_final_error.png")
     finally:
         driver.quit()
 
