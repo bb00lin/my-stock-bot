@@ -5,6 +5,7 @@ import os
 import shutil
 import smtplib
 import math
+import json  # [新增] 必須匯入 json 模組
 from itertools import cycle
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -29,10 +30,9 @@ WORKSHEET_PROMO = 'promotion'
 # 請確認此網址正確
 SHEET_URL_FOR_MAIL = "https://docs.google.com/spreadsheets/d/1pqa6DU-qo3lR84QYgpoiwGE7tO-QSY2-kC_ecf868cY/edit?gid=1727836519#gid=1727836519"
 
-CREDENTIALS_FILE = 'google_key.json'
 URL = "https://guardian.com.sg/"
 
-# Email 設定
+# Email 設定 (從 Secrets 讀取)
 MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
 MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
 MAIL_RECEIVER = ['bb00lin@gmail.com', 'helen.chen.168@gmail.com']
@@ -73,12 +73,26 @@ def create_zip_evidence(sku, sku_folder):
     except: return None
 
 # ================= Google Sheet 連線與格式化 =================
+# === [重要修正] 改為使用 GitHub Secrets 進行連線 ===
 def connect_google_sheet():
-    print("📊 正在連線 Google Sheet...")
+    print("📊 正在連線 Google Sheet (使用 Secrets)...")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
-    client = gspread.authorize(creds)
-    return client
+    
+    # 從環境變數讀取 Secret
+    json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
+    
+    if not json_key_str:
+        print("❌ 錯誤：找不到 GOOGLE_SHEETS_JSON 環境變數！")
+        return None
+
+    try:
+        creds_dict = json.loads(json_key_str)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        print(f"❌ 解析金鑰或連線失敗: {e}")
+        return None
 
 def format_group_colors(sheet, data_rows):
     """
@@ -457,7 +471,7 @@ def process_mix_case_dynamic(driver, strategy_str, target_total_qty, main_sku):
     
     time.sleep(2) 
     
-    # === [新增] 點擊空白處關閉遮擋視窗 (如 PWP / Free Gift) ===
+    # === [防遮擋] 點擊空白處關閉遮擋視窗 (如 PWP / Free Gift) ===
     try:
         body = driver.find_element(By.TAG_NAME, "body")
         body.send_keys(Keys.ESCAPE)
