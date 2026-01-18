@@ -21,7 +21,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # ================= 設定區 =================
 SPREADSHEET_FILE_NAME = 'Guardian_Price_Check'
-WORKSHEET_NAME = 'Pokemon'  # 請確認這個名稱與分頁完全一致
+WORKSHEET_NAME = 'Pokemon'
 POKEMON_URL = "https://www.pokemoncenter-online.com/"
 
 # Email 設定
@@ -60,7 +60,8 @@ def init_driver():
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--window-size=1920,1080')
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
+    # [強化] 更真實的 User-Agent
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
 
@@ -83,7 +84,7 @@ def capture_scrolling_screenshots(driver, directory, base_filename):
             
             scroll_pos += viewport_height
             part += 1
-            if part > 8: break # 限制最多截 8 張避免過大
+            if part > 8: break # 限制最多截 8 張
             
     except Exception as e:
         print(f"⚠️ 截圖失敗: {e}", flush=True)
@@ -122,6 +123,24 @@ def send_email(subject, body, attachment_path=None):
     except Exception as e:
         print(f"❌ 郵件發送失敗: {e}", flush=True)
 
+# [新增] 智慧搜尋框定位函式
+def find_search_input(driver, wait):
+    # 定義可能的搜尋框選擇器 (根據常見結構)
+    selectors = [
+        (By.NAME, "keyword"),           # 嘗試 name="keyword" (最常見)
+        (By.CSS_SELECTOR, "input[placeholder*='検索']"), # 嘗試 placeholder
+        (By.CSS_SELECTOR, ".search__input"), # 嘗試 class
+        (By.CSS_SELECTOR, "input[type='text']") # 最後嘗試通用
+    ]
+    
+    for by_type, selector_str in selectors:
+        try:
+            element = wait.until(EC.element_to_be_clickable((by_type, selector_str)))
+            return element
+        except:
+            continue
+    return None
+
 # ================= 主程式邏輯 =================
 def main():
     client = connect_google_sheet()
@@ -138,24 +157,20 @@ def main():
     try:
         spreadsheet = client.open(SPREADSHEET_FILE_NAME)
         
-        # [修改] 增加防呆機制：如果找不到分頁，列出所有現有分頁
         try:
             worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
         except gspread.WorksheetNotFound:
             print(f"❌ 錯誤：找不到名為 '{WORKSHEET_NAME}' 的分頁！", flush=True)
-            print("📋 目前試算表中的所有分頁名稱如下 (請檢查大小寫/空白)：", flush=True)
+            print("📋 目前試算表中的所有分頁名稱如下：", flush=True)
             for ws in spreadsheet.worksheets():
                 print(f"   👉 '{ws.title}'", flush=True)
             return
 
         print("🧹 清理舊資料 (C欄到H欄)...", flush=True)
-        # 清除 C, D, E, F, G, H 欄位 (保留 B 欄)
         worksheet.batch_clear(["C2:H1000"])
 
-        # 讀取 A 欄商品編號
         product_ids = worksheet.col_values(1)[1:] 
         
-        # 統計
         total_items = 0
         success_items = 0
         not_found_items = 0
@@ -174,18 +189,30 @@ def main():
             
             try:
                 # 1. 搜尋
-                search_box = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='text']")))
+                search_box = find_search_input(driver, wait)
+                
+                if not search_box:
+                    # [除錯重點] 如果找不到搜尋框，截圖並拋出錯誤
+                    error_shot = f"{screenshot_dir}/debug_no_search_{clean_pid}.png"
+                    driver.save_screenshot(error_shot)
+                    print(f"❌ 無法定位搜尋框，已截圖: {error_shot}", flush=True)
+                    
+                    # 檢查是否被封鎖
+                    if "Access Denied" in driver.page_source or "403" in driver.title:
+                        print("🚫 警告：可能被網站封鎖 (Access Denied/403)", flush=True)
+                    
+                    raise Exception("Search Box Not Found")
+
                 search_box.clear()
                 search_box.send_keys(clean_pid)
                 search_box.send_keys(Keys.ENTER)
                 
-                time.sleep(3) 
+                time.sleep(4) # 等待結果載入 (稍微加長)
 
                 # 2. 判斷是否無結果
                 page_source = driver.page_source
                 if "該当する商品は見つかりませんでした" in page_source or "0件" in page_source:
                     print(f"ℹ️ {clean_pid}: 商品不存在 (Not Found)", flush=True)
-                    # 依照需求：D欄寫 Not Found, H欄寫時間
                     worksheet.update(range_name=f"D{row_idx}", values=[["Not Found"]])
                     worksheet.update(range_name=f"H{row_idx}", values=[[update_time]])
                     not_found_items += 1
@@ -214,7 +241,7 @@ def main():
                 except:
                     sub_category = "N/A"
 
-                # (2) 商品名稱 (D欄)
+                # (2) 商品名稱
                 product_name = ""
                 try:
                     name_elem = driver.find_element(By.TAG_NAME, "h1")
@@ -222,7 +249,7 @@ def main():
                 except:
                     product_name = "Unknown Name"
 
-                # (3) 尺寸與重量 (E, F欄)
+                # (3) 尺寸與重量
                 size_val = ""
                 weight_val = "未標示"
                 
@@ -244,7 +271,7 @@ def main():
                 # 5. 截圖
                 capture_scrolling_screenshots(driver, screenshot_dir, clean_pid)
 
-                # 6. 寫入 Google Sheet
+                # 6. 寫入
                 data_to_write = [
                     sub_category,   # C
                     product_name,   # D
@@ -260,7 +287,9 @@ def main():
                 summary_list.append(f"{clean_pid}: {product_name}")
 
             except Exception as e:
-                print(f"❌ {clean_pid} 處理失敗: {str(e)[:50]}", flush=True)
+                print(f"❌ {clean_pid} 處理失敗: {str(e)[:100]}", flush=True)
+                # 發生錯誤時也截圖
+                driver.save_screenshot(f"{screenshot_dir}/error_{clean_pid}.png")
                 worksheet.update(range_name=f"D{row_idx}", values=[["Error"]])
 
         # 7. 打包與寄信
