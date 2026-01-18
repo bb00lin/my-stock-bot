@@ -27,16 +27,15 @@ jobs:
           # [重要] 必須安裝 google-genai 才能支援最新的 Gemini 模型
           pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-genai
 
-      - name: Create Key File
-        run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
+      # [已移除] Create Key File 步驟 (不需要了)
 
       - name: Run DailyStockPush
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # [新增] 必須加入這行，Python 才能透過 os.environ 讀取金鑰
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: python DailyStockPush.py
 
-      - name: Cleanup Key
-        if: always()
-        run: rm -f google_key.json
+      # [已移除] Cleanup Key 步驟
