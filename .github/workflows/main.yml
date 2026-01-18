@@ -11,7 +11,7 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 60 #稍微增加時間以防萬一
+    timeout-minutes: 60 
     steps:
       - name: 1. 檢出代碼
         uses: actions/checkout@v3
@@ -25,15 +25,14 @@ jobs:
         run: |
           pip install yfinance pandas requests FinMind tqdm gspread oauth2client numpy
 
-      - name: 4. 建立 Google 金鑰檔案
-        run: echo '${{ secrets.GOOGLE_SHEETS_JSON }}' > google_key.json
+      # [已移除] 4. 建立 Google 金鑰檔案 (不需要了，且比較安全)
 
       - name: 5. 執行股票分析
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          # [新增] 必須加入這行，Python 才能透過 os.environ 讀取金鑰
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: python DailyStockBot.py
 
-      - name: 6. 清理金鑰
-        if: always()
-        run: rm -f google_key.json
+      # [已移除] 6. 清理金鑰 (因為沒建立，所以不需要清理)
