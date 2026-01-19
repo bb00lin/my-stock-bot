@@ -38,38 +38,46 @@ jobs:
       run: |
         python confluence_api.py 2>&1 | tee output.txt
 
-    # 5. 發送成功信件 [Done] (Gmail 設定)
+    # 5. 發送成功信件 [Done] (使用 Gmail 發信)
     - name: Send Success Email
       if: success()
       uses: dawidd6/action-send-mail@v3
       with:
-        # --- Gmail 專用設定 ---
+        # --- 這裡參照您的 guardian_bot.py 設定 ---
         server_address: smtp.gmail.com
-        server_port: 465
+        server_port: 465   # GitHub Action 用 SSL (465) 比較穩，Python 用 TLS (587)
         secure: true
-        # --------------------
+        # --------------------------------------
+        
+        # 發信人帳密 (必須是 Gmail + 應用程式密碼)
         username: ${{ secrets.MAIL_USERNAME }}
         password: ${{ secrets.MAIL_PASSWORD }}
+        
         subject: Confluence automation script [Done]
-        # 寄件人是您的 Gmail，收件人依然是您的公司信箱
-        to: bb_lin@gsitw.com
+        
+        # 【這裡改成您指定的收件信箱】
+        to: bb00lin@gmail.com
+        
         from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
         body: file://output.txt
 
-    # 6. 發送失敗信件 [Fail] (Gmail 設定)
+    # 6. 發送失敗信件 [Fail] (使用 Gmail 發信)
     - name: Send Failure Email
       if: failure()
       uses: dawidd6/action-send-mail@v3
       with:
-        # --- Gmail 專用設定 ---
         server_address: smtp.gmail.com
         server_port: 465
         secure: true
-        # --------------------
+        
         username: ${{ secrets.MAIL_USERNAME }}
         password: ${{ secrets.MAIL_PASSWORD }}
+        
         subject: Confluence automation script [Fail]
-        to: bb_lin@gsitw.com
+        
+        # 【這裡改成您指定的收件信箱】
+        to: bb00lin@gmail.com
+        
         from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
         body: |
           Confluence 自動週報執行失敗。
