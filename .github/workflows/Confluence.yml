@@ -34,37 +34,38 @@ jobs:
         CONF_URL: ${{ secrets.CONF_URL }}
         CONF_USER: ${{ secrets.CONF_USER }}
         CONF_PASS: ${{ secrets.CONF_PASS }}
-      # 將輸出同時顯示並存檔，方便除錯
+      # 將輸出同時顯示並存檔
       run: |
         python confluence_api.py 2>&1 | tee output.txt
 
-    # 5. 發送成功信件 [Done] (Microsoft 365 設定)
+    # 5. 發送成功信件 [Done] (Gmail 設定)
     - name: Send Success Email
       if: success()
       uses: dawidd6/action-send-mail@v3
       with:
-        # --- Microsoft 365 專用設定 ---
-        server_address: smtp.office365.com
-        server_port: 587
-        secure: false  # M365 必須設為 false (使用 STARTTLS)
-        # ---------------------------
+        # --- Gmail 專用設定 ---
+        server_address: smtp.gmail.com
+        server_port: 465
+        secure: true
+        # --------------------
         username: ${{ secrets.MAIL_USERNAME }}
         password: ${{ secrets.MAIL_PASSWORD }}
         subject: Confluence automation script [Done]
+        # 寄件人是您的 Gmail，收件人依然是您的公司信箱
         to: bb_lin@gsitw.com
         from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
         body: file://output.txt
 
-    # 6. 發送失敗信件 [Fail] (Microsoft 365 設定)
+    # 6. 發送失敗信件 [Fail] (Gmail 設定)
     - name: Send Failure Email
       if: failure()
       uses: dawidd6/action-send-mail@v3
       with:
-        # --- Microsoft 365 專用設定 ---
-        server_address: smtp.office365.com
-        server_port: 587
-        secure: false
-        # ---------------------------
+        # --- Gmail 專用設定 ---
+        server_address: smtp.gmail.com
+        server_port: 465
+        secure: true
+        # --------------------
         username: ${{ secrets.MAIL_USERNAME }}
         password: ${{ secrets.MAIL_PASSWORD }}
         subject: Confluence automation script [Fail]
