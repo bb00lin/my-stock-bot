@@ -56,62 +56,45 @@ def extract_first_project_link(report_body):
         if "Project" in headers:
             proj_idx = headers.index("Project")
             rows = table.find_all('tr')
-            
-            # 找第一列有資料的 row
             for row in rows[1:]:
                 cols = row.find_all('td')
                 if len(cols) > proj_idx:
                     link_tag = cols[proj_idx].find('a')
-                    
                     if link_tag:
-                        # 方法 1: 嘗試抓 data-linked-resource-id (最準)
                         page_id = link_tag.get('data-linked-resource-id')
                         if page_id:
                             print(f"🎯 鎖定目標 (透過 data-id): {page_id}")
                             return {'id': page_id}
                         
-                        # 方法 2: 分析 href 網址
                         href = link_tag.get('href', '')
                         print(f"   ℹ️ 分析連結: {href}")
                         
-                        # 情況 A: ...?pageId=12345
                         if 'pageId=' in href:
                             parsed_url = urlparse(href)
                             qs = parse_qs(parsed_url.query)
                             if 'pageId' in qs:
-                                page_id = qs['pageId'][0]
-                                print(f"🎯 鎖定目標 (透過 href pageId): {page_id}")
-                                return {'id': page_id}
+                                return {'id': qs['pageId'][0]}
                         
-                        # 情況 B: /pages/12345/Title
                         match = re.search(r'/pages/(\d+)/', href)
                         if match:
-                            page_id = match.group(1)
-                            print(f"🎯 鎖定目標 (透過 href path): {page_id}")
-                            return {'id': page_id}
+                            return {'id': match.group(1)}
 
-                        # 方法 3: 如果真的都沒有 ID，只好抓文字 (但這次我們知道這可能不準)
                         title = link_tag.get_text().strip()
                         print(f"⚠️ 警告：無法從連結解析 ID，嘗試使用文字標題: {title}")
-                        # 這裡我們做一個大膽的猜測：如果文字是 'AhGW'，通常標題是 'WeeklyStatus_AhGW'
-                        # 但為了保險，我們先回傳文字，讓後面 try error
                         return {'title': title}
 
     print("⚠️ 找不到 Project 連結")
     return None
 
 def get_page_by_id(page_id):
-    """透過 ID 取得頁面資訊"""
     url = f"{API_ENDPOINT}/{page_id}"
     params = {'expand': 'body.storage,version'}
     resp = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
     if resp.status_code == 200:
         return resp.json()
-    print(f"❌ 透過 ID {page_id} 找不到頁面")
     return None
 
 def get_page_by_title(title):
-    """透過標題取得頁面資訊"""
     url = f"{API_ENDPOINT}"
     params = {'title': title, 'expand': 'body.storage,version'}
     resp = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
@@ -119,7 +102,6 @@ def get_page_by_title(title):
     if results:
         return results[0]
     
-    # 自動嘗試補上 WeeklyStatus_ 前綴 (針對您的命名習慣做的補救)
     if not title.startswith("WeeklyStatus_"):
         alt_title = f"WeeklyStatus_{title}"
         print(f"   嘗試猜測標題: {alt_title}")
@@ -129,11 +111,9 @@ def get_page_by_title(title):
         if results:
             print(f"   ✅ 猜測成功！")
             return results[0]
-
     return None
 
 def is_red_row(tr):
-    """判斷紅字"""
     tags_with_style = tr.find_all(lambda tag: tag.has_attr('style'))
     for tag in tags_with_style:
         style = tag['style'].lower()
@@ -144,38 +124,46 @@ def is_red_row(tr):
     return False
 
 def clean_project_page_content(html_content):
-    """核心邏輯：瘦身 + 歸檔"""
     soup = BeautifulSoup(html_content, 'html.parser')
+    changed = False
     
-    history_header = soup.find(lambda tag: tag.name in ['h1', 'h2'] and 'History' in tag.get_text())
+    # 1. 確保有 History 區塊
+    history_header = soup.find(lambda tag: tag.name in ['h1', 'h2', 'h3', 'h4', 'h5'] and 'History' in tag.get_text())
     
     if not history_header:
         print("   ℹ️ 找不到 History 區塊，正在建立...")
         history_header = soup.new_tag('h1')
         history_header.string = "History"
         soup.append(history_header)
+        changed = True  # 修改點：新建 History 也算變更，要存檔
     
-    all_headers = soup.find_all(['h3', 'h4']) 
-    changed = False
-    
+    # 2. 擴大搜尋範圍 (h1~h5)
+    all_headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5']) 
+    print(f"   ℹ️ 除錯: 頁面上共找到 {len(all_headers)} 個標題")
+
     for header in all_headers:
         # 簡單判定：如果在 History 之後就不處理
         if history_header and header.sourceline and history_header.sourceline:
-             if header.sourceline > history_header.sourceline: continue
+             if header.sourceline >= history_header.sourceline: continue
             
         header_text = header.get_text().strip()
         if header_text.lower() in ['history', 'work item table']: continue
-            
+        
+        # 除錯：印出看到的標題，確認是否抓對
+        # print(f"   👀 掃描到標題: {header_text} ({header.name})")
+
         next_node = header.find_next_sibling()
         target_table = None
         while next_node:
             if next_node.name == 'table':
                 target_table = next_node
                 break
-            if next_node.name in ['h1', 'h2', 'h3', 'h4']: break
+            if next_node.name in ['h1', 'h2', 'h3', 'h4', 'h5']: break
             next_node = next_node.find_next_sibling()
             
-        if not target_table: continue
+        if not target_table:
+            # print(f"      -> 下方無緊鄰表格，跳過")
+            continue
             
         print(f"   🔍 檢查項目: {header_text}")
         
@@ -212,7 +200,8 @@ def clean_project_page_content(html_content):
             hist_item_header = None
             curr = history_header.next_sibling
             while curr:
-                if curr.name in ['h3', 'h4'] and curr.get_text().strip() == header_text:
+                # 這裡也要放寬搜尋
+                if curr.name in ['h1', 'h2', 'h3', 'h4', 'h5'] and curr.get_text().strip() == header_text:
                     hist_item_header = curr
                     break
                 curr = curr.next_sibling
@@ -224,7 +213,7 @@ def clean_project_page_content(html_content):
                     if curr.name == 'table':
                         hist_table = curr
                         break
-                    if curr.name in ['h1', 'h2', 'h3', 'h4']: break
+                    if curr.name in ['h1', 'h2', 'h3', 'h4', 'h5']: break
                     curr = curr.next_sibling
             else:
                 print(f"      🆕 History 中無 [{header_text}]，正在新建...")
@@ -276,7 +265,6 @@ def main():
         print("結束：沒有找到可處理的專案連結。")
         return
 
-    # 這裡做了雙重保險：有 ID 用 ID，沒 ID 用標題猜
     if 'id' in target_info:
         page_data = get_page_by_id(target_info['id'])
     else:
