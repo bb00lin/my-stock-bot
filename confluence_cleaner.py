@@ -25,7 +25,7 @@ API_ENDPOINT = f"{BASE_URL}/wiki/rest/api/content"
 def get_headers():
     return {"Content-Type": "application/json"}
 
-# --- 1. 搜尋週報與提取所有專案連結 (新邏輯) ---
+# --- 1. 搜尋週報與提取所有專案連結 ---
 def find_latest_report():
     print("正在搜尋最新週報...")
     cql = 'type=page AND title ~ "WeeklyReport*" ORDER BY created DESC'
@@ -40,18 +40,12 @@ def find_latest_report():
     return results[0]
 
 def extract_all_project_links(report_body):
-    """
-    解析週報內容，找到含有 'Project' 欄位的表格，
-    並回傳該欄位中所有的頁面連結列表。
-    """
     soup = BeautifulSoup(report_body, 'html.parser')
     tables = soup.find_all('table')
-    
     project_targets = []
     found_table = False
 
     for table in tables:
-        # 1. 檢查表頭是否含有 "Project"
         headers = []
         header_row = table.find('tr')
         if not header_row: continue
@@ -64,22 +58,18 @@ def extract_all_project_links(report_body):
             found_table = True
             proj_idx = headers.index("Project")
             
-            # 2. 遍歷該表格的所有列
             rows = table.find_all('tr')
-            for row in rows[1:]: # 跳過表頭
+            for row in rows[1:]:
                 cols = row.find_all('td')
                 if len(cols) > proj_idx:
-                    # 抓取該格內所有的連結 (可能有由多個專案)
                     links = cols[proj_idx].find_all('a')
                     for link in links:
                         page_id = link.get('data-linked-resource-id')
                         target = {}
-                        
                         if page_id:
                             target['id'] = page_id
                             target['name'] = link.get_text().strip()
                         else:
-                            # 處理沒有 data-id 的傳統連結
                             href = link.get('href', '')
                             if 'pageId=' in href:
                                 qs = parse_qs(urlparse(href).query)
@@ -92,18 +82,13 @@ def extract_all_project_links(report_body):
                                     target['id'] = match.group(1)
                                     target['name'] = link.get_text().strip()
                                 else:
-                                    # 如果真的找不到 ID，就存標題讓後面去猜
                                     title = link.get_text().strip()
                                     if title:
                                         target['title'] = title
                                         target['name'] = title
                         
-                        if target:
-                            # 避免重複添加
-                            if target not in project_targets:
-                                project_targets.append(target)
-            
-            # 找到第一個符合的表格就停止，不再往下找 (避開 Work Item Table)
+                        if target and target not in project_targets:
+                            project_targets.append(target)
             break
     
     if not found_table:
@@ -125,7 +110,6 @@ def get_page_by_title(title):
     results = resp.json().get('results', [])
     if results: return results[0]
     
-    # 嘗試加上 WeeklyStatus_ 前綴
     if not title.startswith("WeeklyStatus_"):
         alt_title = f"WeeklyStatus_{title}"
         print(f"   嘗試猜測標題: {alt_title}")
@@ -137,17 +121,20 @@ def get_page_by_title(title):
             return results[0]
     return None
 
-# --- 2. 內容處理邏輯 ---
+# --- 2. 內容處理邏輯 (針對表格修正版) ---
 
 def is_date_header(text):
     return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text))
 
 def has_red_text(tag):
     if not isinstance(tag, Tag): return False
+    # 檢查 style
     if tag.has_attr('style'):
         style = tag['style'].lower()
         if 'rgb(255, 0, 0)' in style or '#ff0000' in style or 'red' in style: return True
+    # 檢查 font tag
     if tag.name == 'font' and (tag.get('color') == 'red' or tag.get('color') == '#ff0000'): return True
+    # 遞迴檢查子節點 (包含表格內的文字)
     for child in tag.descendants:
         if isinstance(child, Tag):
             if child.has_attr('style'):
@@ -157,49 +144,71 @@ def has_red_text(tag):
     return False
 
 def get_clean_item_name(td_tag):
-    """
-    從 Item 欄位提取乾淨的名稱。
-    過濾掉 Status Macro (complete/incomplete) 和圖片。
-    """
-    # 複製一份以免修改到原始 soup
     temp_tag = copy.copy(td_tag)
-    
-    # 移除 status macro
     for status in temp_tag.find_all('ac:structured-macro', attrs={"ac:name": "status"}):
         status.decompose()
-        
-    # 移除 image (有的時候會有 icon)
     for img in temp_tag.find_all('ac:image'):
         img.decompose()
-        
-    # 取出純文字，並將多餘的空白縮減
     text = temp_tag.get_text(separator=' ', strip=True)
-    
-    # 如果清空後變沒字了 (例如原本只有一個 status macro)，那還是回傳原本的，避免空白
     if not text:
         return td_tag.get_text(strip=True)
-        
     return text
 
 def split_cell_content(cell_soup):
+    """
+    將格子內的內容切分成 Entry。
+    修正：遇到表格 (table) 時，絕對視為內容，不檢查是否為日期標題。
+    """
     entries = []
     current_entry = []
+    
+    # 定義哪些標籤才可能是「日期標題」的容器
+    # 通常日期是放在 <p> 或 <div> 或直接裸露的文字
+    # 絕對不可能是 <table>, <ul>, <ol> 本身
+    HEADER_CANDIDATE_TAGS = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'span']
+
     for child in cell_soup.contents:
+        # 1. 忽略純空白換行
         if isinstance(child, NavigableString) and not child.strip():
             if current_entry: current_entry.append(child)
             continue
-        text = child.get_text() if isinstance(child, Tag) else str(child)
-        if is_date_header(text):
+        
+        is_header = False
+        
+        # 2. 判斷是否為新日期標題
+        if isinstance(child, NavigableString):
+            # 如果是純文字節點，檢查內容
+            if is_date_header(str(child)):
+                is_header = True
+        elif isinstance(child, Tag):
+            # 關鍵修正：只有特定的簡單標籤才檢查文字內容
+            # 遇到 table 或 macro，直接視為內容 (False)
+            if child.name in HEADER_CANDIDATE_TAGS:
+                # 這裡只取 strip 之後的文字，避免被內部的 formatting 干擾
+                text = child.get_text(strip=True)
+                if is_date_header(text):
+                    is_header = True
+            # else: 如果是 table, ul, ac:structured-macro，is_header 保持 False
+
+        # 3. 切割與歸類
+        if is_header:
+            # 遇到新日期，先把舊的存起來
             if current_entry: entries.append(current_entry)
+            # 開始新的一筆
             current_entry = [child]
         else:
+            # 不是標題（包含表格、文字內容、列表），加入當前這一筆
             current_entry.append(child)
+            
+    # 最後一筆
     if current_entry: entries.append(current_entry)
+    
     return entries
 
 def check_entry_red(entry_nodes):
     for node in entry_nodes:
         if isinstance(node, Tag):
+            # has_red_text 會自動遞迴搜尋 table 內部的紅色文字
             if has_red_text(node): return True
     return False
 
@@ -275,13 +284,13 @@ def clean_project_page_content(html_content, page_title):
         cols = row.find_all('td')
         if len(cols) <= max(item_idx, update_idx): continue
         
-        # 使用新的函式取得乾淨的 Item Name
         raw_item_cell = cols[item_idx]
         clean_item_name = get_clean_item_name(raw_item_cell)
-        
         update_cell = cols[update_idx]
         
+        # 使用修正後的分割邏輯
         entries = split_cell_content(update_cell)
+        
         if len(entries) <= KEEP_LIMIT:
             continue
             
@@ -305,7 +314,7 @@ def clean_project_page_content(html_content, page_title):
         if not archive_entries:
             continue
             
-        print(f"      ✂️  搬移 {len(archive_entries)} 筆舊資料到 History...")
+        print(f"      ✂️  搬移 {len(archive_entries)} 筆舊資料 (含表格/巢狀內容) 到 History...")
         changed = True
         
         update_cell.clear()
@@ -319,11 +328,9 @@ def clean_project_page_content(html_content, page_title):
         hist_rows = history_table_ref.find_all('tr')
         target_hist_row = None
         
-        # 在 History 表格中比對 Item Name (同樣用乾淨名稱比對)
         for h_row in hist_rows:
             h_cols = h_row.find_all('td')
             if not h_cols: continue
-            
             h_item_name = get_clean_item_name(h_cols[item_idx])
             if h_item_name == clean_item_name:
                 target_hist_row = h_row
@@ -333,8 +340,6 @@ def clean_project_page_content(html_content, page_title):
             target_hist_row = soup.new_tag('tr')
             for _ in range(len(headers)):
                 target_hist_row.append(soup.new_tag('td'))
-            
-            # 在新的一列填入乾淨的名稱 (不包含 status macro)
             target_hist_row.find_all('td')[item_idx].string = clean_item_name
             history_table_ref.append(target_hist_row)
             
@@ -368,11 +373,9 @@ def update_page(page_data, new_content):
     print("✅ 更新成功！")
 
 def main():
-    print("=== Confluence 專案頁面整理機器人 (V4: Batch & Clean) ===")
+    print("=== Confluence 專案頁面整理機器人 (V5: Table Support) ===")
     
     report = find_latest_report()
-    
-    # 1. 抓取所有目標專案
     project_targets = extract_all_project_links(report['body']['view']['value'])
     
     if not project_targets:
@@ -382,7 +385,6 @@ def main():
     print(f"📋 總共找到 {len(project_targets)} 個專案目標：{[p['name'] for p in project_targets]}")
     print("-" * 30)
 
-    # 2. 批量處理
     for target in project_targets:
         print(f"\n🚀 開始處理專案: {target['name']}")
         
