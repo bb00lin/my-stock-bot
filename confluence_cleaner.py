@@ -121,44 +121,46 @@ def get_page_by_title(title):
             return results[0]
     return None
 
-# --- 2. 內容處理邏輯 (回歸 V3 高效能版 + 表格修正) ---
+# --- 2. 內容處理邏輯 (極速優化版) ---
 
 def is_date_header(text):
     return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text))
 
 def has_red_text(tag):
     """
-    [V3 原始邏輯]：使用 descendants 遞迴檢查。
-    這在你的環境被驗證過是最快的。
+    【關鍵優化】：使用 find 搭配函數檢查，利用 C 底層加速。
+    解決 V3/V7 使用 descendants 迴圈在巨大表格上卡頓的問題。
     """
     if not isinstance(tag, Tag): return False
     
-    # 檢查自身
-    if tag.has_attr('style'):
-        style = tag['style'].lower()
-        if 'rgb(255, 0, 0)' in style or '#ff0000' in style or 'color: red' in style: return True
-    if tag.name == 'font' and (tag.get('color') == 'red' or tag.get('color') == '#ff0000'): return True
+    # 定義檢查邏輯 (這是最耗時的部分，必須最佳化)
+    def is_red_style(node):
+        if node.has_attr('style'):
+            style = node['style'].lower()
+            if 'rgb(255, 0, 0)' in style or '#ff0000' in style or 'color: red' in style:
+                return True
+        if node.name == 'font' and (node.get('color') == 'red' or node.get('color') == '#ff0000'):
+            return True
+        return False
+
+    # 1. 檢查自己
+    if is_red_style(tag): return True
     
-    # 檢查子節點 (包含表格內的文字)
-    for child in tag.descendants:
-        if isinstance(child, Tag):
-            if child.has_attr('style'):
-                style = child['style'].lower()
-                if 'rgb(255, 0, 0)' in style or '#ff0000' in style: return True
-            if child.name == 'font' and (child.get('color') == 'red' or child.get('color') == '#ff0000'): return True
+    # 2. 極速搜尋子節點 (只要找到一個就馬上回傳 True，不再繼續遍歷)
+    if tag.find(is_red_style):
+        return True
+        
     return False
 
 def split_cell_content(cell_soup):
     """
-    [V3 改良版]
-    核心邏輯與 V3 相同，但增加一個檢查：
-    遇到表格 (table) 時，直接視為內容，略過文字檢查。
-    這解決了「表格被切斷」以及「對大表格做文字分析導致卡頓」的問題。
+    將格子內的內容切分成 Entry。
+    遇到複雜標籤 (table, ul, macro) 直接跳過文字檢查，視為內容搬移。
     """
     entries = []
     current_entry = []
     
-    # 這些標籤絕對視為內容，不要浪費時間檢查它是不是標題
+    # 這些標籤絕對視為內容，不要解析文字，避免大表格卡頓
     SKIP_CHECK_TAGS = ['table', 'tbody', 'tr', 'td', 'ul', 'ol', 'ac:structured-macro', 'ac:image']
 
     for child in cell_soup.contents:
@@ -168,11 +170,10 @@ def split_cell_content(cell_soup):
         
         is_header = False
         
-        # 如果是大物件，直接跳過檢查 -> 視為內容 (False) -> 加入 current_entry (被搬移)
+        # 效能優化：如果遇到 Table，直接當作內容，不跑 get_text
         if isinstance(child, Tag) and child.name in SKIP_CHECK_TAGS:
             is_header = False
         else:
-            # 只有簡單物件才檢查文字
             text = child.get_text() if isinstance(child, Tag) else str(child)
             if is_date_header(text):
                 is_header = True
@@ -189,6 +190,7 @@ def split_cell_content(cell_soup):
 def check_entry_red(entry_nodes):
     for node in entry_nodes:
         if isinstance(node, Tag):
+            # 這裡會呼叫優化過的 has_red_text
             if has_red_text(node): return True
     return False
 
@@ -219,7 +221,6 @@ def get_or_create_history_table(soup, main_table):
     
     if not hist_table:
         hist_table = soup.new_tag('table')
-        # 複製 Main Table 的表頭
         main_thead_row = main_table.find('tr')
         if main_thead_row:
             hist_table.append(copy.copy(main_thead_row))
@@ -246,7 +247,8 @@ def clean_project_page_content(html_content, page_title):
         print(f"   ⚠️  [{page_title}] 找不到主表格，跳過。")
         return None
 
-    print(f"   🔍 [{page_title}] 找到主表格，分析中...")
+    print(f"   🔍 [{page_title}] 找到主表格，開始極速分析...")
+    sys.stdout.flush() # 強制刷新 Log，避免看起來像當機
     
     tbody = main_table.find('tbody') or main_table
     rows = tbody.find_all('tr')
@@ -260,35 +262,33 @@ def clean_project_page_content(html_content, page_title):
         return None
 
     history_table_ref = None
-
-    # 使用 index 遍歷，方便顯示進度
     total_rows = len(rows) - 1
     
+    # 開始遍歷每一列
     for i, row in enumerate(rows[1:]):
-        # 簡單進度條，避免使用者以為卡死
-        if i % 5 == 0: 
-            sys.stdout.write(f"\r      處理進度: {i}/{total_rows}...")
+        # 顯示進度條
+        if i % 2 == 0: # 每2行更新一次，讓你感覺它活著
+            sys.stdout.write(f"\r      處理進度: {i}/{total_rows} ...")
             sys.stdout.flush()
 
         cols = row.find_all('td')
         if len(cols) <= max(item_idx, update_idx): continue
         
-        # [V3 原始邏輯] 直接取文字，不做 deep copy 清理，確保效能
         item_name = cols[item_idx].get_text(separator=' ', strip=True)
         update_cell = cols[update_idx]
         
+        # 這裡執行內容切割 (包含表格)
         entries = split_cell_content(update_cell)
         
         if len(entries) <= KEEP_LIMIT:
             continue
             
-        # print(f"\n      Item [{item_name}]: 發現 {len(entries)} 筆紀錄，正在清理...")
-        
         keep_entries = []
         archive_entries = []
         count = 0
         
         for entry in entries:
+            # 這裡執行紅字檢查 (已優化，不會在表格上卡死)
             is_red = check_entry_red(entry)
             if is_red:
                 keep_entries.append(entry)
@@ -319,7 +319,6 @@ def clean_project_page_content(html_content, page_title):
         for h_row in hist_rows:
             h_cols = h_row.find_all('td')
             if not h_cols: continue
-            # 這裡也用簡單文字比對
             if h_cols[item_idx].get_text(separator=' ', strip=True) == item_name:
                 target_hist_row = h_row
                 break
@@ -339,7 +338,9 @@ def clean_project_page_content(html_content, page_title):
             for node in entry:
                 hist_update_cell.append(node)
     
-    print("\n      ✅ 處理完成。")
+    print(f"\r      處理進度: {total_rows}/{total_rows} (完成)        ")
+    sys.stdout.flush()
+    
     return str(soup) if changed else None
 
 def update_page(page_data, new_content):
@@ -362,7 +363,7 @@ def update_page(page_data, new_content):
     print("✅ 更新成功！")
 
 def main():
-    print("=== Confluence 專案頁面整理機器人 (V7: V3 Engine + Fix) ===")
+    print("=== Confluence 專案頁面整理機器人 (V8: Speed Optimized) ===")
     
     report = find_latest_report()
     project_targets = extract_all_project_links(report['body']['view']['value'])
