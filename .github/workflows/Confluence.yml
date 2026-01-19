@@ -1,10 +1,9 @@
 name: Confluence Weekly Report
 
 on:
-  workflow_dispatch: # 允許手動點擊執行
+  workflow_dispatch: # 允許手動按鈕觸發
   schedule:
-    # GitHub 使用 UTC 時間。台灣是 UTC+8。
-    # 台灣週一 15:00 = UTC 週一 07:00
+    # 台灣時間週一 15:00 = UTC 時間週一 07:00
     - cron: '0 7 * * 1'
 
 jobs:
@@ -28,49 +27,50 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests
 
-    # 4. 執行 Python 腳本 (我們會把執行結果存成 log 檔以便寄信)
+    # 4. 執行自動化腳本
     - name: Run Confluence Script
       id: run_script
       env:
         CONF_URL: ${{ secrets.CONF_URL }}
         CONF_USER: ${{ secrets.CONF_USER }}
         CONF_PASS: ${{ secrets.CONF_PASS }}
+      # 將輸出同時顯示並存檔，方便除錯
       run: |
-        # 執行腳本並將輸出同時顯示在螢幕與寫入 output.txt
         python confluence_api.py 2>&1 | tee output.txt
 
-    # 5. 發送成功信件 (僅在 Python 成功時執行)
+    # 5. 發送成功信件 [Done] (Microsoft 365 設定)
     - name: Send Success Email
       if: success()
       uses: dawidd6/action-send-mail@v3
       with:
-        server_address: smtp.gmail.com
-        server_port: 465
-        secure: true
+        # --- Microsoft 365 專用設定 ---
+        server_address: smtp.office365.com
+        server_port: 587
+        secure: false  # M365 必須設為 false (使用 STARTTLS)
+        # ---------------------------
         username: ${{ secrets.MAIL_USERNAME }}
         password: ${{ secrets.MAIL_PASSWORD }}
         subject: Confluence automation script [Done]
         to: bb_lin@gsitw.com
-        from: GitHub Action <${{ secrets.MAIL_USERNAME }}>
-        # 下方 body 會讀取剛剛的 output.txt 內容
+        from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
         body: file://output.txt
 
-    # 6. 發送失敗信件 (僅在 Python 失敗時執行)
+    # 6. 發送失敗信件 [Fail] (Microsoft 365 設定)
     - name: Send Failure Email
       if: failure()
       uses: dawidd6/action-send-mail@v3
       with:
-        server_address: smtp.gmail.com
-        server_port: 465
-        secure: true
+        # --- Microsoft 365 專用設定 ---
+        server_address: smtp.office365.com
+        server_port: 587
+        secure: false
+        # ---------------------------
         username: ${{ secrets.MAIL_USERNAME }}
         password: ${{ secrets.MAIL_PASSWORD }}
         subject: Confluence automation script [Fail]
         to: bb_lin@gsitw.com
-        from: GitHub Action <${{ secrets.MAIL_USERNAME }}>
+        from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
         body: |
-          Confluence 自動週報執行失敗！
-          請登入 GitHub 查看詳細錯誤原因。
+          Confluence 自動週報執行失敗。
           
-          錯誤摘要 (部分):
-          (請至 Actions 頁面查看完整 Log)
+          請檢查 GitHub Actions Log 了解詳情。
