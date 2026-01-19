@@ -1,9 +1,10 @@
 name: Confluence Weekly Report
 
 on:
-  workflow_dispatch: # 手動觸發
+  workflow_dispatch: # 允許手動點擊執行
   schedule:
-    # 台灣時間週一 15:00 = UTC 時間週一 07:00
+    # GitHub 使用 UTC 時間。台灣是 UTC+8。
+    # 台灣週一 15:00 = UTC 週一 07:00
     - cron: '0 7 * * 1'
 
 jobs:
@@ -11,19 +12,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # 1. 下載程式碼
     - name: Checkout code
       uses: actions/checkout@v3
 
+    # 2. 設定 Python 環境
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
 
+    # 3. 安裝套件
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install requests
 
+    # 4. 執行 Python 腳本 (我們會把執行結果存成 log 檔以便寄信)
     - name: Run Confluence Script
       id: run_script
       env:
@@ -31,41 +36,41 @@ jobs:
         CONF_USER: ${{ secrets.CONF_USER }}
         CONF_PASS: ${{ secrets.CONF_PASS }}
       run: |
-        python confluence_api.py > output.log 2>&1
-        cat output.log
+        # 執行腳本並將輸出同時顯示在螢幕與寫入 output.txt
+        python confluence_api.py 2>&1 | tee output.txt
 
-    # 發送成功信件 (僅在腳本成功時執行)
+    # 5. 發送成功信件 (僅在 Python 成功時執行)
     - name: Send Success Email
       if: success()
       uses: dawidd6/action-send-mail@v3
       with:
-        # 您需要在 Secrets 設定這些 SMTP 資訊
-        server_address: smtp.gmail.com # 範例: Gmail
+        server_address: smtp.gmail.com
         server_port: 465
+        secure: true
         username: ${{ secrets.MAIL_USERNAME }}
         password: ${{ secrets.MAIL_PASSWORD }}
         subject: Confluence automation script [Done]
         to: bb_lin@gsitw.com
-        from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
-        body: |
-          Confluence 自動週報執行成功。
-          詳細 Log 請查看 GitHub Actions 頁面。
-          
-          最新執行摘要:
-          (請參考附件或線上 Log)
+        from: GitHub Action <${{ secrets.MAIL_USERNAME }}>
+        # 下方 body 會讀取剛剛的 output.txt 內容
+        body: file://output.txt
 
-    # 發送失敗信件 (僅在腳本失敗時執行)
+    # 6. 發送失敗信件 (僅在 Python 失敗時執行)
     - name: Send Failure Email
       if: failure()
       uses: dawidd6/action-send-mail@v3
       with:
         server_address: smtp.gmail.com
         server_port: 465
+        secure: true
         username: ${{ secrets.MAIL_USERNAME }}
         password: ${{ secrets.MAIL_PASSWORD }}
         subject: Confluence automation script [Fail]
         to: bb_lin@gsitw.com
-        from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
+        from: GitHub Action <${{ secrets.MAIL_USERNAME }}>
         body: |
           Confluence 自動週報執行失敗！
-          請檢查 GitHub Actions Log 進行除錯。
+          請登入 GitHub 查看詳細錯誤原因。
+          
+          錯誤摘要 (部分):
+          (請至 Actions 頁面查看完整 Log)
