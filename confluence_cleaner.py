@@ -25,7 +25,7 @@ API_ENDPOINT = f"{BASE_URL}/wiki/rest/api/content"
 def get_headers():
     return {"Content-Type": "application/json"}
 
-# --- 1. 搜尋週報與提取所有專案連結 ---
+# --- 1. 搜尋週報與提取所有專案連結 (批量處理) ---
 def find_latest_report():
     print("正在搜尋最新週報...")
     cql = 'type=page AND title ~ "WeeklyReport*" ORDER BY created DESC'
@@ -40,6 +40,9 @@ def find_latest_report():
     return results[0]
 
 def extract_all_project_links(report_body):
+    """
+    抓取 Project 欄位中的所有連結 (批量處理模式)
+    """
     soup = BeautifulSoup(report_body, 'html.parser')
     tables = soup.find_all('table')
     project_targets = []
@@ -89,7 +92,7 @@ def extract_all_project_links(report_body):
                         
                         if target and target not in project_targets:
                             project_targets.append(target)
-            break
+            break # 只抓第一個符合的表格
     
     if not found_table:
         print("⚠️ 在週報中找不到含有 'Project' 欄位的表格。")
@@ -121,29 +124,38 @@ def get_page_by_title(title):
             return results[0]
     return None
 
-# --- 2. 內容處理邏輯 (針對表格修正版) ---
+# --- 2. 內容處理邏輯 (極速版) ---
 
 def is_date_header(text):
     return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text))
 
 def has_red_text(tag):
+    """
+    優化後的紅字檢查：使用 find 替代遞迴，大幅提升大表格檢查速度
+    """
     if not isinstance(tag, Tag): return False
-    # 檢查 style
-    if tag.has_attr('style'):
-        style = tag['style'].lower()
-        if 'rgb(255, 0, 0)' in style or '#ff0000' in style or 'red' in style: return True
-    # 檢查 font tag
-    if tag.name == 'font' and (tag.get('color') == 'red' or tag.get('color') == '#ff0000'): return True
-    # 遞迴檢查子節點 (包含表格內的文字)
-    for child in tag.descendants:
-        if isinstance(child, Tag):
-            if child.has_attr('style'):
-                style = child['style'].lower()
-                if 'rgb(255, 0, 0)' in style or '#ff0000' in style: return True
-            if child.name == 'font' and (child.get('color') == 'red' or child.get('color') == '#ff0000'): return True
+    
+    # 定義一個檢查函數給 find 使用
+    def is_red_style(tag_node):
+        if tag_node.has_attr('style'):
+            style = tag_node['style'].lower()
+            if 'rgb(255, 0, 0)' in style or '#ff0000' in style or 'color: red' in style:
+                return True
+        if tag_node.name == 'font' and (tag_node.get('color') == 'red' or tag_node.get('color') == '#ff0000'):
+            return True
+        return False
+
+    # 1. 檢查自己
+    if is_red_style(tag): return True
+    
+    # 2. 快速搜尋子節點 (C語言底層加速)
+    if tag.find(is_red_style):
+        return True
+        
     return False
 
 def get_clean_item_name(td_tag):
+    """移除 Status Macro 和圖片，只留文字"""
     temp_tag = copy.copy(td_tag)
     for status in temp_tag.find_all('ac:structured-macro', attrs={"ac:name": "status"}):
         status.decompose()
@@ -157,58 +169,43 @@ def get_clean_item_name(td_tag):
 def split_cell_content(cell_soup):
     """
     將格子內的內容切分成 Entry。
-    修正：遇到表格 (table) 時，絕對視為內容，不檢查是否為日期標題。
+    【關鍵優化】：遇到複雜標籤 (table, ul, macro) 直接跳過文字檢查，
+    這能避免在大表格上卡頓。
     """
     entries = []
     current_entry = []
     
-    # 定義哪些標籤才可能是「日期標題」的容器
-    # 通常日期是放在 <p> 或 <div> 或直接裸露的文字
-    # 絕對不可能是 <table>, <ul>, <ol> 本身
-    HEADER_CANDIDATE_TAGS = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'span']
+    # 這些標籤絕對不會是日期標題，遇到它們直接視為內容，不要跑 get_text()
+    SKIP_CHECK_TAGS = ['table', 'tbody', 'tr', 'td', 'ul', 'ol', 'ac:structured-macro', 'ac:image']
 
     for child in cell_soup.contents:
-        # 1. 忽略純空白換行
         if isinstance(child, NavigableString) and not child.strip():
             if current_entry: current_entry.append(child)
             continue
         
         is_header = False
         
-        # 2. 判斷是否為新日期標題
-        if isinstance(child, NavigableString):
-            # 如果是純文字節點，檢查內容
-            if is_date_header(str(child)):
+        # 優化：如果 child 是複雜物件，直接判定不是 header，省去 costly 的 text extraction
+        if isinstance(child, Tag) and child.name in SKIP_CHECK_TAGS:
+            is_header = False
+        else:
+            # 只有簡單的 p, div, span 才檢查是不是日期
+            text = child.get_text() if isinstance(child, Tag) else str(child)
+            if is_date_header(text):
                 is_header = True
-        elif isinstance(child, Tag):
-            # 關鍵修正：只有特定的簡單標籤才檢查文字內容
-            # 遇到 table 或 macro，直接視為內容 (False)
-            if child.name in HEADER_CANDIDATE_TAGS:
-                # 這裡只取 strip 之後的文字，避免被內部的 formatting 干擾
-                text = child.get_text(strip=True)
-                if is_date_header(text):
-                    is_header = True
-            # else: 如果是 table, ul, ac:structured-macro，is_header 保持 False
 
-        # 3. 切割與歸類
         if is_header:
-            # 遇到新日期，先把舊的存起來
             if current_entry: entries.append(current_entry)
-            # 開始新的一筆
             current_entry = [child]
         else:
-            # 不是標題（包含表格、文字內容、列表），加入當前這一筆
             current_entry.append(child)
             
-    # 最後一筆
     if current_entry: entries.append(current_entry)
-    
     return entries
 
 def check_entry_red(entry_nodes):
     for node in entry_nodes:
         if isinstance(node, Tag):
-            # has_red_text 會自動遞迴搜尋 table 內部的紅色文字
             if has_red_text(node): return True
     return False
 
@@ -288,7 +285,7 @@ def clean_project_page_content(html_content, page_title):
         clean_item_name = get_clean_item_name(raw_item_cell)
         update_cell = cols[update_idx]
         
-        # 使用修正後的分割邏輯
+        # 執行優化過的切割
         entries = split_cell_content(update_cell)
         
         if len(entries) <= KEEP_LIMIT:
@@ -300,6 +297,7 @@ def clean_project_page_content(html_content, page_title):
         archive_entries = []
         count = 0
         for entry in entries:
+            # 執行優化過的紅字檢查
             is_red = check_entry_red(entry)
             if is_red:
                 keep_entries.append(entry)
@@ -314,7 +312,7 @@ def clean_project_page_content(html_content, page_title):
         if not archive_entries:
             continue
             
-        print(f"      ✂️  搬移 {len(archive_entries)} 筆舊資料 (含表格/巢狀內容) 到 History...")
+        print(f"      ✂️  搬移 {len(archive_entries)} 筆舊資料 (含表格) 到 History...")
         changed = True
         
         update_cell.clear()
@@ -373,7 +371,7 @@ def update_page(page_data, new_content):
     print("✅ 更新成功！")
 
 def main():
-    print("=== Confluence 專案頁面整理機器人 (V5: Table Support) ===")
+    print("=== Confluence 專案頁面整理機器人 (V6: Performance Fix) ===")
     
     report = find_latest_report()
     project_targets = extract_all_project_links(report['body']['view']['value'])
