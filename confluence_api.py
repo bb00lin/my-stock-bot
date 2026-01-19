@@ -13,23 +13,15 @@ USERNAME = os.environ.get("CONF_USER")
 API_TOKEN = os.environ.get("CONF_PASS")
 
 if not RAW_URL or not USERNAME or not API_TOKEN:
-    print("錯誤：缺少環境變數 (CONF_URL, CONF_USER, CONF_PASS)")
+    print("錯誤：缺少環境變數")
     sys.exit(1)
 
-# --- 網址強力淨化 (v3.0) ---
-# 強制解析出 scheme 和 netloc，捨棄所有後面的路徑
+# 網址淨化
 parsed = urlparse(RAW_URL)
-# 確保是 https://domain.atlassian.net 這種格式
 BASE_URL = f"{parsed.scheme}://{parsed.netloc}"
-
-print(f"原始輸入網址: {RAW_URL}")
-print(f"淨化後基準網址: {BASE_URL}")
-
-# Atlassian Cloud 標準 API 路徑
 API_ENDPOINT = f"{BASE_URL}/wiki/rest/api/content"
 
 def get_target_dates():
-    """計算本週日期與檔名"""
     today = date.today()
     monday = today - timedelta(days=today.weekday())
     sunday = monday + timedelta(days=6)
@@ -40,78 +32,109 @@ def get_target_dates():
         "filename": friday.strftime("%Y%m%d")
     }
 
+def debug_permissions():
+    """當找不到週報時，執行此診斷：查看帳號到底看得到什麼"""
+    print("\n=== 啟動權限診斷模式 ===")
+    print(f"正在檢查帳號 {USERNAME} 能看到的所有空間與頁面...")
+    
+    # 嘗試列出任意頁面 (不限標題)
+    url = f"{API_ENDPOINT}/search"
+    params = {'cql': 'type=page', 'limit': 5}
+    
+    try:
+        response = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
+        results = response.json().get('results', [])
+        
+        if not results:
+            print("😱 嚴重警告：API 回傳 0 個頁面。")
+            print("這代表此 API Token 的帳號可能沒有任何空間的檢視權限。")
+            print("請確認：您是否已將此帳號加入 Confluence 的存取權限群組？")
+        else:
+            print(f"✅ 帳號權限正常，能看到 {len(results)} 個頁面，例如：")
+            for page in results:
+                print(f" - {page['title']} (Space: {page.get('space', {}).get('name', 'Unknown')})")
+            print("結論：權限沒問題，是搜尋關鍵字 'WeeklyReport' 有誤，或該空間未開放給此帳號。")
+            
+    except Exception as e:
+        print(f"診斷失敗: {e}")
+
 def find_latest_report():
-    """搜尋標題符合 WeeklyReport_20... 的最新頁面"""
     print("正在搜尋最新週報...")
-    cql = 'type=page AND title ~ "WeeklyReport_20" ORDER BY created DESC'
+    
+    # 【修正點 1】使用萬用字元 *，並放寬搜尋條件
+    # 搜尋標題包含 "WeeklyReport" 開頭的所有頁面
+    cql = 'type=page AND title ~ "WeeklyReport*" ORDER BY created DESC'
     
     url = f"{API_ENDPOINT}/search"
-    
     params = {
         'cql': cql,
         'limit': 1,
-        'expand': 'body.storage,ancestors,space'
+        'expand': 'body.storage,ancestors,space,version'
     }
     
     try:
         response = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
-        
-        if response.status_code == 404:
-            print(f"❌ 404 錯誤 - 請求網址: {response.url}")
-            print("請檢查您的網域是否正確，或者該站點是否為 Cloud 版本。")
-            sys.exit(1)
-            
         response.raise_for_status()
         results = response.json().get('results', [])
         
         if not results:
-            print("⚠️ 搜尋成功但無結果。")
-            print("系統找不到任何標題包含 'WeeklyReport_20' 的頁面。")
+            print("⚠️ 搜尋無結果 (WeeklyReport*)。")
+            # 執行診斷
+            debug_permissions()
             sys.exit(1)
         
         latest = results[0]
         print(f"✅ 找到最新週報: {latest['title']} (ID: {latest['id']})")
+        print(f"   位於空間: {latest['space']['name']} (Key: {latest['space']['key']})")
         return latest
         
     except requests.exceptions.HTTPError as e:
         print(f"❌ API 請求失敗: {e}")
-        if response.status_code == 401:
-            print("💡 提示: 401 代表 API Token 無效或 Email 錯誤。")
-            print("請確認您使用的是 'API Token' 而不是 '登入密碼'。")
         sys.exit(1)
 
 def create_new_report(latest_page, dates):
-    """基於舊內容建立新頁面"""
     new_title = f"WeeklyReport_{dates['filename']}"
-    print(f"準備建立新頁面: {new_title}")
+    print(f"\n準備建立新頁面: {new_title}")
     
+    # 檢查是否已存在
+    check_url = f"{API_ENDPOINT}/search"
+    check_params = {'cql': f'title = "{new_title}"'}
+    check_resp = requests.get(check_url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=check_params)
+    if check_resp.json().get('results'):
+        print(f"⚠️ 跳過：頁面 '{new_title}' 已經存在！")
+        return
+
     original_body = latest_page['body']['storage']['value']
     
-    # 日期替換邏輯
-    found_dates = re.findall(r"\d{4}-\d{1,2}-\d{1,2}", original_body)
+    # --- 日期替換 (針對 JQL) ---
+    # JQL 在 storage format 中通常是被編碼的，例如：created >= "2024-01-01"
+    # 我們嘗試用 Regex 替換所有 YYYY-MM-DD
+    
     new_body = original_body
+    found_dates = re.findall(r"\d{4}-\d{1,2}-\d{1,2}", original_body)
     
     if len(found_dates) >= 2:
-        old_start = found_dates[0]
-        old_end = found_dates[1]
-        print(f"偵測到舊日期區間: {old_start} ~ {old_end}")
+        # 假設前兩個日期是 JQL 區間
+        # 這裡做一個簡單的優化：確保我們替換的是看起來像 JQL 的部分
+        # 或者直接替換前兩個發現的日期
+        old_start, old_end = found_dates[0], found_dates[1]
+        print(f"將日期 {old_start} -> {dates['monday_str']}")
+        print(f"將日期 {old_end}   -> {dates['sunday_str']}")
+        
         new_body = new_body.replace(old_start, dates['monday_str'], 1)
         new_body = new_body.replace(old_end, dates['sunday_str'], 1)
-        print(f"已替換為: {dates['monday_str']} ~ {dates['sunday_str']}")
     else:
-        print("⚠️ 舊內容中找不到日期格式，直接複製內容。")
+        print("ℹ️ 內文無日期格式，將直接複製內容。")
 
-    # 準備 Payload
+    # --- 準備建立 ---
     ancestors = []
     if latest_page.get('ancestors'):
         ancestors.append({'id': latest_page['ancestors'][-1]['id']})
     
-    space_key = latest_page['space']['key']
-    
     payload = {
         "title": new_title,
         "type": "page",
-        "space": {"key": space_key},
+        "space": {"key": latest_page['space']['key']},
         "ancestors": ancestors,
         "body": {
             "storage": {
@@ -121,43 +144,31 @@ def create_new_report(latest_page, dates):
         }
     }
     
-    headers = {"Content-Type": "application/json"}
-    
     try:
         response = requests.post(
             API_ENDPOINT, 
             auth=HTTPBasicAuth(USERNAME, API_TOKEN),
-            headers=headers,
+            headers={"Content-Type": "application/json"},
             data=json.dumps(payload)
         )
         response.raise_for_status()
-        new_page_data = response.json()
+        data = response.json()
         
-        # 組合 WebUI 連結
-        webui = new_page_data['_links']['webui']
-        full_link = f"{BASE_URL}/wiki{webui}"
+        webui = data['_links']['webui']
+        full_link = f"{BASE_URL}/wiki{webui}" if not webui.startswith('/wiki') else f"{BASE_URL}{webui}"
         
-        print(f"🎉 成功建立頁面！")
-        print(f"頁面 ID: {new_page_data['id']}")
-        print(f"連結: {full_link}")
+        print(f"🎉 成功建立！連結: {full_link}")
         
     except requests.exceptions.HTTPError as e:
         print(f"❌ 建立失敗: {e}")
-        print(f"伺服器回應: {response.text}")
-        if "title already exists" in response.text:
-            print("💡 原因: 該標題的週報已經存在了！")
+        print(f"回應: {response.text}")
 
 def main():
     dates = get_target_dates()
-    print(f"=== Confluence API 自動週報腳本 (v3.0 強力淨化版) ===")
-    print(f"目標日期: {dates['monday_str']} ~ {dates['sunday_str']}")
-    
-    try:
-        latest_page = find_latest_report()
-        create_new_report(latest_page, dates)
-    except Exception as e:
-        print(f"執行中斷: {str(e)}")
-        sys.exit(1)
+    print(f"=== Confluence API 自動週報 (v4.0 萬用字元版) ===")
+    print(f"目標: {dates['filename']} ({dates['monday_str']} ~ {dates['sunday_str']})")
+    find_latest_report_page = find_latest_report()
+    create_new_report(find_latest_report_page, dates)
 
 if __name__ == "__main__":
     main()
