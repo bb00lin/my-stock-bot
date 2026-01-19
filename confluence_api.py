@@ -3,7 +3,7 @@ import requests
 import json
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from requests.auth import HTTPBasicAuth
 from urllib.parse import urlparse
 
@@ -42,98 +42,86 @@ def find_latest_report():
 
 def calculate_next_date(latest_title):
     """
-    邏輯：
-    1. 從標題解析出日期 (例如 20260130)。
-    2. 下一期檔名 = 該日期 + 7天。
-    3. JQL 開始日 (Monday) = 下一期檔名日期 - 4天 (因為檔名通常是週五)。
-    4. JQL 結束日 (Sunday) = 下一期檔名日期 + 2天。
-    
-    例如檔名是 1/30 (週五):
-    - 週一 = 1/26
-    - 週日 = 2/1
+    計算下一期的檔名與日期區間
     """
     match = re.search(r"(\d{8})", latest_title)
+    # 預設使用本週作為備案
+    today = datetime.now().date()
+    friday = today + timedelta(days=(4 - today.weekday()))
+    
     if match:
         last_date_str = match.group(1)
         try:
             last_date_obj = datetime.strptime(last_date_str, "%Y%m%d").date()
-            
-            # 下一期週報的日期 (週五)
-            next_report_date = last_date_obj + timedelta(days=7)
-            
-            # 計算該週的區間 (假設週報檔名是週五)
-            # Monday is 4 days before Friday
-            monday = next_report_date - timedelta(days=4)
-            # Sunday is 2 days after Friday
-            sunday = next_report_date + timedelta(days=2)
-            
-            return {
-                "filename": next_report_date.strftime("%Y%m%d"),
-                "monday_str": monday.strftime("%Y-%m-%d"),
-                "sunday_str": sunday.strftime("%Y-%m-%d")
-            }
+            friday = last_date_obj + timedelta(days=7)
         except ValueError: pass
-            
-    print("⚠️ 無法解析日期，使用本週五為基準。")
-    today = datetime.now().date()
-    # 假設今天是執行日，算出本週五
-    friday = today + timedelta(days=(4 - today.weekday()))
-    monday = friday - timedelta(days=4)
-    sunday = friday + timedelta(days=2)
+    
+    # 根據新的週五 (檔名)，推算該週的週一與週日
+    # 週報檔名通常是週五，所以週一 = 週五 - 4天
+    target_monday = friday - timedelta(days=4)
+    target_sunday = friday + timedelta(days=2)
     
     return {
         "filename": friday.strftime("%Y%m%d"),
-        "monday_str": monday.strftime("%Y-%m-%d"),
-        "sunday_str": sunday.strftime("%Y-%m-%d")
+        "monday": target_monday,
+        "sunday": target_sunday
     }
 
-def update_jql_dates(content, new_monday, new_sunday):
+def update_jql_dates_smart(content, new_monday_obj, new_sunday_obj):
     """
-    強大的 JQL 日期替換函數
-    目標：找到內容中所有的 updated >= "YYYY-MM-DD" 和 updated <= "YYYY-MM-DD"
-    並將其替換為新的週一和週日。
+    v7.0 核心修正：不依賴特定語法 (如 updated >=)，而是直接針對日期字串進行替換。
+    能夠處理 "2026-1-19" (單碼) 與 "2026-01-19" (雙碼) 的差異。
     """
-    print(f"正在將 JQL 日期更新為: {new_monday} ~ {new_sunday}")
+    print(f"正在執行智慧日期替換...")
     
-    # 正則表達式解釋：
-    # 尋找類似 updated >= "2026-01-26" 這樣的模式
-    # 使用捕獲組 () 來保留前面的語法，只替換日期部分
+    # 1. 找出內容中所有看起來像日期的字串 (YYYY-M-D 或 YYYY-MM-DD)
+    # Regex 解釋: 4位數字 - 1到2位數字 - 1到2位數字
+    date_pattern = re.compile(r'(\d{4})-(\d{1,2})-(\d{1,2})')
     
-    # 替換起始日 (>= "YYYY-MM-DD")
-    # 這裡匹配： updated >= " 或 updated >= ' 或 updated>= 
-    # 為了簡單，我們直接匹配日期格式並假設成對出現
+    # 2. 分析這些日期，找出哪些是「舊週一」，哪些是「舊週日」
+    # 我們假設舊週報裡的日期，大部分都落在「上一週」的區間內
+    # 邏輯：
+    #   舊週一應該是: new_monday - 7 days
+    #   舊週日應該是: new_sunday - 7 days
     
-    # 方法 A: 簡單暴力替換所有日期
-    # 但這可能會誤傷內文中單純的文字日期。
+    old_monday_target = new_monday_obj - timedelta(days=7)
+    old_sunday_target = new_sunday_obj - timedelta(days=7)
     
-    # 方法 B: 針對 JQL 結構替換 (更安全)
-    # 我們假設 JQL 結構是 updated >= "舊日期" ... updated <= "舊日期"
-    # 但舊日期可能每一行都不一樣（如果有人手動改錯過）
-    # 所以最好的方法是：
-    # 1. 找出所有 >= "YYYY-MM-DD" -> 換成 >= "新週一"
-    # 2. 找出所有 <= "YYYY-MM-DD" -> 換成 <= "新週日"
+    print(f"目標：將 {old_monday_target} 附近的日期換成 {new_monday_obj}")
+    print(f"目標：將 {old_sunday_target} 附近的日期換成 {new_sunday_obj}")
     
-    # 替換 >= (Start Date)
-    # pattern_start 尋找： (updated\s*>=\s*["'])(\d{4}-\d{2}-\d{2})(["'])
-    # \s* 代表可能有的空白
-    pattern_start = re.compile(r'(updated\s*>=\s*["\\]*)(\d{4}-\d{1,2}-\d{1,2})(["\\]*)', re.IGNORECASE)
-    content = pattern_start.sub(f'\\g<1>{new_monday}\\g<3>', content)
+    def replace_callback(match):
+        full_str = match.group(0) # 例如 "2026-1-19" 或 "2026-01-19"
+        
+        try:
+            # 嘗試解析這個日期
+            found_date = datetime.strptime(full_str, "%Y-%m-%d" if "-" in full_str else "%Y%m%d").date()
+            
+            # 判斷這個日期是不是「舊週一」 (允許前後 1 天的誤差，以防萬一)
+            if abs((found_date - old_monday_target).days) <= 1:
+                # 替換成新週一 (保持原本格式嗎？不，統一改成標準格式 YYYY-MM-DD 最保險)
+                return new_monday_obj.strftime("%Y-%m-%d")
+            
+            # 判斷這個日期是不是「舊週日」
+            if abs((found_date - old_sunday_target).days) <= 1:
+                return new_sunday_obj.strftime("%Y-%m-%d")
+                
+        except ValueError:
+            pass
+            
+        return full_str # 如果不符合條件，保持原樣
+
+    # 3. 執行全域替換
+    new_content = date_pattern.sub(replace_callback, content)
     
-    # 替換 <= (End Date)
-    pattern_end = re.compile(r'(updated\s*<=\s*["\\]*)(\d{4}-\d{1,2}-\d{1,2})(["\\]*)', re.IGNORECASE)
-    content = pattern_end.sub(f'\\g<1>{new_sunday}\\g<3>', content)
-    
-    # 額外保險：有時候 JQL 可能是 created >= ...
-    # 如果您的 JQL 只有 updated，上面的就夠了。
-    
-    return content
+    return new_content
 
 def create_new_report(latest_page):
     # 1. 計算日期
     next_dates = calculate_next_date(latest_page['title'])
     new_title = f"WeeklyReport_{next_dates['filename']}"
     print(f"準備建立: {new_title}")
-    print(f"新週期: {next_dates['monday_str']} (一) ~ {next_dates['sunday_str']} (日)")
+    print(f"新週期: {next_dates['monday']} ~ {next_dates['sunday']}")
     
     # 2. 檢查重複
     check_url = f"{API_ENDPOINT}/search"
@@ -143,11 +131,15 @@ def create_new_report(latest_page):
         print(f"⚠️ 跳過：頁面 '{new_title}' 已經存在！")
         return
 
-    # 3. 處理內容與日期替換
+    # 3. 處理內容
     original_body = latest_page['body']['storage']['value']
     
-    # 呼叫我們新寫的函數，處理所有 Jira Macro
-    new_body = update_jql_dates(original_body, next_dates['monday_str'], next_dates['sunday_str'])
+    # 使用 v7.0 的智慧替換函數
+    new_body = update_jql_dates_smart(
+        original_body, 
+        next_dates['monday'], 
+        next_dates['sunday']
+    )
     
     # 4. 建立頁面
     ancestors = []
@@ -179,15 +171,14 @@ def create_new_report(latest_page):
         webui = data['_links']['webui']
         link = f"{BASE_URL}/wiki{webui}" if not webui.startswith('/wiki') else f"{BASE_URL}{webui}"
         
-        print(f"🎉 成功建立！所有 Jira 表格日期已更新。")
-        print(f"連結: {link}")
+        print(f"🎉 成功建立！連結: {link}")
         
     except requests.exceptions.HTTPError as e:
         print(f"❌ 建立失敗: {e}")
         print(response.text)
 
 def main():
-    print(f"=== Confluence API 自動週報 (v6.0 全面自動化版) ===")
+    print(f"=== Confluence API 自動週報 (v7.0 智慧日期替換版) ===")
     latest_page = find_latest_report()
     create_new_report(latest_page)
 
