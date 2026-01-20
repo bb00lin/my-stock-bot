@@ -5,7 +5,7 @@ import re
 import sys
 import copy
 from requests.auth import HTTPBasicAuth
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 from bs4 import BeautifulSoup, Tag, NavigableString
 
 # --- 設定區 ---
@@ -70,23 +70,53 @@ def extract_all_project_links(report_body):
                 cols = row.find_all('td')
                 if len(cols) > proj_idx:
                     for link in cols[proj_idx].find_all('a'):
+                        link_text = link.get_text().strip()
+                        href = link.get('href', '')
+                        
+                        target = {'name': link_text} # 預設名稱用文字，方便辨識
+                        
+                        # 策略 1: 嘗試取得 data-linked-resource-id (最準)
                         pid = link.get('data-linked-resource-id')
-                        name = link.get_text().strip()
-                        target = {'name': name}
                         if pid:
                             target['id'] = pid
                         else:
-                            href = link.get('href', '')
+                            # 策略 2: 分析 href 網址
+                            # 情況 A: URL 包含 pageId 參數
                             if 'pageId=' in href:
                                 qs = parse_qs(urlparse(href).query)
-                                if 'pageId' in qs: target['id'] = qs['pageId'][0]
+                                if 'pageId' in qs: 
+                                    target['id'] = qs['pageId'][0]
+                            
+                            # 情況 B: URL 包含 /pages/123456/ (Confluence 標準格式)
+                            # Regex 改良：抓取 /pages/ 後面的數字
+                            elif '/pages/' in href:
+                                m = re.search(r'/pages/(\d+)', href)
+                                if m: 
+                                    target['id'] = m.group(1)
+                                else:
+                                    # 沒 ID，嘗試抓最後一段當標題 (解碼 URL)
+                                    # 例如 .../WeeklyStatus_QCA2066+MP -> WeeklyStatus_QCA2066[MP]
+                                    clean_title = unquote(href.split('/')[-1]).replace('+', ' ')
+                                    target['title'] = clean_title
+
+                            # 情況 C: 一般顯示連結 /display/Space/Page+Title
+                            elif '/display/' in href:
+                                clean_title = unquote(href.split('/')[-1]).replace('+', ' ')
+                                target['title'] = clean_title
+                                
+                            # 策略 3: 真的什麼都沒有，才用連結文字去猜
                             else:
-                                m = re.search(r'/pages/(\d+)/', href)
-                                if m: target['id'] = m.group(1)
-                                else: target['title'] = name
+                                target['title'] = link_text
                         
                         if target.get('id') or target.get('title'):
-                            if target not in project_targets: project_targets.append(target)
+                            # 避免重複加入
+                            is_exist = False
+                            for t in project_targets:
+                                if t.get('id') == target.get('id') and target.get('id'): is_exist = True
+                                if t.get('title') == target.get('title') and target.get('title'): is_exist = True
+                            
+                            if not is_exist:
+                                project_targets.append(target)
             break 
     return project_targets
 
@@ -102,13 +132,16 @@ def get_page_by_title(title):
     r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
     res = r.json().get('results', [])
     if res: return res[0]
+    
+    # 自動補全 WeeklyStatus_ 前綴 (如果網址解析出來的標題本身就沒帶)
     if not title.startswith("WeeklyStatus_"):
+        print(f"   嘗試補全標題: WeeklyStatus_{title}")
         r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params={'title': f"WeeklyStatus_{title}", 'expand': 'body.storage,version'})
         res = r.json().get('results', [])
         if res: return res[0]
     return None
 
-# --- V18 內容切割邏輯 (正常版) ---
+# --- V18 避雷針模式邏輯 ---
 
 def is_date_header(text):
     if not text: return False
@@ -117,42 +150,31 @@ def is_date_header(text):
 def split_cell_content(cell_soup):
     entries = []
     current_entry = []
-    
-    # 標準切割邏輯
     for child in cell_soup.contents:
         if isinstance(child, NavigableString) and not child.strip():
             if current_entry: current_entry.append(child)
             continue
         
         is_header = False
-        
-        # 簡單檢查：只有 p/span/div 且文字符合日期格式才算標題
         if isinstance(child, Tag) and child.name in ['p', 'span', 'div']:
             txt = child.get_text().strip()
-            if is_date_header(txt):
-                is_header = True
+            if is_date_header(txt): is_header = True
         elif isinstance(child, NavigableString):
-            if is_date_header(str(child).strip()):
-                is_header = True
+            if is_date_header(str(child).strip()): is_header = True
 
         if is_header:
             if current_entry: entries.append(current_entry)
             current_entry = [child]
         else:
             current_entry.append(child)
-            
     if current_entry: entries.append(current_entry)
     return entries
 
-# --- 紅字檢查 (標準版) ---
 def check_entry_red(entry_nodes):
-    # 因為我們已經跳過了含大表格的列，這裡可以用標準遞迴檢查
     for node in entry_nodes:
         if isinstance(node, Tag):
-            # 檢查 style 或 font
-            if str(node).lower().find('color: red') != -1: return True
-            if str(node).lower().find('rgb(255, 0, 0)') != -1: return True
-            if str(node).lower().find('#ff0000') != -1: return True
+            s = str(node).lower()
+            if 'color: red' in s or 'rgb(255, 0, 0)' in s or '#ff0000' in s: return True
     return False
 
 def get_or_create_history_table(soup, main_table):
@@ -221,7 +243,6 @@ def clean_project_page_content(html_content, page_title):
     total_rows = len(rows) - 1
     
     for i, row in enumerate(rows[1:]):
-        # 顯示進度
         sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...")
         sys.stdout.flush()
 
@@ -229,17 +250,11 @@ def clean_project_page_content(html_content, page_title):
         if len(cols) <= max(item_idx, update_idx): continue
         
         update_cell = cols[update_idx]
-
-        # 【V18 核心】：避雷針機制
-        # 如果這一格裡面包含表格，直接判定為「過重」，跳過不處理
-        # 這是避免卡死的終極手段
         if update_cell.find('table'):
             print(f" [SKIP Heavy Table] ", end='')
             continue
 
-        # 安全取名
         item_name = cols[item_idx].get_text().strip()[:50]
-        
         entries = split_cell_content(update_cell)
         
         if len(entries) <= KEEP_LIMIT: continue
@@ -252,7 +267,6 @@ def clean_project_page_content(html_content, page_title):
             if check_entry_red(entry):
                 keep.append(entry)
                 continue
-            
             if count < KEEP_LIMIT:
                 keep.append(entry)
                 count += 1
@@ -306,14 +320,21 @@ def update_page(page_data, new_content):
     print("✅ 成功！")
 
 def main():
-    print("=== Confluence Cleaner (V18: Skip Heavy Content) ===")
+    print("=== Confluence Cleaner (V19: Smart Link Parsing) ===")
     report = find_latest_report()
     targets = extract_all_project_links(report['body']['view']['value'])
     if not targets: return
     print(f"📋 找到 {len(targets)} 個專案")
     for t in targets:
         print(f"\n🚀 {t['name']}")
-        p = get_page_by_id(t['id']) if 'id' in t else get_page_by_title(t['title'])
+        p = None
+        if 'id' in t:
+            p = get_page_by_id(t['id'])
+        elif 'title' in t:
+            # 優先使用解析出來的標題
+            print(f"   使用解析標題: {t['title']}")
+            p = get_page_by_title(t['title'])
+            
         if not p:
             print("❌ 讀取失敗")
             continue
