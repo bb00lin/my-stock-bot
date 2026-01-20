@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup, Tag, NavigableString
 RAW_URL = os.environ.get("CONF_URL")
 USERNAME = os.environ.get("CONF_USER")
 API_TOKEN = os.environ.get("CONF_PASS")
+MASTER_PAGE_ID = os.environ.get("MASTER_PAGE_ID")
 KEEP_LIMIT = 5  # 保留最新的幾筆資料
 
 if not RAW_URL or not USERNAME or not API_TOKEN:
@@ -27,21 +28,36 @@ def get_headers():
 
 # --- 1. 搜尋週報與提取所有專案連結 ---
 def find_latest_report():
-    print("正在搜尋最新週報...")
+    if MASTER_PAGE_ID:
+        print(f"🎯 偵測到 MASTER_PAGE_ID ({MASTER_PAGE_ID})，直接讀取該頁面...")
+        url = f"{API_ENDPOINT}/{MASTER_PAGE_ID}"
+        params = {'expand': 'body.view,version'}
+        response = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
+        try:
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"❌ 指定的 MASTER_PAGE_ID 讀取失敗: {e}")
+            sys.exit(1)
+
+    print("🔍 正在搜尋最新週報...")
     cql = 'type=page AND title ~ "WeeklyReport*" ORDER BY created DESC'
     url = f"{API_ENDPOINT}/search"
     params = {'cql': cql, 'limit': 1, 'expand': 'body.view'}
+    
     response = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
     response.raise_for_status()
     results = response.json().get('results', [])
+    
     if not results:
-        print("⚠️ 找不到週報")
+        print("⚠️ 錯誤：找不到週報。請確認標題或使用 MASTER_PAGE_ID。")
         sys.exit(1)
+        
+    print(f"✅ 搜尋成功，找到最新週報: {results[0]['title']}")
     return results[0]
 
 def extract_all_project_links(report_body):
-    """抓取 Project 欄位中的所有連結"""
-    # 使用 lxml 解析器加速
+    # 使用 lxml 加速解析
     soup = BeautifulSoup(report_body, 'lxml')
     tables = soup.find_all('table')
     project_targets = []
@@ -117,20 +133,22 @@ def get_page_by_title(title):
         resp = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
         results = resp.json().get('results', [])
         if results: 
-            print("   ✅ 猜測成功！")
             return results[0]
     return None
 
-# --- 2. 內容處理邏輯 ---
+# --- 2. 內容處理邏輯 (V11: Lazy Check) ---
 
 def is_date_header(text):
-    return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text))
+    if not text: return False
+    # 只檢查前 50 個字元，避免長字串 regex 效能問題
+    return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text[:50]))
 
 def has_red_text(tag):
     """
     暴力字串搜尋 (極速)
     """
     if not isinstance(tag, Tag): return False
+    # 轉字串雖然有成本，但比遞迴 DOM 快，且只對 entries 做，次數少
     html_str = str(tag).lower()
     if 'rgb(255, 0, 0)' in html_str: return True
     if '#ff0000' in html_str: return True
@@ -142,22 +160,35 @@ def split_cell_content(cell_soup):
     entries = []
     current_entry = []
     
+    # 遇到這些標籤，直接視為內容，絕對不是標題
     SKIP_CHECK_TAGS = ['table', 'tbody', 'tr', 'td', 'ul', 'ol', 'ac:structured-macro', 'ac:image']
 
     for child in cell_soup.contents:
+        # 1. 忽略空白
         if isinstance(child, NavigableString) and not child.strip():
             if current_entry: current_entry.append(child)
             continue
         
         is_header = False
         
+        # 2. 快速過濾複雜標籤
         if isinstance(child, Tag) and child.name in SKIP_CHECK_TAGS:
             is_header = False
         else:
-            text = child.get_text() if isinstance(child, Tag) else str(child)
-            if is_date_header(text):
+            # 【V11 關鍵修正】：惰性文字讀取
+            # 不要用 get_text() 讀取全部！那會遍歷裡面包的巨大表格。
+            # 我們只看「第一段文字」就好。
+            first_text = ""
+            if isinstance(child, NavigableString):
+                first_text = str(child).strip()
+            elif isinstance(child, Tag):
+                # stripped_strings 是 generator，next() 只會拿第一個，瞬間完成
+                first_text = next(child.stripped_strings, '')
+            
+            if is_date_header(first_text):
                 is_header = True
 
+        # 3. 切割
         if is_header:
             if current_entry: entries.append(current_entry)
             current_entry = [child]
@@ -200,7 +231,7 @@ def get_or_create_history_table(soup, main_table):
     
     if not hist_table:
         hist_table = soup.new_tag('table')
-        # 複製表頭 (注意：這裡也要用 recursive=False)
+        # 複製表頭 (注意：recursive=False)
         main_thead_row = main_table.find('tr', recursive=False)
         if main_thead_row:
             hist_table.append(copy.copy(main_thead_row))
@@ -209,7 +240,6 @@ def get_or_create_history_table(soup, main_table):
     return hist_table
 
 def clean_project_page_content(html_content, page_title):
-    # 使用 lxml 解析
     soup = BeautifulSoup(html_content, 'lxml')
     changed = False
     
@@ -228,18 +258,15 @@ def clean_project_page_content(html_content, page_title):
         print(f"   ⚠️  [{page_title}] 找不到主表格，跳過。")
         return None
 
-    print(f"   🔍 [{page_title}] 找到主表格，開始分析...")
+    print(f"   🔍 [{page_title}] 找到主表格，開始極速分析...")
     sys.stdout.flush()
     
     tbody = main_table.find('tbody') or main_table
     
-    # 【關鍵修正】：加上 recursive=False
-    # 這確保我們只抓取「主表格」的列，不會抓到 Update 欄位裡面「巢狀表格」的列
+    # 【V10 修正保留】：recursive=False 避免抓到巢狀列
     rows = tbody.find_all('tr', recursive=False)
     
-    # 再次確認有沒有抓到列
     if not rows:
-        print("   ⚠️ 警告：主表格中沒有發現任何列 (Rows)")
         return None
 
     header_row = rows[0]
@@ -253,20 +280,23 @@ def clean_project_page_content(html_content, page_title):
     history_table_ref = None
     total_rows = len(rows) - 1
     
-    # 開始遍歷
     for i, row in enumerate(rows[1:]):
+        # 顯示進度
         if i % 2 == 0:
             sys.stdout.write(f"\r      處理 Item: {i+1}/{total_rows} ...")
             sys.stdout.flush()
 
-        # 同樣加上 recursive=False，確保只抓這一層的格子
         cols = row.find_all('td', recursive=False)
         
         if len(cols) <= max(item_idx, update_idx): continue
         
-        item_name = cols[item_idx].get_text(separator=' ', strip=True)
+        # 只取第一段文字做標題，避免卡頓
+        item_name_tag = cols[item_idx]
+        item_name = next(item_name_tag.stripped_strings, item_name_tag.get_text())[:50]
+        
         update_cell = cols[update_idx]
         
+        # 呼叫極速切割
         entries = split_cell_content(update_cell)
         
         if len(entries) <= KEEP_LIMIT:
@@ -307,7 +337,10 @@ def clean_project_page_content(html_content, page_title):
         for h_row in hist_rows:
             h_cols = h_row.find_all('td', recursive=False)
             if not h_cols: continue
-            if h_cols[item_idx].get_text(separator=' ', strip=True) == item_name:
+            
+            # 比對 Item 名稱 (模糊比對)
+            h_item_name = next(h_cols[item_idx].stripped_strings, h_cols[item_idx].get_text())[:50]
+            if h_item_name == item_name:
                 target_hist_row = h_row
                 break
         
@@ -351,7 +384,7 @@ def update_page(page_data, new_content):
     print("✅ 更新成功！")
 
 def main():
-    print("=== Confluence 專案頁面整理機器人 (V10: Recursive Fix) ===")
+    print("=== Confluence 專案頁面整理機器人 (V11: Lazy Check) ===")
     
     report = find_latest_report()
     project_targets = extract_all_project_links(report['body']['view']['value'])
