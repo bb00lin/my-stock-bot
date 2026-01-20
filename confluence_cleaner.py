@@ -108,51 +108,22 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- V16 核心：結構快篩防禦機制 ---
+# --- V17 核心：盲眼模式 (Blind Mode) ---
 
 def is_date_header(text):
     if not text: return False
-    # 只取前 50 字元檢查，避免 regex 卡死
-    return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text[:50]))
-
-def is_safe_to_read_text(tag):
-    """
-    【V16 核心】決定一個標籤是否「安全」到可以讀取文字。
-    如果標籤內包含大表格，讀取文字會觸發遍歷，導致卡頓。
-    """
-    # 1. 黑名單：這些標籤絕對不是標題
-    BLOCK_TAGS = ['table', 'tbody', 'thead', 'tr', 'td', 'ul', 'ol', 'ac:structured-macro', 'ac:layout-section']
-    if tag.name in BLOCK_TAGS:
-        return False
-    
-    # 2. 結構快篩：檢查直接子節點
-    # 如果直接子節點包含重型標籤，則判定此標籤為「容器」，不讀取文字
-    for child in tag.children:
-        if isinstance(child, Tag):
-            if child.name in BLOCK_TAGS:
-                return False
-            # 額外檢查：如果是 div 包 div 包 table 的情況
-            if child.name in ['div', 'p']:
-                # 這裡只做淺層檢查，如果還有孫節點是 table，也放棄
-                # find(recursive=False) 速度極快
-                if child.find(BLOCK_TAGS, recursive=False):
-                    return False
-
-    # 3. 數量限制：如果子節點太多，可能也是大內容，跳過
-    # 這裡轉 list 會有微小成本，但在大表格面前是救命稻草
-    # 使用 sum(1 for _) 避免建立 list 佔用記憶體
-    child_count = sum(1 for _ in tag.children)
-    if child_count > 20: 
-        return False
-
-    return True
+    # 只看前 30 字
+    return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text[:30]))
 
 def split_cell_content(cell_soup):
     entries = []
     current_entry = []
     
+    # 【V17 核心】：只允許讀取這些小型標籤
+    # 遇到 div, table, ul 等，絕對不讀取其文字，避免序列化大表格
+    SAFE_TAGS = ['p', 'span', 'strong', 'em', 'h1', 'h2', 'h3', 'h4', 'font']
+
     for child in cell_soup.contents:
-        # 1. 忽略純空白
         if isinstance(child, NavigableString) and not child.strip():
             if current_entry: current_entry.append(child)
             continue
@@ -160,15 +131,16 @@ def split_cell_content(cell_soup):
         is_header = False
         
         if isinstance(child, Tag):
-            # 【V16 修正】：先做結構快篩，確認安全才讀文字
-            if is_safe_to_read_text(child):
-                # 這裡讀取文字相對安全
+            # 只有當它是極其簡單的標籤時，才去讀取文字
+            # 這樣保證了我們永遠不會去碰那個大表格
+            if child.name in SAFE_TAGS:
+                # 簡單標籤讀取很快
                 txt = child.get_text().strip()
                 if is_date_header(txt):
                     is_header = True
-            else:
-                # 不安全（包含表格等），直接視為內容，is_header = False
-                pass
+            
+            # 如果 child.name 是 'div' 或 'table'，我們直接跳過 (is_header=False)
+            # 這樣就把它當作是上一筆日期的內容，一起搬移
         
         elif isinstance(child, NavigableString):
             if is_date_header(str(child).strip()):
@@ -183,31 +155,33 @@ def split_cell_content(cell_soup):
     if current_entry: entries.append(current_entry)
     return entries
 
-# --- 紅字檢查：依然保持安全模式 ---
-def is_red_style(tag):
+# --- 紅字檢查：同樣套用盲眼策略 ---
+def has_red_text_blind(tag):
+    if not isinstance(tag, Tag): return False
+    
+    # 1. 檢查自己 (極快)
     if tag.has_attr('style'):
         s = tag['style'].lower()
         if 'rgb(255, 0, 0)' in s or '#ff0000' in s or 'color: red' in s: return True
     if tag.name == 'font' and (tag.get('color') == 'red' or tag.get('color') == '#ff0000'): return True
-    return False
-
-def has_red_text_safe(tag):
-    if not isinstance(tag, Tag): return False
-    if is_red_style(tag): return True
     
-    # 禁區：絕對不進入大表格檢查紅字
-    NO_GO = ['table', 'ac:structured-macro', 'tbody', 'thead', 'tr', 'td']
-    if tag.name in NO_GO: return False
+    # 2. 禁區：遇到大容器，直接放棄檢查，回傳 False
+    # 這意味著如果紅字藏在表格裡，我們選擇「不保留」(或視同無紅字)，以換取程式不當機
+    # 這是為了效能的必要犧牲
+    BLOCK_TAGS = ['table', 'tbody', 'thead', 'tr', 'td', 'div', 'ul', 'ol', 'ac:structured-macro']
+    if tag.name in BLOCK_TAGS:
+        return False
 
+    # 3. 只對小型標籤做子節點檢查
     for child in tag.children:
         if isinstance(child, Tag):
-            if has_red_text_safe(child): return True
+            if has_red_text_blind(child): return True
     return False
 
 def check_entry_red(entry_nodes):
     for node in entry_nodes:
         if isinstance(node, Tag):
-            if has_red_text_safe(node): return True
+            if has_red_text_blind(node): return True
     return False
 
 def get_or_create_history_table(soup, main_table):
@@ -259,8 +233,6 @@ def clean_project_page_content(html_content, page_title):
     print(f"   🔍 [{page_title}] 找到主表格，分析中...")
     sys.stdout.flush()
     
-    # 使用 main_table 直接找 tr (兼容有無 tbody 的情況)
-    # recursive=False 是關鍵
     rows = main_table.find_all('tr', recursive=False)
     if not rows and main_table.find('tbody', recursive=False):
         rows = main_table.find('tbody', recursive=False).find_all('tr', recursive=False)
@@ -278,24 +250,26 @@ def clean_project_page_content(html_content, page_title):
     total_rows = len(rows) - 1
     
     for i, row in enumerate(rows[1:]):
-        # 每一行都印，確保沒死
+        # 每處理一列就回報
         sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...")
         sys.stdout.flush()
 
         cols = row.find_all('td', recursive=False)
         if len(cols) <= max(item_idx, update_idx): continue
         
-        # 安全取名
-        item_name_tag = cols[item_idx]
-        # 同樣使用安全檢查
-        if is_safe_to_read_text(item_name_tag):
-            item_name = item_name_tag.get_text().strip()[:50]
-        else:
-            item_name = "Complex Item Name"
+        # Item Name 也要安全讀取
+        item_col = cols[item_idx]
+        # 只讀取純文字或簡單標籤
+        item_name = "Item"
+        try:
+             # 這裡簡單處理，如果不安全就用預設值
+             if not item_col.find(['table', 'div']):
+                 item_name = item_col.get_text().strip()[:50]
+        except: pass
 
         update_cell = cols[update_idx]
         
-        # V16 執行結構快篩切割
+        # 執行 V17 盲眼切割
         entries = split_cell_content(update_cell)
         
         if len(entries) <= KEEP_LIMIT: continue
@@ -305,7 +279,7 @@ def clean_project_page_content(html_content, page_title):
         count = 0
         
         for entry in entries:
-            # 紅字檢查
+            # 盲眼檢查
             if check_entry_red(entry):
                 keep.append(entry)
                 continue
@@ -332,11 +306,12 @@ def clean_project_page_content(html_content, page_title):
             hc = hr.find_all('td', recursive=False)
             if not hc: continue
             
-            # 這裡也要安全讀取
-            h_name = ""
-            if is_safe_to_read_text(hc[item_idx]):
-                h_name = hc[item_idx].get_text().strip()[:50]
-                
+            h_name = "History Item"
+            try:
+                if not hc[item_idx].find(['table', 'div']):
+                    h_name = hc[item_idx].get_text().strip()[:50]
+            except: pass
+
             if h_name == item_name:
                 target_row = hr
                 break
@@ -369,7 +344,7 @@ def update_page(page_data, new_content):
     print("✅ 成功！")
 
 def main():
-    print("=== Confluence Cleaner (V16: Structure Quick-Scan) ===")
+    print("=== Confluence Cleaner (V17: Blind Mode) ===")
     report = find_latest_report()
     targets = extract_all_project_links(report['body']['view']['value'])
     if not targets: return
