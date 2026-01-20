@@ -121,7 +121,7 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- V28 邏輯 ---
+# --- V29: 精確過濾邏輯 ---
 
 def is_date_header(text):
     if not text: return False
@@ -149,20 +149,50 @@ def split_cell_content(cell_soup):
     if current_entry: entries.append(current_entry)
     return entries
 
-def check_entry_red(entry_nodes):
+def is_node_red(node):
+    """檢查單一節點是否為紅色 (V29)"""
     red_patterns = [
         r'color:\s*red', r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', 
-        r'#c9372c', r'#C9372C',
+        r'#c9372c', r'#C9372C', # 你的色碼
         r'rgb\(\s*255\s*,\s*0\s*,\s*0\s*\)', 
         r'rgb\(\s*255\s*,\s*86\s*,\s*48\s*\)', 
         r'rgb\(\s*201\s*,\s*55\s*,\s*44\s*\)',
         r'color:\s*rgb\(\s*2' 
     ]
     combined_regex = re.compile('|'.join(red_patterns), re.IGNORECASE)
-    for node in entry_nodes:
-        if isinstance(node, Tag):
-            if combined_regex.search(str(node)): return True
+    
+    if isinstance(node, Tag):
+        return bool(combined_regex.search(str(node)))
     return False
+
+def filter_entry_red_only(entry_nodes):
+    """
+    【V29 核心】：傳入一個 entry (日期+項目)，
+    回傳一個只包含紅字項目的新 entry。
+    如果完全沒有紅字，回傳 None。
+    """
+    if not entry_nodes: return None
+    
+    header = entry_nodes[0] # 假設第一個是日期
+    body_nodes = entry_nodes[1:]
+    
+    kept_body = []
+    for node in body_nodes:
+        # 逐行檢查：只有紅色才保留
+        if is_node_red(node):
+            kept_body.append(node)
+            
+    # 檢查標題本身是否紅色
+    header_is_red = is_node_red(header)
+    
+    # 規則：
+    # 1. 如果下方有紅色項目 -> 保留標題 + 紅色項目
+    # 2. 如果下方沒紅色項目，但標題是紅的 -> 保留標題
+    # 3. 如果都沒紅色 -> 放棄
+    if kept_body or header_is_red:
+        return [header] + kept_body
+    
+    return None
 
 def get_or_create_history_table(soup, main_table):
     macros = soup.find_all('ac:structured-macro', attrs={"ac:name": "expand"})
@@ -229,50 +259,63 @@ def clean_project_page_content(html_content, page_title):
         item_name = cols[item_idx].get_text().strip()[:50]
         entries = split_cell_content(update_cell)
         
-        # 【V28 核心修改】: 先掃描全部，抓紅字
+        # 【V29 核心】：先過濾，只留下紅字內容
+        filtered_entries = []
         for entry in entries:
-            if check_entry_red(entry):
-                # 這裡使用 deepcopy，避免後續操作影響
-                extracted_summary_items.append(copy.deepcopy(entry))
+            clean_entry = filter_entry_red_only(entry)
+            if clean_entry:
+                filtered_entries.append(clean_entry)
+                # 收集做為摘要 (deepcopy 保險)
+                extracted_summary_items.append(copy.deepcopy(clean_entry))
 
-        # 【V28】: 掃描完紅字後，才判斷要不要清理 (歸檔)
-        if len(entries) <= KEEP_LIMIT: 
-            continue
-            
-        keep = []; archive = []; count = 0
-        for entry in entries:
-            if check_entry_red(entry):
-                keep.append(entry)
-                continue
-            if count < KEEP_LIMIT: keep.append(entry); count += 1
-            else: archive.append(entry)
+        # 這裡的邏輯：如果原來的筆數 > 5，我們需要清理專案頁面
+        # 但清理時，我們使用 filtered_entries (只含紅字) 還是原始 entries？
+        # 根據你的要求「其他項目請刪除」，我們應該用 filtered_entries 回寫。
         
-        if not archive: continue
+        # 為了安全，我們先判斷數量。如果總筆數少，且我們有過濾掉黑字，那算不算變更？算。
+        # 如果過濾後的内容跟原來不一樣，就更新。
+        
+        # 重新組裝 Update Cell (只放紅字)
+        # 注意：這裡會把黑字從專案頁面上刪除！符合你的圖2要求。
+        
+        # 暫時保留前 KEEP_LIMIT 筆 (紅字過濾後)
+        keep = filtered_entries[:KEEP_LIMIT]
+        archive = filtered_entries[KEEP_LIMIT:] # 超過的紅字移到歷史 (如果有)
+        
+        # 還有那些「原本存在但因為是黑字被過濾掉」的資料，它們直接消失了 (符合刪除要求)
+        
+        # 判斷是否有變更：簡單比對一下字串長度或內容
+        # 這裡直接覆寫最保險
+        if not keep and not archive and not entries: continue # 原本就是空的
+        
+        # 如果原本有東西，但過濾後變空了 (代表全是黑字)，也要更新 (變空白)
+        
         changed = True
         update_cell.clear()
         for e in keep:
             for n in e: update_cell.append(n)
-        if not history_table_ref: history_table_ref = get_or_create_history_table(soup, main_table)
-        hist_rows = history_table_ref.find_all('tr', recursive=False)
-        target_row = None
-        for hr in hist_rows:
-            hc = hr.find_all('td', recursive=False)
-            if not hc: continue
-            if hc[item_idx].get_text().strip()[:50] == item_name: target_row = hr; break
-        if not target_row:
-            target_row = soup.new_tag('tr')
-            for _ in range(len(headers)): target_row.append(soup.new_tag('td'))
-            target_row.find_all('td')[item_idx].string = item_name
-            history_table_ref.append(target_row)
-        dest = target_row.find_all('td', recursive=False)[update_idx]
-        if dest.contents: dest.append(soup.new_tag('br'))
-        for e in archive:
-            for n in e: dest.append(n)
+        
+        if archive:
+            if not history_table_ref: history_table_ref = get_or_create_history_table(soup, main_table)
+            hist_rows = history_table_ref.find_all('tr', recursive=False)
+            target_row = None
+            for hr in hist_rows:
+                hc = hr.find_all('td', recursive=False)
+                if not hc: continue
+                if hc[item_idx].get_text().strip()[:50] == item_name: target_row = hr; break
+            if not target_row:
+                target_row = soup.new_tag('tr')
+                for _ in range(len(headers)): target_row.append(soup.new_tag('td'))
+                target_row.find_all('td')[item_idx].string = item_name
+                history_table_ref.append(target_row)
+            dest = target_row.find_all('td', recursive=False)[update_idx]
+            if dest.contents: dest.append(soup.new_tag('br'))
+            for e in archive:
+                for n in e: dest.append(n)
     
     print(f"\r      Processing Row {total_rows}/{total_rows} (Done)        ")
-    # 如果 summary 有抓到東西，印出來給你看
     if extracted_summary_items:
-        print(f"      📌 本專案發現 {len(extracted_summary_items)} 筆紅字")
+        print(f"      📌 本專案發現 {len(extracted_summary_items)} 組紅字摘要")
     
     return (str(soup) if changed else None), extracted_summary_items
 
@@ -323,19 +366,14 @@ def update_main_report_summary(main_report_data, summary_data):
         p_name = project_data['project']
         p_items = project_data['items']
         if not p_items: continue
-        
-        # 專案名稱 (粗體)
         name_tag = soup.new_tag('p')
         strong = soup.new_tag('strong'); strong.string = p_name
         name_tag.append(strong)
         cursor.insert_after(name_tag); cursor = name_tag
-        
-        # 項目
         for entry_nodes in p_items:
             item_container = soup.new_tag('p')
             for node in entry_nodes: item_container.append(copy.copy(node))
             cursor.insert_after(item_container); cursor = item_container
-            
         spacer = soup.new_tag('p'); spacer.append(soup.new_tag('br'))
         cursor.insert_after(spacer); cursor = spacer
 
@@ -351,7 +389,7 @@ def update_main_report_summary(main_report_data, summary_data):
     print("✅ 主週報更新成功！")
 
 def main():
-    print("=== Confluence Cleaner (V28: Scan-All Mode) ===")
+    print("=== Confluence Cleaner (V29: Line-by-Line Filter) ===")
     main_report = find_latest_report()
     targets = extract_all_project_links(main_report['body']['view']['value'])
     if not targets: return
@@ -367,7 +405,6 @@ def main():
         if not p: print("❌ 讀取失敗"); continue
         new_c, red_items = clean_project_page_content(p['body']['storage']['value'], p['title'])
         if red_items:
-            # print(f"   📌 收集到 {len(red_items)} 筆紅字摘要")
             summary_collection.append({'project': t['name'], 'items': red_items})
         if new_c: update_page(p, new_c)
         else: print("👌 專案頁面無需變更")
