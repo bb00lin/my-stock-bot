@@ -121,12 +121,35 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- V37改: 線性重組與過濾 ---
+# --- V36: 唯讀採集模式 ---
 
-def is_date_text(text):
+def is_date_header(text):
     if not text: return False
     return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text[:50]))
 
+def split_cell_content(cell_soup):
+    entries = []
+    current_entry = []
+    for child in cell_soup.contents:
+        if isinstance(child, NavigableString) and not child.strip():
+            if current_entry: current_entry.append(child)
+            continue
+        is_header = False
+        if isinstance(child, Tag) and child.name in ['p', 'span', 'div']:
+            txt = child.get_text().strip()
+            if is_date_header(txt): is_header = True
+        elif isinstance(child, NavigableString):
+            if is_date_header(str(child).strip()): is_header = True
+        
+        if is_header:
+            if current_entry: entries.append(current_entry)
+            current_entry = [child]
+        else:
+            current_entry.append(child)
+    if current_entry: entries.append(current_entry)
+    return entries
+
+# 紅色檢查 (V32精確版)
 def is_node_red(node):
     red_patterns = [
         r'color:\s*red', r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', 
@@ -135,48 +158,57 @@ def is_node_red(node):
         r'--ds-text-danger', r'--ds-icon-accent-red'
     ]
     combined_regex = re.compile('|'.join(red_patterns), re.IGNORECASE)
-    
-    if isinstance(node, Tag):
-        if node.has_attr('style') and combined_regex.search(node['style']): return True
-        if node.name == 'font' and node.has_attr('color') and combined_regex.search(node['color']): return True
-    return False
+    return bool(combined_regex.search(str(node)))
 
-def flatten_html_to_lines(node, current_line=None, all_lines=None):
-    if current_line is None: current_line = []
-    if all_lines is None: all_lines = []
+# 【V35/V36 核心】：扁平化清洗 (Flatten & Filter)
+# 這個函式只負責產生「乾淨的紅字列表」，用於摘要
+def clean_entry_content(entry_nodes):
+    cleaned_nodes = []
+    has_red_content = False
     
-    block_tags = ['p', 'div', 'li', 'br', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']
+    for node in entry_nodes:
+        # 1. 紅色節點 -> 保留
+        if is_node_red(node):
+            cleaned_nodes.append(copy.copy(node))
+            has_red_content = True
+            continue
+            
+        # 2. 文字節點
+        if isinstance(node, NavigableString):
+            txt = str(node).strip()
+            # 日期 -> 保留
+            if is_date_header(txt):
+                cleaned_nodes.append(copy.copy(node))
+            # 黑字 -> 丟棄
+            continue
+            
+        # 3. 標籤 (非紅)
+        if isinstance(node, Tag):
+            if node.name == 'br':
+                cleaned_nodes.append(copy.copy(node))
+                continue
+                
+            # 容器 -> 遞迴檢查
+            new_container = copy.copy(node)
+            new_container.clear()
+            child_results = clean_entry_content(node.contents)
+            
+            if child_results:
+                for child in child_results:
+                    new_container.append(child)
+                    if is_node_red(child): has_red_content = True
+                cleaned_nodes.append(new_container)
     
-    if isinstance(node, Tag):
-        if node.name == 'br':
-            if current_line: all_lines.append(current_line[:])
-            current_line.clear()
-            return
+    # 檢查是否含有紅字 (如果不含紅字，連日期都不留)
+    actual_red_found = False
+    for n in cleaned_nodes:
+        if is_node_red(n): actual_red_found = True
+        if isinstance(n, Tag) and n.find(is_node_red): actual_red_found = True
         
-        is_block = node.name in block_tags
-        if is_block and current_line:
-            all_lines.append(current_line[:])
-            current_line.clear()
-            
-        for child in node.contents:
-            flatten_html_to_lines(child, current_line, all_lines)
-            
-        if is_block and current_line:
-            all_lines.append(current_line[:])
-            current_line.clear()
-            
-    elif isinstance(node, NavigableString):
-        if node.strip():
-            current_line.append(node)
-
-    return all_lines
-
-def is_element_red_context(element):
-    curr = element
-    while curr and curr.name != 'td' and curr.name != 'body':
-        if is_node_red(curr): return True
-        curr = curr.parent
-    return False
+    if actual_red_found:
+        return cleaned_nodes
+    else:
+        return []
 
 def clean_project_page_content(html_content, page_title):
     soup = BeautifulSoup(html_content, 'lxml')
@@ -192,7 +224,7 @@ def clean_project_page_content(html_content, page_title):
         print(f"   ⚠️  [{page_title}] 找不到主表格，跳過。")
         return None, []
 
-    print(f"   🔍 [{page_title}] 找到主表格，執行線性重組...")
+    print(f"   🔍 [{page_title}] 找到主表格，開始採集紅字...")
     sys.stdout.flush()
     rows = main_table.find_all('tr', recursive=False)
     if not rows and main_table.find('tbody', recursive=False):
@@ -215,58 +247,26 @@ def clean_project_page_content(html_content, page_title):
         update_cell = cols[update_idx]
         if update_cell.find('table'): continue
 
-        raw_lines = []
-        flatten_html_to_lines(update_cell, None, raw_lines)
+        entries = split_cell_content(update_cell)
         
-        groups = []
-        current_group = {'header': [], 'items': []}
-        
-        for line_nodes in raw_lines:
-            line_text = "".join([str(n) for n in line_nodes]).strip()
-            
-            if is_date_text(line_text):
-                if current_group['header']: groups.append(current_group)
-                current_group = {'header': line_nodes, 'items': []}
-            else:
-                if line_nodes: current_group['items'].append(line_nodes)
-        
-        if current_group['header']: groups.append(current_group)
-            
-        for group in groups:
-            header_nodes = group['header']
-            item_lines = group['items']
-            valid_items = []
-            
-            for line_nodes in item_lines:
-                is_line_red = False
-                for node in line_nodes:
-                    if is_element_red_context(node):
-                        is_line_red = True
-                        break
-                if is_line_red: valid_items.append(line_nodes)
-            
-            header_is_red = False
-            for node in header_nodes:
-                if is_element_red_context(node):
-                    header_is_red = True
-                    break
-            
-            if valid_items or header_is_red:
-                reconstructed_entry = []
-                for n in header_nodes: reconstructed_entry.append(copy.copy(n))
-                for item_line in valid_items:
-                    reconstructed_entry.append(soup.new_tag('br'))
-                    for n in item_line: reconstructed_entry.append(copy.copy(n))
-                
-                extracted_summary_items.append(reconstructed_entry)
+        # 執行採集 (不修改原始 entries)
+        for entry in entries:
+            cleaned_entry = clean_entry_content(entry)
+            if cleaned_entry:
+                extracted_summary_items.append(copy.deepcopy(cleaned_entry))
 
+        # 【V36 關鍵】：這裡不執行任何修改 (changed = False)
+        # 所以不管 KEEP_LIMIT 是多少，來源頁面都不會變
+    
     print(f"\r      Scanning Row {total_rows}/{total_rows} (Done)        ")
     if extracted_summary_items:
         print(f"      📌 本專案採集到 {len(extracted_summary_items)} 組紅字摘要")
     
+    # 回傳 None 表示不更新頁面
     return None, extracted_summary_items
 
 def update_page(page_data, new_content):
+    # V36: 這個函式實際上不會被呼叫到，因為 clean_project_page_content 恆回傳 None
     pass
 
 def update_main_report_summary(main_report_data, summary_data):
@@ -311,25 +311,18 @@ def update_main_report_summary(main_report_data, summary_data):
         print(f"   👉 [SUMMARY] 寫入專案: {p_name}")
         sys.stdout.flush()
         
-        # 標題 (Project Name) - 保持黑色 (預設)
         name_tag = soup.new_tag('p')
         strong = soup.new_tag('strong'); strong.string = p_name
         name_tag.append(strong)
         cursor.insert_after(name_tag); cursor = name_tag
         
-        # 內容項目 - 強制標記為紅色 (#C9372C)
         for entry_nodes in p_items:
             preview_txt = "".join([n.get_text() if hasattr(n, 'get_text') else str(n) for n in entry_nodes]).strip().replace('\n', ' ')
             print(f"      + [寫入] {preview_txt[:60]}...")
             sys.stdout.flush() 
 
             item_container = soup.new_tag('p')
-            # 【關鍵修改】: 強制設定紅色樣式，解決文字剝離後變黑的問題
-            item_container['style'] = "color: #C9372C;"
-            
-            for node in entry_nodes:
-                item_container.append(copy.copy(node))
-                
+            for node in entry_nodes: item_container.append(copy.copy(node))
             cursor.insert_after(item_container); cursor = item_container
             
         spacer = soup.new_tag('p'); spacer.append(soup.new_tag('br'))
@@ -347,7 +340,7 @@ def update_main_report_summary(main_report_data, summary_data):
     print("✅ 主週報更新成功！")
 
 def main():
-    print("=== Confluence Cleaner (V38: Forced Red Output) ===")
+    print("=== Confluence Cleaner (V36: Read-Only Collector) ===")
     main_report = find_latest_report()
     targets = extract_all_project_links(main_report['body']['view']['value'])
     if not targets: return
@@ -362,9 +355,13 @@ def main():
             p = get_page_by_title(t['title'])
         if not p: print("❌ 讀取失敗"); continue
         
+        # 執行採集 (注意：這裡不會有更新操作)
         new_c, red_items = clean_project_page_content(p['body']['storage']['value'], p['title'])
+        
         if red_items:
             summary_collection.append({'project': t['name'], 'items': red_items})
+        
+        # 因為 new_c 恆為 None，所以 update_page 永遠不會執行
         print("👌 專案頁面無需變更 (唯讀模式)")
 
     print("-" * 30)
