@@ -20,7 +20,6 @@ if not RAW_URL or not USERNAME or not API_TOKEN:
     sys.exit(1)
 
 parsed = urlparse(RAW_URL)
-# 取得網站根目錄 (例如 https://qsiaiot.atlassian.net)
 HOST_URL = f"{parsed.scheme}://{parsed.netloc}"
 API_ENDPOINT = f"{HOST_URL}/wiki/rest/api/content"
 
@@ -32,7 +31,7 @@ def find_latest_report():
     if MASTER_PAGE_ID:
         print(f"🎯 偵測到 MASTER_PAGE_ID ({MASTER_PAGE_ID})")
         url = f"{API_ENDPOINT}/{MASTER_PAGE_ID}"
-        params = {'expand': 'body.view,version'}
+        params = {'expand': 'body.view,body.storage,version'}
         try:
             r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
             r.raise_for_status()
@@ -44,7 +43,7 @@ def find_latest_report():
     print("🔍 正在搜尋最新週報...")
     cql = 'type=page AND title ~ "WeeklyReport*" ORDER BY created DESC'
     url = f"{API_ENDPOINT}/search"
-    params = {'cql': cql, 'limit': 1, 'expand': 'body.view'}
+    params = {'cql': cql, 'limit': 1, 'expand': 'body.view,body.storage,version'}
     r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
     r.raise_for_status()
     results = r.json().get('results', [])
@@ -54,20 +53,12 @@ def find_latest_report():
     print(f"✅ 搜尋成功: {results[0]['title']}")
     return results[0]
 
-# --- V20 新增：網址追蹤解析器 ---
+# --- 網址追蹤 ---
 def resolve_real_page_id(href_link):
-    """
-    追蹤網址重導向，獲取最終的 Page ID
-    """
     if not href_link: return None
-    
-    # 組合完整網址
-    if href_link.startswith('/'):
-        full_url = f"{HOST_URL}{href_link}"
-    else:
-        full_url = href_link
+    if href_link.startswith('/'): full_url = f"{HOST_URL}{href_link}"
+    else: full_url = href_link
 
-    # 如果網址本身就有 ID，直接回傳 (省時間)
     if 'pageId=' in full_url:
         qs = parse_qs(urlparse(full_url).query)
         if 'pageId' in qs: return qs['pageId'][0]
@@ -75,24 +66,14 @@ def resolve_real_page_id(href_link):
     m = re.search(r'/pages/(\d+)', full_url)
     if m: return m.group(1)
 
-    # 如果看不出來，發送 HEAD 請求追蹤 (Trace)
     try:
-        # print(f"   ☁️ 追蹤網址: {href_link[:30]}...", end='')
-        # HEAD 請求很快，只拿檔頭不拿內容
         r = requests.head(full_url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), allow_redirects=True, timeout=10)
         final_url = r.url
-        
-        # 從最終網址抓 ID
         qs = parse_qs(urlparse(final_url).query)
-        if 'pageId' in qs: 
-            return qs['pageId'][0]
-        
+        if 'pageId' in qs: return qs['pageId'][0]
         m = re.search(r'/pages/(\d+)', final_url)
         if m: return m.group(1)
-        
-    except:
-        pass
-    
+    except: pass
     return None
 
 def extract_all_project_links(report_body):
@@ -114,29 +95,20 @@ def extract_all_project_links(report_body):
                     for link in cols[proj_idx].find_all('a'):
                         link_text = link.get_text().strip()
                         href = link.get('href', '')
-                        
                         target = {'name': link_text}
                         
-                        # 1. 優先用 data-id
                         pid = link.get('data-linked-resource-id')
-                        if pid:
-                            target['id'] = pid
+                        if pid: target['id'] = pid
                         else:
-                            # 2. 如果沒有，使用 V20 網址追蹤術
                             real_id = resolve_real_page_id(href)
-                            if real_id:
-                                target['id'] = real_id
-                            else:
-                                # 3. 真的沒辦法才用標題猜 (最後手段)
-                                target['title'] = link_text
+                            if real_id: target['id'] = real_id
+                            else: target['title'] = link_text
                         
                         if target.get('id') or target.get('title'):
-                            # 去重
                             exists = False
                             for t in project_targets:
                                 if t.get('id') and t['id'] == target.get('id'): exists = True
-                            if not exists:
-                                project_targets.append(target)
+                            if not exists: project_targets.append(target)
             break 
     return project_targets
 
@@ -160,7 +132,7 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- V18 內容切割邏輯 (避雷針版) ---
+# --- 內容切割與紅字邏輯 ---
 
 def is_date_header(text):
     if not text: return False
@@ -228,6 +200,7 @@ def get_or_create_history_table(soup, main_table):
 def clean_project_page_content(html_content, page_title):
     soup = BeautifulSoup(html_content, 'lxml')
     changed = False
+    extracted_summary_items = []
     
     main_table = None
     all_tables = soup.find_all('table')
@@ -240,7 +213,7 @@ def clean_project_page_content(html_content, page_title):
             
     if not main_table:
         print(f"   ⚠️  [{page_title}] 找不到主表格，跳過。")
-        return None
+        return None, []
 
     print(f"   🔍 [{page_title}] 找到主表格，分析中...")
     sys.stdout.flush()
@@ -249,20 +222,19 @@ def clean_project_page_content(html_content, page_title):
     if not rows and main_table.find('tbody', recursive=False):
         rows = main_table.find('tbody', recursive=False).find_all('tr', recursive=False)
 
-    if not rows: return None
+    if not rows: return None, []
 
     header_row = rows[0]
     headers = [c.get_text().strip() for c in header_row.find_all(['th', 'td'], recursive=False)]
     try:
         item_idx = headers.index("Item")
         update_idx = headers.index("Update")
-    except ValueError: return None
+    except ValueError: return None, []
 
     history_table_ref = None
     total_rows = len(rows) - 1
     
     for i, row in enumerate(rows[1:]):
-        # 進度條
         sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...")
         sys.stdout.flush()
 
@@ -284,9 +256,12 @@ def clean_project_page_content(html_content, page_title):
         count = 0
         
         for entry in entries:
-            if check_entry_red(entry):
+            is_red = check_entry_red(entry)
+            if is_red:
                 keep.append(entry)
+                extracted_summary_items.append(copy.deepcopy(entry)) 
                 continue
+            
             if count < KEEP_LIMIT:
                 keep.append(entry)
                 count += 1
@@ -325,10 +300,10 @@ def clean_project_page_content(html_content, page_title):
     
     print(f"\r      Processing Row {total_rows}/{total_rows} (Done)        ")
     sys.stdout.flush()
-    return str(soup) if changed else None
+    return (str(soup) if changed else None), extracted_summary_items
 
 def update_page(page_data, new_content):
-    print(f"💾 儲存: {page_data['title']}...")
+    print(f"💾 儲存專案: {page_data['title']}...")
     url = f"{API_ENDPOINT}/{page_data['id']}"
     payload = {
         "version": {"number": page_data['version']['number'] + 1, "minorEdit": True},
@@ -339,18 +314,130 @@ def update_page(page_data, new_content):
     requests.put(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), headers=get_headers(), data=json.dumps(payload)).raise_for_status()
     print("✅ 成功！")
 
+# --- V22: 指定區塊更新邏輯 ---
+def update_main_report_summary(main_report_data, summary_data):
+    if not summary_data:
+        print("📭 沒有紅字摘要，跳過更新。")
+        return
+
+    print(f"\n📝 正在更新主週報指定區塊: {main_report_data['title']}...")
+    
+    html_content = main_report_data['body']['storage']['value']
+    soup = BeautifulSoup(html_content, 'lxml')
+    
+    # 定義分隔線 (用戶指定)
+    SEPARATOR = "-------------------------------------"
+    
+    # 1. 尋找分隔線
+    # 由於 Confluence storage 可能把分隔線放在 <p> 裡，我們搜尋包含該字串的標籤
+    separators = []
+    # 使用 regex 寬鬆匹配 (避免空白造成找不到)
+    sep_pattern = re.compile(r'-{20,}')
+    
+    for tag in soup.find_all(string=sep_pattern):
+        # 找到包含分隔線的 parent tag (通常是 p 或 div)
+        parent = tag.find_parent(['p', 'div'])
+        if parent:
+            separators.append(parent)
+        else:
+            # 如果是裸露的文字，包裝一下
+            separators.append(tag)
+
+    # 2. 判斷狀況
+    target_start = None
+    target_end = None
+    
+    if len(separators) >= 2:
+        print("   ✅ 找到現有區塊，準備清空並覆寫...")
+        target_start = separators[-2] # 倒數第二個 (開始)
+        target_end = separators[-1]   # 倒數第一個 (結束)
+        
+        # 清除中間的內容
+        curr = target_start.next_sibling
+        while curr and curr != target_end:
+            next_node = curr.next_sibling
+            # 移除 curr
+            if isinstance(curr, Tag) or isinstance(curr, NavigableString):
+                curr.extract()
+            curr = next_node
+            
+    else:
+        print("   ⚠️ 未找到完整區塊，將在頁面最下方新增...")
+        # 建立新的區塊
+        target_start = soup.new_tag('p')
+        target_start.string = SEPARATOR
+        
+        target_end = soup.new_tag('p')
+        target_end.string = SEPARATOR
+        
+        soup.append(target_start)
+        soup.append(target_end)
+
+    # 3. 寫入新內容 (插入在 target_start 之後)
+    # 我們要逆序插入，確保順序正確 (因為 insert_after 永遠插在該元件正後方)
+    # 或者我們用一個 cursor 指標
+    cursor = target_start
+    
+    for project_data in summary_data:
+        p_name = project_data['project']
+        p_items = project_data['items']
+        
+        if not p_items: continue
+        
+        # 插入專案名稱 (第一列)
+        name_tag = soup.new_tag('p')
+        strong = soup.new_tag('strong')
+        strong.string = p_name
+        name_tag.append(strong)
+        
+        cursor.insert_after(name_tag)
+        cursor = name_tag # 移動指標
+        
+        # 插入項目 (下一列開始)
+        for entry_nodes in p_items:
+            # 建立一個容器來放這個項目 (保持格式)
+            # 使用 div 或 p
+            item_container = soup.new_tag('p')
+            
+            # entry_nodes 是一組 HTML nodes
+            for node in entry_nodes:
+                item_container.append(copy.copy(node))
+            
+            cursor.insert_after(item_container)
+            cursor = item_container
+            
+        # 專案間加個空行區隔 (可選)
+        spacer = soup.new_tag('p')
+        spacer.append(soup.new_tag('br'))
+        cursor.insert_after(spacer)
+        cursor = spacer
+
+    print(f"💾 儲存主週報...")
+    url = f"{API_ENDPOINT}/{main_report_data['id']}"
+    payload = {
+        "version": {"number": main_report_data['version']['number'] + 1, "minorEdit": True},
+        "title": main_report_data['title'],
+        "type": "page",
+        "body": {"storage": {"value": str(soup), "representation": "storage"}}
+    }
+    requests.put(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), headers=get_headers(), data=json.dumps(payload)).raise_for_status()
+    print("✅ 主週報更新成功！")
+
+
 def main():
-    print("=== Confluence Cleaner (V20: Link Tracer) ===")
-    report = find_latest_report()
-    targets = extract_all_project_links(report['body']['view']['value'])
+    print("=== Confluence Cleaner (V22: Custom Zone Writer) ===")
+    
+    main_report = find_latest_report()
+    targets = extract_all_project_links(main_report['body']['view']['value'])
     if not targets: return
+    
     print(f"📋 找到 {len(targets)} 個專案")
+    summary_collection = []
+
     for t in targets:
         print(f"\n🚀 {t['name']}")
         p = None
-        if 'id' in t:
-            # V20: 如果有 ID (包含追蹤到的)，直接用 ID
-            p = get_page_by_id(t['id'])
+        if 'id' in t: p = get_page_by_id(t['id'])
         elif 'title' in t:
             print(f"   使用解析標題: {t['title']}")
             p = get_page_by_title(t['title'])
@@ -358,9 +445,21 @@ def main():
         if not p:
             print("❌ 讀取失敗")
             continue
-        new_c = clean_project_page_content(p['body']['storage']['value'], p['title'])
+            
+        new_c, red_items = clean_project_page_content(p['body']['storage']['value'], p['title'])
+        
+        if red_items:
+            print(f"   📌 收集到 {len(red_items)} 筆紅字摘要")
+            summary_collection.append({'project': t['name'], 'items': red_items})
+        
         if new_c: update_page(p, new_c)
-        else: print("👌 無需變更")
+        else: print("👌 專案頁面無需變更")
+
+    print("-" * 30)
+    if summary_collection:
+        update_main_report_summary(main_report, summary_collection)
+    else:
+        print("📭 沒有紅字摘要，跳過更新。")
 
 if __name__ == "__main__":
     main()
