@@ -41,7 +41,8 @@ def find_latest_report():
 
 def extract_all_project_links(report_body):
     """抓取 Project 欄位中的所有連結"""
-    soup = BeautifulSoup(report_body, 'html.parser')
+    # 使用 lxml 解析器加速
+    soup = BeautifulSoup(report_body, 'lxml')
     tables = soup.find_all('table')
     project_targets = []
     
@@ -120,35 +121,27 @@ def get_page_by_title(title):
             return results[0]
     return None
 
-# --- 2. 內容處理邏輯 (V9: 字串暴力搜尋版) ---
+# --- 2. 內容處理邏輯 ---
 
 def is_date_header(text):
     return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text))
 
 def has_red_text(tag):
     """
-    【V9 核心修改】：暴力字串搜尋
-    直接將整個 Tag (含所有子節點/表格) 轉成 String，然後搜尋關鍵字。
-    這比任何 DOM 遍歷 (recursive find) 都要快 100 倍以上。
+    暴力字串搜尋 (極速)
     """
     if not isinstance(tag, Tag): return False
-    
-    # 轉成小寫字串
     html_str = str(tag).lower()
-    
-    # 直接檢查樣式關鍵字
     if 'rgb(255, 0, 0)' in html_str: return True
     if '#ff0000' in html_str: return True
     if 'color: red' in html_str: return True
     if 'color:red' in html_str: return True
-    
     return False
 
 def split_cell_content(cell_soup):
     entries = []
     current_entry = []
     
-    # 這些標籤絕對視為內容，直接跳過文字解析
     SKIP_CHECK_TAGS = ['table', 'tbody', 'tr', 'td', 'ul', 'ol', 'ac:structured-macro', 'ac:image']
 
     for child in cell_soup.contents:
@@ -158,7 +151,6 @@ def split_cell_content(cell_soup):
         
         is_header = False
         
-        # 遇到大物件直接視為內容 (False)
         if isinstance(child, Tag) and child.name in SKIP_CHECK_TAGS:
             is_header = False
         else:
@@ -178,7 +170,6 @@ def split_cell_content(cell_soup):
 def check_entry_red(entry_nodes):
     for node in entry_nodes:
         if isinstance(node, Tag):
-            # 使用 V9 的暴力字串檢查，瞬間完成
             if has_red_text(node): return True
     return False
 
@@ -209,7 +200,8 @@ def get_or_create_history_table(soup, main_table):
     
     if not hist_table:
         hist_table = soup.new_tag('table')
-        main_thead_row = main_table.find('tr')
+        # 複製表頭 (注意：這裡也要用 recursive=False)
+        main_thead_row = main_table.find('tr', recursive=False)
         if main_thead_row:
             hist_table.append(copy.copy(main_thead_row))
         body.append(hist_table)
@@ -217,7 +209,8 @@ def get_or_create_history_table(soup, main_table):
     return hist_table
 
 def clean_project_page_content(html_content, page_title):
-    soup = BeautifulSoup(html_content, 'html.parser')
+    # 使用 lxml 解析
+    soup = BeautifulSoup(html_content, 'lxml')
     changed = False
     
     main_table = None
@@ -235,14 +228,22 @@ def clean_project_page_content(html_content, page_title):
         print(f"   ⚠️  [{page_title}] 找不到主表格，跳過。")
         return None
 
-    print(f"   🔍 [{page_title}] 找到主表格，開始極速分析...")
+    print(f"   🔍 [{page_title}] 找到主表格，開始分析...")
     sys.stdout.flush()
     
     tbody = main_table.find('tbody') or main_table
-    rows = tbody.find_all('tr')
     
+    # 【關鍵修正】：加上 recursive=False
+    # 這確保我們只抓取「主表格」的列，不會抓到 Update 欄位裡面「巢狀表格」的列
+    rows = tbody.find_all('tr', recursive=False)
+    
+    # 再次確認有沒有抓到列
+    if not rows:
+        print("   ⚠️ 警告：主表格中沒有發現任何列 (Rows)")
+        return None
+
     header_row = rows[0]
-    headers = [cell.get_text().strip() for cell in header_row.find_all(['th', 'td'])]
+    headers = [cell.get_text().strip() for cell in header_row.find_all(['th', 'td'], recursive=False)]
     try:
         item_idx = headers.index("Item")
         update_idx = headers.index("Update")
@@ -252,13 +253,15 @@ def clean_project_page_content(html_content, page_title):
     history_table_ref = None
     total_rows = len(rows) - 1
     
+    # 開始遍歷
     for i, row in enumerate(rows[1:]):
-        # 簡單進度回報
         if i % 2 == 0:
             sys.stdout.write(f"\r      處理 Item: {i+1}/{total_rows} ...")
             sys.stdout.flush()
 
-        cols = row.find_all('td')
+        # 同樣加上 recursive=False，確保只抓這一層的格子
+        cols = row.find_all('td', recursive=False)
+        
         if len(cols) <= max(item_idx, update_idx): continue
         
         item_name = cols[item_idx].get_text(separator=' ', strip=True)
@@ -274,7 +277,6 @@ def clean_project_page_content(html_content, page_title):
         count = 0
         
         for entry in entries:
-            # V9 紅字檢查：即使是超大表格，因為轉成 string 檢查，也是瞬間完成
             is_red = check_entry_red(entry)
             if is_red:
                 keep_entries.append(entry)
@@ -299,11 +301,11 @@ def clean_project_page_content(html_content, page_title):
         if history_table_ref is None:
             history_table_ref = get_or_create_history_table(soup, main_table)
             
-        hist_rows = history_table_ref.find_all('tr')
+        hist_rows = history_table_ref.find_all('tr', recursive=False)
         target_hist_row = None
         
         for h_row in hist_rows:
-            h_cols = h_row.find_all('td')
+            h_cols = h_row.find_all('td', recursive=False)
             if not h_cols: continue
             if h_cols[item_idx].get_text(separator=' ', strip=True) == item_name:
                 target_hist_row = h_row
@@ -316,7 +318,7 @@ def clean_project_page_content(html_content, page_title):
             target_hist_row.find_all('td')[item_idx].string = item_name
             history_table_ref.append(target_hist_row)
             
-        hist_update_cell = target_hist_row.find_all('td')[update_idx]
+        hist_update_cell = target_hist_row.find_all('td', recursive=False)[update_idx]
         if hist_update_cell.contents:
             hist_update_cell.append(soup.new_tag('br'))
             
@@ -349,7 +351,7 @@ def update_page(page_data, new_content):
     print("✅ 更新成功！")
 
 def main():
-    print("=== Confluence 專案頁面整理機器人 (V9: Nuclear String Search) ===")
+    print("=== Confluence 專案頁面整理機器人 (V10: Recursive Fix) ===")
     
     report = find_latest_report()
     project_targets = extract_all_project_links(report['body']['view']['value'])
