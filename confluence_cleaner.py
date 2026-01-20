@@ -161,11 +161,22 @@ def split_cell_content(cell_soup):
     if current_entry: entries.append(current_entry)
     return entries
 
+# 【V23 關鍵修改】：擴充紅字定義
 def check_entry_red(entry_nodes):
+    # Confluence Cloud 常用的紅色色碼
+    RED_CODES = [
+        'color: red', 'rgb(255, 0, 0)', '#ff0000', # 標準紅
+        '#de350b', # Atlassian Red (最常見)
+        '#bf2600', # Atlassian Dark Red
+        '#ff5630', # Atlassian Light Red
+        '#ce0000'  # 其他變體
+    ]
+    
     for node in entry_nodes:
         if isinstance(node, Tag):
             s = str(node).lower()
-            if 'color: red' in s or 'rgb(255, 0, 0)' in s or '#ff0000' in s: return True
+            for code in RED_CODES:
+                if code in s: return True
     return False
 
 def get_or_create_history_table(soup, main_table):
@@ -256,9 +267,11 @@ def clean_project_page_content(html_content, page_title):
         count = 0
         
         for entry in entries:
+            # V23: 廣譜紅字檢查
             is_red = check_entry_red(entry)
             if is_red:
                 keep.append(entry)
+                # 深層複製以確保樣式保留
                 extracted_summary_items.append(copy.deepcopy(entry)) 
                 continue
             
@@ -314,7 +327,7 @@ def update_page(page_data, new_content):
     requests.put(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), headers=get_headers(), data=json.dumps(payload)).raise_for_status()
     print("✅ 成功！")
 
-# --- V22: 指定區塊更新邏輯 ---
+# --- 指定區塊更新邏輯 ---
 def update_main_report_summary(main_report_data, summary_data):
     if not summary_data:
         print("📭 沒有紅字摘要，跳過更新。")
@@ -325,57 +338,42 @@ def update_main_report_summary(main_report_data, summary_data):
     html_content = main_report_data['body']['storage']['value']
     soup = BeautifulSoup(html_content, 'lxml')
     
-    # 定義分隔線 (用戶指定)
     SEPARATOR = "-------------------------------------"
     
     # 1. 尋找分隔線
-    # 由於 Confluence storage 可能把分隔線放在 <p> 裡，我們搜尋包含該字串的標籤
     separators = []
-    # 使用 regex 寬鬆匹配 (避免空白造成找不到)
     sep_pattern = re.compile(r'-{20,}')
     
     for tag in soup.find_all(string=sep_pattern):
-        # 找到包含分隔線的 parent tag (通常是 p 或 div)
         parent = tag.find_parent(['p', 'div'])
-        if parent:
-            separators.append(parent)
-        else:
-            # 如果是裸露的文字，包裝一下
-            separators.append(tag)
+        if parent: separators.append(parent)
+        else: separators.append(tag)
 
     # 2. 判斷狀況
     target_start = None
-    target_end = None
     
     if len(separators) >= 2:
         print("   ✅ 找到現有區塊，準備清空並覆寫...")
-        target_start = separators[-2] # 倒數第二個 (開始)
-        target_end = separators[-1]   # 倒數第一個 (結束)
+        target_start = separators[-2]
+        target_end = separators[-1]
         
-        # 清除中間的內容
         curr = target_start.next_sibling
         while curr and curr != target_end:
             next_node = curr.next_sibling
-            # 移除 curr
             if isinstance(curr, Tag) or isinstance(curr, NavigableString):
                 curr.extract()
             curr = next_node
             
     else:
         print("   ⚠️ 未找到完整區塊，將在頁面最下方新增...")
-        # 建立新的區塊
         target_start = soup.new_tag('p')
         target_start.string = SEPARATOR
-        
         target_end = soup.new_tag('p')
         target_end.string = SEPARATOR
-        
         soup.append(target_start)
         soup.append(target_end)
 
-    # 3. 寫入新內容 (插入在 target_start 之後)
-    # 我們要逆序插入，確保順序正確 (因為 insert_after 永遠插在該元件正後方)
-    # 或者我們用一個 cursor 指標
+    # 3. 寫入新內容
     cursor = target_start
     
     for project_data in summary_data:
@@ -384,29 +382,25 @@ def update_main_report_summary(main_report_data, summary_data):
         
         if not p_items: continue
         
-        # 插入專案名稱 (第一列)
+        # 專案名稱
         name_tag = soup.new_tag('p')
         strong = soup.new_tag('strong')
         strong.string = p_name
         name_tag.append(strong)
         
         cursor.insert_after(name_tag)
-        cursor = name_tag # 移動指標
+        cursor = name_tag
         
-        # 插入項目 (下一列開始)
+        # 項目
         for entry_nodes in p_items:
-            # 建立一個容器來放這個項目 (保持格式)
-            # 使用 div 或 p
             item_container = soup.new_tag('p')
-            
-            # entry_nodes 是一組 HTML nodes
             for node in entry_nodes:
                 item_container.append(copy.copy(node))
             
             cursor.insert_after(item_container)
             cursor = item_container
             
-        # 專案間加個空行區隔 (可選)
+        # 間隔
         spacer = soup.new_tag('p')
         spacer.append(soup.new_tag('br'))
         cursor.insert_after(spacer)
@@ -425,7 +419,7 @@ def update_main_report_summary(main_report_data, summary_data):
 
 
 def main():
-    print("=== Confluence Cleaner (V22: Custom Zone Writer) ===")
+    print("=== Confluence Cleaner (V23: Wide-Spectrum Red) ===")
     
     main_report = find_latest_report()
     targets = extract_all_project_links(main_report['body']['view']['value'])
