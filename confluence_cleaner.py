@@ -16,7 +16,7 @@ MASTER_PAGE_ID = os.environ.get("MASTER_PAGE_ID")
 KEEP_LIMIT = 5 
 
 if not RAW_URL or not USERNAME or not API_TOKEN:
-    print("錯誤：缺少環境變數 (CONF_URL, CONF_USER, CONF_PASS)")
+    print("錯誤：缺少環境變數")
     sys.exit(1)
 
 parsed = urlparse(RAW_URL)
@@ -29,26 +29,26 @@ def get_headers():
 # --- 1. 搜尋週報 ---
 def find_latest_report():
     if MASTER_PAGE_ID:
-        print(f"🎯 偵測到 MASTER_PAGE_ID ({MASTER_PAGE_ID})，直接讀取...")
+        print(f"🎯 偵測到 MASTER_PAGE_ID ({MASTER_PAGE_ID})")
         url = f"{API_ENDPOINT}/{MASTER_PAGE_ID}"
         params = {'expand': 'body.view,version'}
-        response = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
         try:
-            response.raise_for_status()
-            return response.json()
+            r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
+            r.raise_for_status()
+            return r.json()
         except Exception as e:
-            print(f"❌ 指定的 MASTER_PAGE_ID 讀取失敗: {e}")
+            print(f"❌ 讀取失敗: {e}")
             sys.exit(1)
 
     print("🔍 正在搜尋最新週報...")
     cql = 'type=page AND title ~ "WeeklyReport*" ORDER BY created DESC'
     url = f"{API_ENDPOINT}/search"
     params = {'cql': cql, 'limit': 1, 'expand': 'body.view'}
-    response = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
-    response.raise_for_status()
-    results = response.json().get('results', [])
+    r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
+    r.raise_for_status()
+    results = r.json().get('results', [])
     if not results:
-        print("⚠️ 錯誤：找不到週報。")
+        print("⚠️ 錯誤：找不到週報")
         sys.exit(1)
     print(f"✅ 搜尋成功: {results[0]['title']}")
     return results[0]
@@ -59,101 +59,100 @@ def extract_all_project_links(report_body):
     project_targets = []
     
     for table in tables:
-        headers = []
-        header_row = table.find('tr')
-        if not header_row: continue
-        for cell in header_row.find_all(['th', 'td']):
-            headers.append(cell.get_text().strip())
+        h_row = table.find('tr')
+        if not h_row: continue
+        headers = [c.get_text().strip() for c in h_row.find_all(['th', 'td'])]
         
         if "Project" in headers:
-            print("✅ 找到 Project Status 表格，解析中...")
+            print("✅ 找到 Project Status 表格")
             proj_idx = headers.index("Project")
-            rows = table.find_all('tr')
-            for row in rows[1:]:
+            for row in table.find_all('tr')[1:]:
                 cols = row.find_all('td')
                 if len(cols) > proj_idx:
-                    links = cols[proj_idx].find_all('a')
-                    for link in links:
-                        page_id = link.get('data-linked-resource-id')
-                        target = {}
-                        if page_id:
-                            target['id'] = page_id
-                            target['name'] = link.get_text().strip()
+                    for link in cols[proj_idx].find_all('a'):
+                        pid = link.get('data-linked-resource-id')
+                        name = link.get_text().strip()
+                        target = {'name': name}
+                        if pid:
+                            target['id'] = pid
                         else:
                             href = link.get('href', '')
                             if 'pageId=' in href:
                                 qs = parse_qs(urlparse(href).query)
-                                if 'pageId' in qs: 
-                                    target['id'] = qs['pageId'][0]
-                                    target['name'] = link.get_text().strip()
+                                if 'pageId' in qs: target['id'] = qs['pageId'][0]
                             else:
-                                match = re.search(r'/pages/(\d+)/', href)
-                                if match: 
-                                    target['id'] = match.group(1)
-                                    target['name'] = link.get_text().strip()
-                                else:
-                                    title = link.get_text().strip()
-                                    if title:
-                                        target['title'] = title
-                                        target['name'] = title
-                        if target and target not in project_targets:
-                            project_targets.append(target)
+                                m = re.search(r'/pages/(\d+)/', href)
+                                if m: target['id'] = m.group(1)
+                                else: target['title'] = name
+                        
+                        if target.get('id') or target.get('title'):
+                            if target not in project_targets: project_targets.append(target)
             break 
-    if not project_targets: print("⚠️ 警告：找不到任何專案連結")
     return project_targets
 
 def get_page_by_id(page_id):
     url = f"{API_ENDPOINT}/{page_id}"
     params = {'expand': 'body.storage,version'}
-    resp = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
-    if resp.status_code == 200: return resp.json()
-    return None
+    r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
+    return r.json() if r.status_code == 200 else None
 
 def get_page_by_title(title):
     url = f"{API_ENDPOINT}"
     params = {'title': title, 'expand': 'body.storage,version'}
-    resp = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
-    results = resp.json().get('results', [])
-    if results: return results[0]
+    r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
+    res = r.json().get('results', [])
+    if res: return res[0]
     if not title.startswith("WeeklyStatus_"):
-        alt_title = f"WeeklyStatus_{title}"
-        params['title'] = alt_title
-        resp = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
-        results = resp.json().get('results', [])
-        if results: return results[0]
+        r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params={'title': f"WeeklyStatus_{title}", 'expand': 'body.storage,version'})
+        res = r.json().get('results', [])
+        if res: return res[0]
     return None
 
-# --- V13 核心：絕對黑箱模式 ---
+# --- V14 核心：禁區模式 ---
 
 def is_date_header(text):
     if not text: return False
-    return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text[:30]))
+    return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text[:50]))
 
-def has_red_text(tag):
+def is_red_style(tag):
+    """檢查單一標籤是否為紅色 (不遞迴)"""
+    if tag.has_attr('style'):
+        s = tag['style'].lower()
+        if 'rgb(255, 0, 0)' in s or '#ff0000' in s or 'color: red' in s: return True
+    if tag.name == 'font' and (tag.get('color') == 'red' or tag.get('color') == '#ff0000'): return True
+    return False
+
+def has_red_text_safe(tag):
+    """
+    【V14 關鍵】：安全遞迴檢查
+    遇到 table, macro 等大物件，直接回傳 False，禁止進入。
+    """
     if not isinstance(tag, Tag): return False
-    # 使用 find 短路查找，這是最快的方法
-    def is_red_style(node):
-        if isinstance(node, Tag):
-            if node.has_attr('style'):
-                s = node['style'].lower()
-                if 'rgb(255, 0, 0)' in s or '#ff0000' in s or 'color: red' in s: return True
-            if node.name == 'font' and (node.get('color') == 'red' or node.get('color') == '#ff0000'): return True
-        return False
+    
+    # 1. 檢查自己
     if is_red_style(tag): return True
-    if tag.find(is_red_style): return True
+    
+    # 2. 定義禁區 (No-Go Zones)
+    # 只要遇到這些標籤，絕對不准進去檢查子節點
+    NO_GO_ZONES = ['table', 'ac:structured-macro', 'tbody', 'thead', 'tr', 'td']
+    
+    if tag.name in NO_GO_ZONES:
+        return False
+
+    # 3. 安全遍歷子節點 (手動迴圈，取代 .find)
+    for child in tag.children:
+        if isinstance(child, Tag):
+            if has_red_text_safe(child): return True
+            
     return False
 
 def split_cell_content(cell_soup):
     entries = []
     current_entry = []
     
-    # 1. 複雜標籤黑名單：看到這些直接跳過，絕對不讀取內容
-    # 這能保證程式不會被大表格卡死
-    COMPLEX_TAGS = ['table', 'tbody', 'thead', 'tr', 'td', 'ul', 'ol', 'ac:structured-macro', 'ac:image']
+    # 複雜標籤：看到這些直接視為內容，完全不檢查
+    COMPLEX_TAGS = ['table', 'ac:structured-macro', 'ac:image']
     
-    # 2. 簡單標籤白名單：只有這些標籤才值得檢查是否為日期
-    SIMPLE_TAGS = ['p', 'span', 'strong', 'em', 'h1', 'h2', 'h3', 'h4', 'div']
-
     for child in cell_soup.contents:
         if isinstance(child, NavigableString) and not child.strip():
             if current_entry: current_entry.append(child)
@@ -161,22 +160,15 @@ def split_cell_content(cell_soup):
         
         is_header = False
         
-        # 【V13 核心】：嚴格的類型檢查
         if isinstance(child, Tag):
-            # 如果是複雜標籤 (如表格)，直接視為內容，跳過檢查
-            if child.name in COMPLEX_TAGS:
+            # 如果是複雜標籤，或者容器內包含複雜標籤，直接放棄檢查
+            if child.name in COMPLEX_TAGS or child.find(COMPLEX_TAGS):
                 is_header = False
-            
-            # 如果是簡單標籤，才檢查文字
-            elif child.name in SIMPLE_TAGS:
-                # 再次確認：如果簡單標籤裡面包了複雜標籤 (例如 div 包 table)，也直接跳過
-                if child.find(COMPLEX_TAGS):
-                    is_header = False
-                else:
-                    # 只有在確定結構簡單時，才讀取文字
-                    txt = child.get_text().strip()
-                    if is_date_header(txt):
-                        is_header = True
+            else:
+                # 只有簡單結構才讀取文字
+                txt = child.get_text().strip()
+                if is_date_header(txt):
+                    is_header = True
         
         elif isinstance(child, NavigableString):
             if is_date_header(str(child).strip()):
@@ -194,7 +186,8 @@ def split_cell_content(cell_soup):
 def check_entry_red(entry_nodes):
     for node in entry_nodes:
         if isinstance(node, Tag):
-            if has_red_text(node): return True
+            # 使用 V14 安全檢查
+            if has_red_text_safe(node): return True
     return False
 
 def get_or_create_history_table(soup, main_table):
@@ -234,7 +227,7 @@ def clean_project_page_content(html_content, page_title):
     all_tables = soup.find_all('table')
     for t in all_tables:
         if t.find_parent('ac:structured-macro'): continue
-        headers = [th.get_text().strip() for th in t.find_all('th')]
+        headers = [c.get_text().strip() for c in t.find_all('th')]
         if "Item" in headers and "Update" in headers:
             main_table = t
             break
@@ -246,7 +239,6 @@ def clean_project_page_content(html_content, page_title):
     print(f"   🔍 [{page_title}] 找到主表格，分析中...")
     sys.stdout.flush()
     
-    # 使用 main_table 直接找 tr (兼容有無 tbody 的情況)
     rows = main_table.find_all('tr', recursive=False)
     if not rows and main_table.find('tbody', recursive=False):
         rows = main_table.find('tbody', recursive=False).find_all('tr', recursive=False)
@@ -264,18 +256,16 @@ def clean_project_page_content(html_content, page_title):
     total_rows = len(rows) - 1
     
     for i, row in enumerate(rows[1:]):
-        if i % 1 == 0: # 每一行都印出進度，確保沒卡死
-            sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...")
-            sys.stdout.flush()
+        # 顯示進度
+        sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...")
+        sys.stdout.flush()
 
         cols = row.find_all('td', recursive=False)
         if len(cols) <= max(item_idx, update_idx): continue
         
-        # 簡單取名
         item_name = cols[item_idx].get_text().strip()[:50]
         update_cell = cols[update_idx]
         
-        # 執行 V13 極速切割
         entries = split_cell_content(update_cell)
         
         if len(entries) <= KEEP_LIMIT: continue
@@ -285,7 +275,7 @@ def clean_project_page_content(html_content, page_title):
         count = 0
         
         for entry in entries:
-            # 紅字檢查
+            # V14 安全檢查
             if check_entry_red(entry):
                 keep.append(entry)
                 continue
@@ -343,7 +333,7 @@ def update_page(page_data, new_content):
     print("✅ 成功！")
 
 def main():
-    print("=== Confluence Cleaner (V13: Black Box Mode) ===")
+    print("=== Confluence Cleaner (V14: No-Go Zone Mode) ===")
     report = find_latest_report()
     targets = extract_all_project_links(report['body']['view']['value'])
     if not targets: return
