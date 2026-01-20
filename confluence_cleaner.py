@@ -132,7 +132,7 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- 內容切割與紅字邏輯 ---
+# --- 內容切割 ---
 
 def is_date_header(text):
     if not text: return False
@@ -161,24 +161,23 @@ def split_cell_content(cell_soup):
     if current_entry: entries.append(current_entry)
     return entries
 
-# 【V24 關鍵修改】：使用 Regex 強力偵測各種紅色格式
+# 【V26 關鍵修改】：加入 #C9372C
 def check_entry_red(entry_nodes):
-    # 定義紅色特徵 Regex
-    # \s* 允許中間有任意空白
     red_patterns = [
-        r'color:\s*red',                        # css name
-        r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', # hex codes
-        r'rgb\(\s*255\s*,\s*0\s*,\s*0\s*\)',    # standard red
-        r'rgb\(\s*255\s*,\s*86\s*,\s*48\s*\)',  # atlassian red
-        r'rgb\(\s*222\s*,\s*53\s*,\s*11\s*\)',  # atlassian dark red
-        r'rgb\(\s*191\s*,\s*38\s*,\s*0\s*\)'    # atlassian darkest red
+        r'color:\s*red', 
+        r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', 
+        r'#c9372c',  # <--- 你的截圖色碼
+        r'#C9372C',  # <--- 大寫保險
+        r'rgb\(\s*255\s*,\s*0\s*,\s*0\s*\)', 
+        r'rgb\(\s*255\s*,\s*86\s*,\s*48\s*\)', 
+        r'rgb\(\s*201\s*,\s*55\s*,\s*44\s*\)', # RGB for C9372C
+        r'color:\s*rgb\(\s*2' # 寬鬆匹配所有 R=2xx 的紅色
     ]
     
     combined_regex = re.compile('|'.join(red_patterns), re.IGNORECASE)
 
     for node in entry_nodes:
         if isinstance(node, Tag):
-            # 將節點轉為字串進行檢查 (這樣可以同時檢查 inline style 和 font tag)
             node_str = str(node)
             if combined_regex.search(node_str):
                 return True
@@ -330,7 +329,6 @@ def update_page(page_data, new_content):
     requests.put(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), headers=get_headers(), data=json.dumps(payload)).raise_for_status()
     print("✅ 成功！")
 
-# --- 指定區塊更新邏輯 ---
 def update_main_report_summary(main_report_data, summary_data):
     if not summary_data:
         print("📭 沒有紅字摘要，跳過更新。")
@@ -416,7 +414,7 @@ def update_main_report_summary(main_report_data, summary_data):
 
 
 def main():
-    print("=== Confluence Cleaner (V24: Eagle-Eye Red Mode) ===")
+    print("=== Confluence Cleaner (V26: Color Fixed) ===")
     
     main_report = find_latest_report()
     targets = extract_all_project_links(main_report['body']['view']['value'])
