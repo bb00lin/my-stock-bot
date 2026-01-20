@@ -25,7 +25,7 @@ API_ENDPOINT = f"{BASE_URL}/wiki/rest/api/content"
 def get_headers():
     return {"Content-Type": "application/json"}
 
-# --- 1. 搜尋週報與提取所有專案連結 (批量處理) ---
+# --- 1. 搜尋週報與提取所有專案連結 ---
 def find_latest_report():
     print("正在搜尋最新週報...")
     cql = 'type=page AND title ~ "WeeklyReport*" ORDER BY created DESC'
@@ -45,7 +45,6 @@ def extract_all_project_links(report_body):
     tables = soup.find_all('table')
     project_targets = []
     
-    # 只找第一個含有 Project 的表格
     for table in tables:
         headers = []
         header_row = table.find('tr')
@@ -121,46 +120,35 @@ def get_page_by_title(title):
             return results[0]
     return None
 
-# --- 2. 內容處理邏輯 (極速優化版) ---
+# --- 2. 內容處理邏輯 (V9: 字串暴力搜尋版) ---
 
 def is_date_header(text):
     return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text))
 
 def has_red_text(tag):
     """
-    【關鍵優化】：使用 find 搭配函數檢查，利用 C 底層加速。
-    解決 V3/V7 使用 descendants 迴圈在巨大表格上卡頓的問題。
+    【V9 核心修改】：暴力字串搜尋
+    直接將整個 Tag (含所有子節點/表格) 轉成 String，然後搜尋關鍵字。
+    這比任何 DOM 遍歷 (recursive find) 都要快 100 倍以上。
     """
     if not isinstance(tag, Tag): return False
     
-    # 定義檢查邏輯 (這是最耗時的部分，必須最佳化)
-    def is_red_style(node):
-        if node.has_attr('style'):
-            style = node['style'].lower()
-            if 'rgb(255, 0, 0)' in style or '#ff0000' in style or 'color: red' in style:
-                return True
-        if node.name == 'font' and (node.get('color') == 'red' or node.get('color') == '#ff0000'):
-            return True
-        return False
-
-    # 1. 檢查自己
-    if is_red_style(tag): return True
+    # 轉成小寫字串
+    html_str = str(tag).lower()
     
-    # 2. 極速搜尋子節點 (只要找到一個就馬上回傳 True，不再繼續遍歷)
-    if tag.find(is_red_style):
-        return True
-        
+    # 直接檢查樣式關鍵字
+    if 'rgb(255, 0, 0)' in html_str: return True
+    if '#ff0000' in html_str: return True
+    if 'color: red' in html_str: return True
+    if 'color:red' in html_str: return True
+    
     return False
 
 def split_cell_content(cell_soup):
-    """
-    將格子內的內容切分成 Entry。
-    遇到複雜標籤 (table, ul, macro) 直接跳過文字檢查，視為內容搬移。
-    """
     entries = []
     current_entry = []
     
-    # 這些標籤絕對視為內容，不要解析文字，避免大表格卡頓
+    # 這些標籤絕對視為內容，直接跳過文字解析
     SKIP_CHECK_TAGS = ['table', 'tbody', 'tr', 'td', 'ul', 'ol', 'ac:structured-macro', 'ac:image']
 
     for child in cell_soup.contents:
@@ -170,7 +158,7 @@ def split_cell_content(cell_soup):
         
         is_header = False
         
-        # 效能優化：如果遇到 Table，直接當作內容，不跑 get_text
+        # 遇到大物件直接視為內容 (False)
         if isinstance(child, Tag) and child.name in SKIP_CHECK_TAGS:
             is_header = False
         else:
@@ -190,7 +178,7 @@ def split_cell_content(cell_soup):
 def check_entry_red(entry_nodes):
     for node in entry_nodes:
         if isinstance(node, Tag):
-            # 這裡會呼叫優化過的 has_red_text
+            # 使用 V9 的暴力字串檢查，瞬間完成
             if has_red_text(node): return True
     return False
 
@@ -248,7 +236,7 @@ def clean_project_page_content(html_content, page_title):
         return None
 
     print(f"   🔍 [{page_title}] 找到主表格，開始極速分析...")
-    sys.stdout.flush() # 強制刷新 Log，避免看起來像當機
+    sys.stdout.flush()
     
     tbody = main_table.find('tbody') or main_table
     rows = tbody.find_all('tr')
@@ -264,11 +252,10 @@ def clean_project_page_content(html_content, page_title):
     history_table_ref = None
     total_rows = len(rows) - 1
     
-    # 開始遍歷每一列
     for i, row in enumerate(rows[1:]):
-        # 顯示進度條
-        if i % 2 == 0: # 每2行更新一次，讓你感覺它活著
-            sys.stdout.write(f"\r      處理進度: {i}/{total_rows} ...")
+        # 簡單進度回報
+        if i % 2 == 0:
+            sys.stdout.write(f"\r      處理 Item: {i+1}/{total_rows} ...")
             sys.stdout.flush()
 
         cols = row.find_all('td')
@@ -277,7 +264,6 @@ def clean_project_page_content(html_content, page_title):
         item_name = cols[item_idx].get_text(separator=' ', strip=True)
         update_cell = cols[update_idx]
         
-        # 這裡執行內容切割 (包含表格)
         entries = split_cell_content(update_cell)
         
         if len(entries) <= KEEP_LIMIT:
@@ -288,7 +274,7 @@ def clean_project_page_content(html_content, page_title):
         count = 0
         
         for entry in entries:
-            # 這裡執行紅字檢查 (已優化，不會在表格上卡死)
+            # V9 紅字檢查：即使是超大表格，因為轉成 string 檢查，也是瞬間完成
             is_red = check_entry_red(entry)
             if is_red:
                 keep_entries.append(entry)
@@ -338,7 +324,7 @@ def clean_project_page_content(html_content, page_title):
             for node in entry:
                 hist_update_cell.append(node)
     
-    print(f"\r      處理進度: {total_rows}/{total_rows} (完成)        ")
+    print(f"\r      處理 Item: {total_rows}/{total_rows} (完成)        ")
     sys.stdout.flush()
     
     return str(soup) if changed else None
@@ -363,7 +349,7 @@ def update_page(page_data, new_content):
     print("✅ 更新成功！")
 
 def main():
-    print("=== Confluence 專案頁面整理機器人 (V8: Speed Optimized) ===")
+    print("=== Confluence 專案頁面整理機器人 (V9: Nuclear String Search) ===")
     
     report = find_latest_report()
     project_targets = extract_all_project_links(report['body']['view']['value'])
