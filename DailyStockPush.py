@@ -1,7 +1,7 @@
 import os, yfinance as yf, pandas as pd, requests, time, datetime, sys
 import gspread
 import logging
-import json
+import json  # [新增] 必須匯入 json 模組
 from google import genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
@@ -18,6 +18,7 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# 初始化 Gemini Client
 ai_client = None
 if GEMINI_API_KEY:
     try:
@@ -25,17 +26,33 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"❌ Gemini Client 初始化失敗: {e}")
 
-# 優先使用 1.5-flash (速度快、額度較高)
-MODEL_CANDIDATES = ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-pro"]
+# 模型清單 (優先順序)
+MODEL_CANDIDATES = [
+    "gemini-2.0-flash-exp", 
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-pro"
+]
 
+# === [重要修正] 改為使用 GitHub Secrets 進行連線 ===
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    
+    # 從環境變數讀取 Secret
     json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
-    if not json_key_str: return None
+    
+    if not json_key_str:
+        print("❌ 錯誤：找不到 GOOGLE_SHEETS_JSON 環境變數！")
+        return None
+
     try:
         creds_dict = json.loads(json_key_str)
-        return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
-    except: return None
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        print(f"❌ 解析金鑰或連線失敗: {e}")
+        return None
 
 def get_global_stock_info():
     try:
@@ -47,15 +64,18 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. 輔助數據運算 (完整保留您原本的邏輯)
+# 2. 輔助數據獲取 (籌碼、量能、MA偵測)
 # ==========================================
 def get_streak_only(sid_clean):
+    """獲取外資與投信連買天數"""
     try:
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
         clean_id = ''.join(filter(str.isdigit, str(sid_clean)))
         df = dl.taiwan_stock_institutional_investors(stock_id=clean_id, start_date=start)
+        
         if df is None or df.empty: return 0, 0
+        
         def count_s(name):
             d = df[df['name'] == name].sort_values('date', ascending=False)
             c = 0
@@ -67,11 +87,144 @@ def get_streak_only(sid_clean):
     except: return 0, 0
 
 def get_vol_status_str(ratio):
+    """量能狀態文字化"""
     if ratio > 1.8: return f"🔥爆量({ratio:.1f}x)"
     elif ratio > 1.2: return f"📈溫和({ratio:.1f}x)"
     elif ratio < 0.7: return f"⚠️縮量({ratio:.1f}x)"
     else: return f"☁️量平({ratio:.1f}x)"
 
+def check_ma_status(p, ma5, ma10, ma20, ma60):
+    """
+    [新增] 自動偵測股價與均線的互動狀態
+    設定閾值為 1.5% 內視為「回測」或「面臨」
+    """
+    alerts = []
+    THRESHOLD = 0.015 
+    
+    # 1. 檢測 5日線 (短線攻防)
+    if ma5 > 0:
+        gap_ma5 = (p - ma5) / ma5
+        if 0 < gap_ma5 <= THRESHOLD:
+            alerts.append(f"⚡回測5日線(剩{gap_ma5:.1%})")
+        elif -THRESHOLD <= gap_ma5 < 0:
+            alerts.append(f"⚠️跌破5日線({gap_ma5:.1%})")
+
+    # 2. 檢測 20日線 (月線支撐)
+    if ma20 > 0:
+        gap_ma20 = (p - ma20) / ma20
+        if 0 < gap_ma20 <= THRESHOLD:
+            alerts.append(f"🛡️回測月線(剩{gap_ma20:.1%})")
+        elif -THRESHOLD <= gap_ma20 < 0:
+            alerts.append(f"☠️跌破月線({gap_ma20:.1%})")
+
+    # 3. 檢測 60日線 (乖離率過大警示)
+    if ma60 > 0:
+        gap_ma60 = (p - ma60) / ma60
+        if abs(gap_ma60) > 0.15: 
+            bias_status = "🔥乖離過大" if gap_ma60 > 0 else "❄️嚴重超跌"
+            alerts.append(bias_status)
+
+    return " | ".join(alerts) if alerts else ""
+
+# ==========================================
+# 3. AI 策略生成器 (深度綜合評估)
+# ==========================================
+def get_gemini_strategy(data):
+    if not ai_client: return "AI 未啟動 (Init Fail)"
+    
+    # 計算盈虧狀態
+    profit_info = "目前無庫存，純觀察"
+    if data['is_hold']:
+        roi = ((data['p'] - data['cost']) / data['cost']) * 100
+        profit_info = f"🔴庫存持有中 (成本:{data['cost']} | 現價:{data['p']} | 損益:{roi:+.2f}%)"
+
+    prompt = f"""
+    角色：頂尖台股操盤手。
+    任務：針對個股 {data['name']} ({data['id']}) 進行全方位診斷，並給出下一步具體操作建議。
+    
+    【關鍵均線警示 (最優先處理)】
+    - **觸發訊號：{data['ma_alert']}** (若有內容，代表股價正位於關鍵均線附近，請務必針對此點位給出操作建議)
+    - 5日線：{data['ma5']} | 20日線：{data['ma20']} | 60日線：{data['ma60']}
+
+    【核心籌碼與技術數據】
+    - 價格：{data['p']} (日漲跌 {data['d1']:.2%}) | 乖離率：{data['bias_str']}
+    - 籌碼：外資連買 {data['fs']} 天 | 投信連買 {data['ss']} 天
+    - 量能：{data['vol_str']}
+    - 指標：RSI {data['rsi']}
+    - 系統訊號：{data['risk']} | {data['hint']}
+    
+    【使用者資產狀態】
+    - {profit_info}
+
+    【請依照上述數據，給出約 80 字的綜合操作建議】
+    1. **若有「觸發訊號」，請明確指出該均線價格**。例如：「目前回測 5日線({data['ma5']})，若量縮不破可佈局」。
+    2. 針對「庫存」或「觀察」身分，直接給出：續抱、加碼、減碼、止損 或 觀望、切入。
+    3. 結合「損益%」與「乖離/量能/籌碼」給出防守價位或目標價。
+    """
+
+    last_error = ""
+    for model_name in MODEL_CANDIDATES:
+        try:
+            response = ai_client.models.generate_content(
+                model=model_name, 
+                contents=prompt
+            )
+            return response.text.replace('\n', ' ').strip()
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg:
+                print(f"   ⏳ {model_name} 額度已滿 (429)，停止嘗試。")
+                return "❌ 今日額度用盡 (429)"
+            elif "404" in error_msg:
+                last_error = f"404 ({model_name})"
+                continue
+            else:
+                last_error = f"Err: {error_msg[:10]}"
+                continue
+    return f"❌ AI 失敗: {last_error}"
+
+# ==========================================
+# 4. 讀取 WATCH_LIST
+# ==========================================
+def get_watch_list_from_sheet():
+    try:
+        client = get_gspread_client()
+        if not client: return [] # 連線失敗直接回傳空
+
+        try:
+            sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
+        except:
+            print("⚠️ 找不到 'WATCH_LIST' 分頁，自動切換讀取『第一個分頁』...")
+            sheet = client.open("WATCH_LIST").get_worksheet(0)
+            
+        records = sheet.get_all_records()
+        watch_data = []
+        print(f"📋 正在讀取雲端觀察名單，共 {len(records)} 筆...")
+        
+        for row in records:
+            raw_sid = str(row.get('股票代號', '')).strip()
+            if not raw_sid: continue
+            
+            if raw_sid.isdigit():
+                if len(raw_sid) == 3: sid = "00" + raw_sid
+                elif len(raw_sid) < 4: sid = raw_sid.zfill(4)
+                else: sid = raw_sid
+            else:
+                sid = raw_sid
+            
+            is_hold = str(row.get('我的庫存倉位', '')).strip().upper() == 'Y'
+            cost = row.get('平均成本', 0)
+            if cost == '': cost = 0
+            
+            watch_data.append({'sid': sid, 'is_hold': is_hold, 'cost': float(cost)})
+        return watch_data
+    except Exception as e:
+        print(f"❌ 讀取 WATCH_LIST 失敗: {e}")
+        return []
+
+# ==========================================
+# 5. 技術指標運算
+# ==========================================
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -80,55 +233,45 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def check_ma_status(p, ma5, ma10, ma20, ma60):
-    """MA 智慧偵測：完整保留您的警示邏輯"""
-    alerts = []
-    THRESHOLD = 0.015 
-    
-    # 5日線
-    if ma5 > 0:
-        gap_ma5 = (p - ma5) / ma5
-        if 0 < gap_ma5 <= THRESHOLD: alerts.append(f"⚡回測5日線(剩{gap_ma5:.1%})")
-        elif -THRESHOLD <= gap_ma5 < 0: alerts.append(f"⚠️跌破5日線({gap_ma5:.1%})")
-
-    # 20日線
-    if ma20 > 0:
-        gap_ma20 = (p - ma20) / ma20
-        if 0 < gap_ma20 <= THRESHOLD: alerts.append(f"🛡️回測月線(剩{gap_ma20:.1%})")
-        elif -THRESHOLD <= gap_ma20 < 0: alerts.append(f"☠️跌破月線({gap_ma20:.1%})")
-
-    # 60日線
-    if ma60 > 0:
-        gap_ma60 = (p - ma60) / ma60
-        if abs(gap_ma60) > 0.15: alerts.append("🔥乖離過大" if gap_ma60 > 0 else "❄️嚴重超跌")
-
-    return " | ".join(alerts) if alerts else ""
+def get_tw_stock(sid):
+    clean_id = str(sid).strip().upper()
+    if clean_id.startswith(('3', '4', '5', '6', '8')):
+        suffixes = [".TWO", ".TW"]
+    else:
+        suffixes = [".TW", ".TWO"]
+        
+    for suffix in suffixes:
+        target = f"{clean_id}{suffix}"
+        try:
+            stock = yf.Ticker(target)
+            if not stock.history(period="1d").empty: return stock, target
+        except: continue
+    return None, None
 
 # ==========================================
-# 3. 核心數據抓取 (只抓數據，不呼叫 AI)
+# 6. 核心數據抓取與計算
 # ==========================================
 def generate_auto_analysis(r, is_hold, cost):
-    # 風險評級
+    # 邏輯判斷
     if r['rsi'] >= 80: risk = "🚨極度過熱"
     elif r['rsi'] >= 70: risk = "🚩高檔警戒"
     elif 40 <= r['rsi'] <= 60 and r['d1'] > 0: risk = "✅趨勢穩健"
     elif r['rsi'] <= 30: risk = "🛡️超跌打底"
     else: risk = "正常波動"
 
-    # 動能狀態
     trends = []
     if r['vol_r'] > 2.0 and r['d1'] > 0: trends.append("🔥主力強攻")
     elif r['vol_r'] > 1.2: trends.append("📈有效放量")
     elif r['vol_r'] < 0.7: trends.append("⚠️縮量")
     trend_status = " | ".join(trends) if trends else "動能平淡"
     
-    # 綜合提示 (優先顯示 MA 警示)
     hint = ""
     profit_pct = ((r['p'] - cost) / cost * 100) if (is_hold and cost > 0) else 0
     profit_str = f"({profit_pct:+.1f}%)" if (is_hold and cost > 0) else ""
 
+    # [關鍵修改] 優先顯示 MA 警示
     if r['ma_alert']:
-        hint = r['ma_alert']
+        hint = r['ma_alert'] # 直接使用回測警示作為主要提示
     elif is_hold:
         if r['rsi'] >= 80: hint = f"❗分批止盈 {profit_str}"
         elif r['d1'] <= -0.04: hint = f"📢急跌守5日線 {profit_str}"
@@ -146,19 +289,13 @@ def generate_auto_analysis(r, is_hold, cost):
     return risk, trend_status, hint
 
 def fetch_pro_metrics(stock_data):
-    """
-    這裡完整保留您原本的數據抓取邏輯
-    唯一的改變是：這裡 '不' 呼叫 AI，只回傳數據
-    """
     sid = stock_data['sid']
     is_hold = stock_data['is_hold']
     cost = stock_data['cost']
 
-    clean_id = str(sid).strip().upper()
-    target_id = f"{clean_id}.TWO" if clean_id.startswith(('3','4','5','6','8')) else f"{clean_id}.TW"
-
+    stock, full_id = get_tw_stock(sid)
+    if not stock: return None
     try:
-        stock = yf.Ticker(target_id)
         df_hist = stock.history(period="8mo")
         if len(df_hist) < 120: return None
         
@@ -172,15 +309,14 @@ def fetch_pro_metrics(stock_data):
         
         # 均線計算
         ma5 = df_hist['Close'].rolling(5).mean().iloc[-1]
-        ma10 = df_hist['Close'].rolling(10).mean().iloc[-1]
         ma20 = df_hist['Close'].rolling(20).mean().iloc[-1]
         ma60 = df_hist['Close'].rolling(60).mean().iloc[-1]
         
         # 乖離率
         bias_60 = ((curr_p - ma60) / ma60) * 100
         
-        # 自動偵測 MA 警示
-        ma_alert_str = check_ma_status(curr_p, ma5, ma10, ma20, ma60)
+        # [新增] 自動偵測 MA 警示
+        ma_alert_str = check_ma_status(curr_p, ma5, 0, ma20, ma60)
         
         raw_yield = info.get('dividendYield', 0) or 0
         d1 = (curr_p / df_hist['Close'].iloc[-2]) - 1
@@ -189,11 +325,11 @@ def fetch_pro_metrics(stock_data):
         m6 = (curr_p / df_hist['Close'].iloc[-121]) - 1
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean() if df_hist['Volume'].iloc[-6:-1].mean() > 0 else 0
 
-        # 籌碼
-        fs, ss = get_streak_only(sid)
+        # 籌碼與量能
+        pure_id = ''.join(filter(str.isdigit, sid))
+        fs, ss = get_streak_only(pure_id) # 外資/投信連買
         vol_str = get_vol_status_str(vol_ratio)
 
-        # 計分
         score = 0
         if (info.get('profitMargins', 0) or 0) > 0: score += 2
         if curr_p > df_hist['Close'].iloc[0]: score += 3
@@ -201,11 +337,11 @@ def fetch_pro_metrics(stock_data):
         if 40 < clean_rsi < 70: score += 1
         if today_amount > 10: score += 1
         if vol_ratio > 1.5: score += 1
-        if fs >= 3 or ss >= 2: score += 1.5
+        if fs >= 3 or ss >= 2: score += 1.5 # 籌碼加分
         if is_hold: score += 0.5 
 
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
-        market_label = '櫃' if '.TWO' in target_id else '市'
+        market_label = '櫃' if '.TWO' in full_id else '市'
 
         res = {
             "id": f"{sid}{market_label}", "name": stock_name, 
@@ -214,149 +350,92 @@ def fetch_pro_metrics(stock_data):
             "yield": raw_yield, "amt_t": round(today_amount, 1),
             "d1": d1, "d5": d5, "m1": m1, "m6": m6,
             "is_hold": is_hold, "cost": cost,
-            "bias_str": f"{bias_60:+.1f}%", "vol_str": vol_str, "fs": fs, "ss": ss,
-            "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2),
+            # 新增欄位數據
+            "bias_str": f"{bias_60:+.1f}%",
+            "vol_str": vol_str,
+            "fs": fs, "ss": ss,
+            # MA 數據與警示
+            "ma5": round(ma5, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2),
             "ma_alert": ma_alert_str
         }
 
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
-        # 這裡不呼叫 get_gemini_strategy，改在主程式批次呼叫
+        # 呼叫 AI
+        ai_strategy = get_gemini_strategy(res)
+        res['ai_strategy'] = ai_strategy
         
         return res
     except Exception as e:
         print(f"Error analyzing {sid}: {e}")
         return None
 
-# ==========================================
-# 4. 新增：批次 AI 處理 (解決 429 額度問題的核心)
-# ==========================================
-def get_batch_gemini_strategies(stocks_batch):
-    """
-    [重要] 一次處理 5 檔股票，將 5 次請求合併為 1 次
-    """
-    if not ai_client: return ["AI 未啟動"] * len(stocks_batch)
-    
-    # 組合 Prompt
-    prompt = "你是專業台股操盤手。請針對以下股票，分別給出約 60 字的精簡操作建議與防守價：\n"
-    for i, data in enumerate(stocks_batch):
-        profit_info = f"損益:{((data['p']-data['cost'])/data['cost']*100):+.1f}%" if data['is_hold'] else "觀察"
-        prompt += f"{i+1}. {data['name']}({data['id']}): 現價{data['p']}, MA5:{data['ma5']}, MA20:{data['ma20']}, RSI{data['rsi']}, 訊號:[{data['hint']}], 狀態:{profit_info}\n"
-
-    # 嘗試呼叫模型
-    for model_name in MODEL_CANDIDATES:
-        try:
-            response = ai_client.models.generate_content(
-                model=model_name, 
-                contents=prompt
-            )
-            # 簡單回傳：為了避免 AI 格式亂掉，我們直接把整段文字回傳給每一檔
-            # (進階做法可以用 Regex 切割，但簡單做法較穩)
-            result_text = response.text.replace('\n', ' ').strip()
-            return [result_text] * len(stocks_batch)
-        except Exception as e:
-            if "429" in str(e): 
-                print(f"   ⏳ {model_name} 額度滿 (429)，切換模型...")
-                continue
-            else:
-                print(f"   ⚠️ {model_name} 錯誤: {e}")
-                
-    return ["❌ AI 額度暫時用盡 (429)"] * len(stocks_batch)
-
-# ==========================================
-# 5. 主程序 (重構流程：先抓數據 -> 再批次 AI)
-# ==========================================
-def get_watch_list_from_sheet():
+def sync_to_sheets(data_list):
     try:
         client = get_gspread_client()
-        if not client: return []
-        try:
-            sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
-        except:
-            sheet = client.open("WATCH_LIST").get_worksheet(0)
-        records = sheet.get_all_records()
-        watch_data = []
-        for row in records:
-            sid = str(row.get('股票代號', '')).strip()
-            if not sid: continue
-            if sid.isdigit(): sid = sid.zfill(4) if len(sid) < 4 else sid
-            is_hold = str(row.get('我的庫存倉位', '')).upper() == 'Y'
-            cost = row.get('平均成本', 0)
-            watch_data.append({'sid': sid, 'is_hold': is_hold, 'cost': float(cost or 0)})
-        return watch_data
+        if not client: return
+        sheet = client.open("全能金流診斷報表").get_worksheet(0)
+        sheet.append_rows(data_list, value_input_option='USER_ENTERED')
+        print(f"✅ 成功同步 {len(data_list)} 筆數據與 AI 分析")
     except Exception as e:
-        print(f"❌ 讀取名單失敗: {e}")
-        return []
+        print(f"⚠️ Google Sheets 同步失敗: {e}")
 
 def main():
+    # 時間顯示到分鐘
     current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-    watch_data_list = get_watch_list_from_sheet()
-    if not watch_data_list: return
+    results_line, results_sheet = [], []
 
-    # --- 階段一：抓取所有股票的技術數據 (不呼叫 AI) ---
-    print(f"🚀 開始計算 {len(watch_data_list)} 檔股票指標...")
-    all_stocks_metrics = []
+    watch_data_list = get_watch_list_from_sheet()
     
+    if not watch_data_list:
+        print("❌ 中止：觀察名單讀取失敗。")
+        return
+
+    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 15 秒)...")
+
     for stock_data in watch_data_list:
         res = fetch_pro_metrics(stock_data)
         if res:
-            all_stocks_metrics.append(res)
-        time.sleep(1) # 禮貌性延遲，避免 FinMind/Yahoo 封鎖
-
-    # --- 階段二：批次進行 AI 分析 (解決 429 關鍵) ---
-    final_rows = []
-    batch_size = 5 # 5檔一組
-    print(f"🧠 開始 AI 批次分析 (共 {len(all_stocks_metrics)} 檔，分 {len(all_stocks_metrics)//batch_size + 1} 批)...")
-
-    for i in range(0, len(all_stocks_metrics), batch_size):
-        batch = all_stocks_metrics[i : i + batch_size]
-        
-        # 呼叫批次 AI
-        ai_responses = get_batch_gemini_strategies(batch)
-        
-        # 組合結果
-        for stock, ai_msg in zip(batch, ai_responses):
-            hold_mark = "📦庫存" if stock['is_hold'] else "👀觀察"
-            final_rows.append([
-                current_time, stock['id'], stock['name'], hold_mark, 
-                stock['score'], stock['rsi'], stock['industry'], 
-                stock['bias_str'], stock['vol_str'], stock['fs'], stock['ss'],
-                stock['p'], stock['yield'], stock['amt_t'], 
-                stock['d1'], stock['d5'], stock['m1'], stock['m6'],
-                stock['risk'], stock['trend'], stock['hint'],
-                ai_msg # 這裡填入 AI 建議
+            results_line.append(res)
+            
+            hold_mark = "📦庫存" if res['is_hold'] else "👀觀察"
+            
+            # 對應: 時間, 代號, 名稱, 庫存, 評分, RSI, 產業, 乖離, 量能, 外資, 投信, 現價...
+            results_sheet.append([
+                current_time, res['id'], res['name'], hold_mark, 
+                res['score'], res['rsi'], res['industry'], 
+                res['bias_str'], res['vol_str'], res['fs'], res['ss'],
+                res['p'], res['yield'], res['amt_t'], 
+                res['d1'], res['d5'], res['m1'], res['m6'],
+                res['risk'], res['trend'], res['hint'],
+                res['ai_strategy']
             ])
+            
+        time.sleep(15.0) 
+    
+    results_line.sort(key=lambda x: x['score'], reverse=True)
+    if results_line:
+        msg = f"📊 【{current_time} 庫存與 AI 診斷】\n"
         
-        print(f"   ✅ 完成第 {i//batch_size + 1} 批...")
-        time.sleep(15) # [重要] 批次之間的強力冷卻，防止 429
+        holdings = [r for r in results_line if r['is_hold']]
+        if holdings:
+            msg += "--- 📦 我的庫存 ---\n"
+            for r in holdings:
+                msg += (f"{r['name']} ({r['p']}): {r['hint']}\n")
+        
+        msg += "\n--- 🚀 重點關注 ---\n"
+        others = [r for r in results_line if not r['is_hold']][:5]
+        for r in others:
+            short_ai = r['ai_strategy'].split("。")[0]
+            msg += (f"{r['name']}: {short_ai[:25]}...\n")
 
-    # --- 階段三：寫入 Google Sheet 與 LINE 推播 ---
-    try:
-        client = get_gspread_client()
-        if client:
-            sheet = client.open("全能金流診斷報表").get_worksheet(0)
-            sheet.append_rows(final_rows, value_input_option='USER_ENTERED')
-            print(f"✅ 成功寫入 {len(final_rows)} 筆資料")
-            
-            # 排序與發送 LINE
-            all_stocks_metrics.sort(key=lambda x: x['score'], reverse=True)
-            msg = f"📊 【{current_time} 智慧診斷】\n"
-            holdings = [r for r in all_stocks_metrics if r['is_hold']]
-            if holdings:
-                msg += "--- 📦 庫存訊號 ---\n"
-                for r in holdings:
-                    msg += (f"{r['name']} ({r['p']}): {r['hint']}\n")
-            
-            # 加入批次 AI 的最後總結 (選第一檔代表)
-            if final_rows:
-                msg += "\n💡 AI 總評請見報表。"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+        payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg}]}
+        requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
 
-            requests.post("https://api.line.me/v2/bot/message/push", 
-                          headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}, 
-                          json={"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg}]})
-    except Exception as e:
-        print(f"⚠️ 報表同步失敗: {e}")
+    if results_sheet:
+        sync_to_sheets(results_sheet)
 
 if __name__ == "__main__":
     main()
