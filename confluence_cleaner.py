@@ -161,22 +161,27 @@ def split_cell_content(cell_soup):
     if current_entry: entries.append(current_entry)
     return entries
 
-# 【V23 關鍵修改】：擴充紅字定義
+# 【V24 關鍵修改】：使用 Regex 強力偵測各種紅色格式
 def check_entry_red(entry_nodes):
-    # Confluence Cloud 常用的紅色色碼
-    RED_CODES = [
-        'color: red', 'rgb(255, 0, 0)', '#ff0000', # 標準紅
-        '#de350b', # Atlassian Red (最常見)
-        '#bf2600', # Atlassian Dark Red
-        '#ff5630', # Atlassian Light Red
-        '#ce0000'  # 其他變體
+    # 定義紅色特徵 Regex
+    # \s* 允許中間有任意空白
+    red_patterns = [
+        r'color:\s*red',                        # css name
+        r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', # hex codes
+        r'rgb\(\s*255\s*,\s*0\s*,\s*0\s*\)',    # standard red
+        r'rgb\(\s*255\s*,\s*86\s*,\s*48\s*\)',  # atlassian red
+        r'rgb\(\s*222\s*,\s*53\s*,\s*11\s*\)',  # atlassian dark red
+        r'rgb\(\s*191\s*,\s*38\s*,\s*0\s*\)'    # atlassian darkest red
     ]
     
+    combined_regex = re.compile('|'.join(red_patterns), re.IGNORECASE)
+
     for node in entry_nodes:
         if isinstance(node, Tag):
-            s = str(node).lower()
-            for code in RED_CODES:
-                if code in s: return True
+            # 將節點轉為字串進行檢查 (這樣可以同時檢查 inline style 和 font tag)
+            node_str = str(node)
+            if combined_regex.search(node_str):
+                return True
     return False
 
 def get_or_create_history_table(soup, main_table):
@@ -267,11 +272,9 @@ def clean_project_page_content(html_content, page_title):
         count = 0
         
         for entry in entries:
-            # V23: 廣譜紅字檢查
             is_red = check_entry_red(entry)
             if is_red:
                 keep.append(entry)
-                # 深層複製以確保樣式保留
                 extracted_summary_items.append(copy.deepcopy(entry)) 
                 continue
             
@@ -340,7 +343,6 @@ def update_main_report_summary(main_report_data, summary_data):
     
     SEPARATOR = "-------------------------------------"
     
-    # 1. 尋找分隔線
     separators = []
     sep_pattern = re.compile(r'-{20,}')
     
@@ -349,7 +351,6 @@ def update_main_report_summary(main_report_data, summary_data):
         if parent: separators.append(parent)
         else: separators.append(tag)
 
-    # 2. 判斷狀況
     target_start = None
     
     if len(separators) >= 2:
@@ -373,7 +374,6 @@ def update_main_report_summary(main_report_data, summary_data):
         soup.append(target_start)
         soup.append(target_end)
 
-    # 3. 寫入新內容
     cursor = target_start
     
     for project_data in summary_data:
@@ -382,7 +382,6 @@ def update_main_report_summary(main_report_data, summary_data):
         
         if not p_items: continue
         
-        # 專案名稱
         name_tag = soup.new_tag('p')
         strong = soup.new_tag('strong')
         strong.string = p_name
@@ -391,7 +390,6 @@ def update_main_report_summary(main_report_data, summary_data):
         cursor.insert_after(name_tag)
         cursor = name_tag
         
-        # 項目
         for entry_nodes in p_items:
             item_container = soup.new_tag('p')
             for node in entry_nodes:
@@ -400,7 +398,6 @@ def update_main_report_summary(main_report_data, summary_data):
             cursor.insert_after(item_container)
             cursor = item_container
             
-        # 間隔
         spacer = soup.new_tag('p')
         spacer.append(soup.new_tag('br'))
         cursor.insert_after(spacer)
@@ -419,7 +416,7 @@ def update_main_report_summary(main_report_data, summary_data):
 
 
 def main():
-    print("=== Confluence Cleaner (V23: Wide-Spectrum Red) ===")
+    print("=== Confluence Cleaner (V24: Eagle-Eye Red Mode) ===")
     
     main_report = find_latest_report()
     targets = extract_all_project_links(main_report['body']['view']['value'])
