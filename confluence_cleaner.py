@@ -108,11 +108,12 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- V14 核心：禁區模式 ---
+# --- V15 核心：嚴格白名單模式 ---
 
 def is_date_header(text):
     if not text: return False
-    return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text[:50]))
+    # 只看前 30 字，避免長字串 regex 效能問題
+    return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text[:30]))
 
 def is_red_style(tag):
     """檢查單一標籤是否為紅色 (不遞迴)"""
@@ -124,22 +125,21 @@ def is_red_style(tag):
 
 def has_red_text_safe(tag):
     """
-    【V14 關鍵】：安全遞迴檢查
-    遇到 table, macro 等大物件，直接回傳 False，禁止進入。
+    紅字檢查：遇到禁區直接停止，避免鑽入大表格
     """
     if not isinstance(tag, Tag): return False
     
     # 1. 檢查自己
     if is_red_style(tag): return True
     
-    # 2. 定義禁區 (No-Go Zones)
-    # 只要遇到這些標籤，絕對不准進去檢查子節點
+    # 2. 定義禁區
+    # 遇到這些標籤，絕對不准進去檢查子節點
     NO_GO_ZONES = ['table', 'ac:structured-macro', 'tbody', 'thead', 'tr', 'td']
     
     if tag.name in NO_GO_ZONES:
         return False
 
-    # 3. 安全遍歷子節點 (手動迴圈，取代 .find)
+    # 3. 安全遍歷子節點
     for child in tag.children:
         if isinstance(child, Tag):
             if has_red_text_safe(child): return True
@@ -150,9 +150,10 @@ def split_cell_content(cell_soup):
     entries = []
     current_entry = []
     
-    # 複雜標籤：看到這些直接視為內容，完全不檢查
-    COMPLEX_TAGS = ['table', 'ac:structured-macro', 'ac:image']
-    
+    # 【V15 核心】：只信任這些小型標籤可能是標題
+    # 任何其他標籤 (如 div, table, ul) 都直接視為內容，完全不檢查文字
+    HEADER_ALLOWLIST = ['p', 'span', 'strong', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']
+
     for child in cell_soup.contents:
         if isinstance(child, NavigableString) and not child.strip():
             if current_entry: current_entry.append(child)
@@ -161,14 +162,14 @@ def split_cell_content(cell_soup):
         is_header = False
         
         if isinstance(child, Tag):
-            # 如果是複雜標籤，或者容器內包含複雜標籤，直接放棄檢查
-            if child.name in COMPLEX_TAGS or child.find(COMPLEX_TAGS):
-                is_header = False
-            else:
-                # 只有簡單結構才讀取文字
+            # 只有在白名單內的標籤，才去讀取文字
+            # 這避免了對 div 執行 get_text() 導致遍歷內部大表格
+            if child.name in HEADER_ALLOWLIST:
+                # 這裡只讀取直接文字，不做深層搜索
                 txt = child.get_text().strip()
                 if is_date_header(txt):
                     is_header = True
+            # 如果不是白名單 (例如 div)，直接 is_header = False (預設)
         
         elif isinstance(child, NavigableString):
             if is_date_header(str(child).strip()):
@@ -186,7 +187,6 @@ def split_cell_content(cell_soup):
 def check_entry_red(entry_nodes):
     for node in entry_nodes:
         if isinstance(node, Tag):
-            # 使用 V14 安全檢查
             if has_red_text_safe(node): return True
     return False
 
@@ -256,7 +256,6 @@ def clean_project_page_content(html_content, page_title):
     total_rows = len(rows) - 1
     
     for i, row in enumerate(rows[1:]):
-        # 顯示進度
         sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...")
         sys.stdout.flush()
 
@@ -275,7 +274,6 @@ def clean_project_page_content(html_content, page_title):
         count = 0
         
         for entry in entries:
-            # V14 安全檢查
             if check_entry_red(entry):
                 keep.append(entry)
                 continue
@@ -333,7 +331,7 @@ def update_page(page_data, new_content):
     print("✅ 成功！")
 
 def main():
-    print("=== Confluence Cleaner (V14: No-Go Zone Mode) ===")
+    print("=== Confluence Cleaner (V15: Strict Whitelist) ===")
     report = find_latest_report()
     targets = extract_all_project_links(report['body']['view']['value'])
     if not targets: return
