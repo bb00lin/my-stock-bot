@@ -53,19 +53,15 @@ def find_latest_report():
     print(f"✅ 搜尋成功: {results[0]['title']}")
     return results[0]
 
-# --- 網址追蹤 ---
 def resolve_real_page_id(href_link):
     if not href_link: return None
     if href_link.startswith('/'): full_url = f"{HOST_URL}{href_link}"
     else: full_url = href_link
-
     if 'pageId=' in full_url:
         qs = parse_qs(urlparse(full_url).query)
         if 'pageId' in qs: return qs['pageId'][0]
-    
     m = re.search(r'/pages/(\d+)', full_url)
     if m: return m.group(1)
-
     try:
         r = requests.head(full_url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), allow_redirects=True, timeout=10)
         final_url = r.url
@@ -80,12 +76,10 @@ def extract_all_project_links(report_body):
     soup = BeautifulSoup(report_body, 'lxml')
     tables = soup.find_all('table')
     project_targets = []
-    
     for table in tables:
         h_row = table.find('tr')
         if not h_row: continue
         headers = [c.get_text().strip() for c in h_row.find_all(['th', 'td'])]
-        
         if "Project" in headers:
             print("✅ 找到 Project Status 表格")
             proj_idx = headers.index("Project")
@@ -93,17 +87,13 @@ def extract_all_project_links(report_body):
                 cols = row.find_all('td')
                 if len(cols) > proj_idx:
                     for link in cols[proj_idx].find_all('a'):
-                        link_text = link.get_text().strip()
-                        href = link.get('href', '')
-                        target = {'name': link_text}
-                        
+                        target = {'name': link.get_text().strip()}
                         pid = link.get('data-linked-resource-id')
                         if pid: target['id'] = pid
                         else:
-                            real_id = resolve_real_page_id(href)
+                            real_id = resolve_real_page_id(link.get('href', ''))
                             if real_id: target['id'] = real_id
-                            else: target['title'] = link_text
-                        
+                            else: target['title'] = target['name']
                         if target.get('id') or target.get('title'):
                             exists = False
                             for t in project_targets:
@@ -124,7 +114,6 @@ def get_page_by_title(title):
     r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
     res = r.json().get('results', [])
     if res: return res[0]
-    
     if not title.startswith("WeeklyStatus_"):
         print(f"   嘗試補全標題: WeeklyStatus_{title}")
         r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params={'title': f"WeeklyStatus_{title}", 'expand': 'body.storage,version'})
@@ -132,7 +121,7 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- 內容切割 ---
+# --- V27 偵錯與切割邏輯 ---
 
 def is_date_header(text):
     if not text: return False
@@ -145,14 +134,13 @@ def split_cell_content(cell_soup):
         if isinstance(child, NavigableString) and not child.strip():
             if current_entry: current_entry.append(child)
             continue
-        
         is_header = False
         if isinstance(child, Tag) and child.name in ['p', 'span', 'div']:
             txt = child.get_text().strip()
             if is_date_header(txt): is_header = True
         elif isinstance(child, NavigableString):
             if is_date_header(str(child).strip()): is_header = True
-
+        
         if is_header:
             if current_entry: entries.append(current_entry)
             current_entry = [child]
@@ -161,48 +149,43 @@ def split_cell_content(cell_soup):
     if current_entry: entries.append(current_entry)
     return entries
 
-# 【V26 關鍵修改】：加入 #C9372C
-def check_entry_red(entry_nodes):
+def check_entry_red(entry_nodes, dump_html=False):
+    # 加入所有可能的紅色特徵 (包含變數和 Hex)
     red_patterns = [
-        r'color:\s*red', 
-        r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', 
-        r'#c9372c',  # <--- 你的截圖色碼
-        r'#C9372C',  # <--- 大寫保險
+        r'color:\s*red', r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', 
+        r'#c9372c',  # 你的色碼
         r'rgb\(\s*255\s*,\s*0\s*,\s*0\s*\)', 
         r'rgb\(\s*255\s*,\s*86\s*,\s*48\s*\)', 
-        r'rgb\(\s*201\s*,\s*55\s*,\s*44\s*\)', # RGB for C9372C
-        r'color:\s*rgb\(\s*2' # 寬鬆匹配所有 R=2xx 的紅色
+        r'rgb\(\s*201\s*,\s*55\s*,\s*44\s*\)',
+        r'var\(--ds-text-danger', # 針對 CSS 變數
+        r'var\(--ds-icon-accent-red'
     ]
-    
     combined_regex = re.compile('|'.join(red_patterns), re.IGNORECASE)
 
+    found_red = False
     for node in entry_nodes:
         if isinstance(node, Tag):
             node_str = str(node)
+            # 【V27】 強制印出 HTML 原始碼 (只印前 300 字避免洗版)
+            if dump_html:
+                print(f"\n      🔥 [DEBUG HTML]: {node_str[:300]}")
+            
             if combined_regex.search(node_str):
-                return True
-    return False
+                found_red = True
+    return found_red
 
 def get_or_create_history_table(soup, main_table):
     macros = soup.find_all('ac:structured-macro', attrs={"ac:name": "expand"})
     target_macro = None
     for m in macros:
         t = m.find('ac:parameter', attrs={"ac:name": "title"})
-        if t and "history" in t.get_text().lower():
-            target_macro = m
-            break
-    
+        if t and "history" in t.get_text().lower(): target_macro = m; break
     if not target_macro:
         target_macro = soup.new_tag('ac:structured-macro', attrs={"ac:name": "expand"})
-        p = soup.new_tag('ac:parameter', attrs={"ac:name": "title"})
-        p.string = "history"
+        p = soup.new_tag('ac:parameter', attrs={"ac:name": "title"}); p.string = "history"
         target_macro.append(p)
-        body = soup.new_tag('ac:rich-text-body')
-        target_macro.append(body)
-        if main_table.parent:
-            main_table.insert_after(target_macro)
-            target_macro.insert_before(soup.new_tag('p'))
-    
+        body = soup.new_tag('ac:rich-text-body'); target_macro.append(body)
+        if main_table.parent: main_table.insert_after(target_macro); target_macro.insert_before(soup.new_tag('p'))
     body = target_macro.find('ac:rich-text-body')
     hist_table = body.find('table')
     if not hist_table:
@@ -222,37 +205,32 @@ def clean_project_page_content(html_content, page_title):
     for t in all_tables:
         if t.find_parent('ac:structured-macro'): continue
         headers = [c.get_text().strip() for c in t.find_all('th')]
-        if "Item" in headers and "Update" in headers:
-            main_table = t
-            break
-            
+        if "Item" in headers and "Update" in headers: main_table = t; break
     if not main_table:
         print(f"   ⚠️  [{page_title}] 找不到主表格，跳過。")
         return None, []
 
-    print(f"   🔍 [{page_title}] 找到主表格，分析中...")
+    print(f"   🔍 [{page_title}] 找到主表格...")
     sys.stdout.flush()
-    
     rows = main_table.find_all('tr', recursive=False)
     if not rows and main_table.find('tbody', recursive=False):
         rows = main_table.find('tbody', recursive=False).find_all('tr', recursive=False)
-
     if not rows: return None, []
 
     header_row = rows[0]
     headers = [c.get_text().strip() for c in header_row.find_all(['th', 'td'], recursive=False)]
-    try:
-        item_idx = headers.index("Item")
-        update_idx = headers.index("Update")
+    try: item_idx = headers.index("Item"); update_idx = headers.index("Update")
     except ValueError: return None, []
 
     history_table_ref = None
     total_rows = len(rows) - 1
     
+    # 【V27】只針對 AhGW 專案的前幾個 Item 開啟 Debug Dump
+    is_debug_target = ("AhGW" in page_title)
+
     for i, row in enumerate(rows[1:]):
         sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...")
         sys.stdout.flush()
-
         cols = row.find_all('td', recursive=False)
         if len(cols) <= max(item_idx, update_idx): continue
         
@@ -263,58 +241,42 @@ def clean_project_page_content(html_content, page_title):
 
         item_name = cols[item_idx].get_text().strip()[:50]
         entries = split_cell_content(update_cell)
-        
         if len(entries) <= KEEP_LIMIT: continue
             
-        keep = []
-        archive = []
-        count = 0
-        
+        keep = []; archive = []; count = 0
         for entry in entries:
-            is_red = check_entry_red(entry)
-            if is_red:
+            # 開啟 Debug
+            do_dump = (is_debug_target and i < 2) 
+            if check_entry_red(entry, dump_html=do_dump):
                 keep.append(entry)
-                extracted_summary_items.append(copy.deepcopy(entry)) 
+                extracted_summary_items.append(copy.deepcopy(entry))
                 continue
-            
-            if count < KEEP_LIMIT:
-                keep.append(entry)
-                count += 1
-            else:
-                archive.append(entry)
+            if count < KEEP_LIMIT: keep.append(entry); count += 1
+            else: archive.append(entry)
         
         if not archive: continue
         changed = True
-        
         update_cell.clear()
         for e in keep:
             for n in e: update_cell.append(n)
-            
-        if not history_table_ref:
-            history_table_ref = get_or_create_history_table(soup, main_table)
-            
+        if not history_table_ref: history_table_ref = get_or_create_history_table(soup, main_table)
         hist_rows = history_table_ref.find_all('tr', recursive=False)
         target_row = None
         for hr in hist_rows:
             hc = hr.find_all('td', recursive=False)
             if not hc: continue
-            if hc[item_idx].get_text().strip()[:50] == item_name:
-                target_row = hr
-                break
-        
+            if hc[item_idx].get_text().strip()[:50] == item_name: target_row = hr; break
         if not target_row:
             target_row = soup.new_tag('tr')
             for _ in range(len(headers)): target_row.append(soup.new_tag('td'))
             target_row.find_all('td')[item_idx].string = item_name
             history_table_ref.append(target_row)
-            
         dest = target_row.find_all('td', recursive=False)[update_idx]
         if dest.contents: dest.append(soup.new_tag('br'))
         for e in archive:
             for n in e: dest.append(n)
     
     print(f"\r      Processing Row {total_rows}/{total_rows} (Done)        ")
-    sys.stdout.flush()
     return (str(soup) if changed else None), extracted_summary_items
 
 def update_page(page_data, new_content):
@@ -333,73 +295,47 @@ def update_main_report_summary(main_report_data, summary_data):
     if not summary_data:
         print("📭 沒有紅字摘要，跳過更新。")
         return
-
     print(f"\n📝 正在更新主週報指定區塊: {main_report_data['title']}...")
-    
     html_content = main_report_data['body']['storage']['value']
     soup = BeautifulSoup(html_content, 'lxml')
-    
     SEPARATOR = "-------------------------------------"
-    
     separators = []
     sep_pattern = re.compile(r'-{20,}')
-    
     for tag in soup.find_all(string=sep_pattern):
         parent = tag.find_parent(['p', 'div'])
         if parent: separators.append(parent)
         else: separators.append(tag)
-
     target_start = None
-    
     if len(separators) >= 2:
         print("   ✅ 找到現有區塊，準備清空並覆寫...")
         target_start = separators[-2]
         target_end = separators[-1]
-        
         curr = target_start.next_sibling
         while curr and curr != target_end:
             next_node = curr.next_sibling
-            if isinstance(curr, Tag) or isinstance(curr, NavigableString):
-                curr.extract()
+            if isinstance(curr, Tag) or isinstance(curr, NavigableString): curr.extract()
             curr = next_node
-            
     else:
         print("   ⚠️ 未找到完整區塊，將在頁面最下方新增...")
-        target_start = soup.new_tag('p')
-        target_start.string = SEPARATOR
-        target_end = soup.new_tag('p')
-        target_end.string = SEPARATOR
-        soup.append(target_start)
-        soup.append(target_end)
-
-    cursor = target_start
+        target_start = soup.new_tag('p'); target_start.string = SEPARATOR
+        target_end = soup.new_tag('p'); target_end.string = SEPARATOR
+        soup.append(target_start); soup.append(target_end)
     
+    cursor = target_start
     for project_data in summary_data:
         p_name = project_data['project']
         p_items = project_data['items']
-        
         if not p_items: continue
-        
         name_tag = soup.new_tag('p')
-        strong = soup.new_tag('strong')
-        strong.string = p_name
+        strong = soup.new_tag('strong'); strong.string = p_name
         name_tag.append(strong)
-        
-        cursor.insert_after(name_tag)
-        cursor = name_tag
-        
+        cursor.insert_after(name_tag); cursor = name_tag
         for entry_nodes in p_items:
             item_container = soup.new_tag('p')
-            for node in entry_nodes:
-                item_container.append(copy.copy(node))
-            
-            cursor.insert_after(item_container)
-            cursor = item_container
-            
-        spacer = soup.new_tag('p')
-        spacer.append(soup.new_tag('br'))
-        cursor.insert_after(spacer)
-        cursor = spacer
+            for node in entry_nodes: item_container.append(copy.copy(node))
+            cursor.insert_after(item_container); cursor = item_container
+        spacer = soup.new_tag('p'); spacer.append(soup.new_tag('br'))
+        cursor.insert_after(spacer); cursor = spacer
 
     print(f"💾 儲存主週報...")
     url = f"{API_ENDPOINT}/{main_report_data['id']}"
@@ -412,17 +348,13 @@ def update_main_report_summary(main_report_data, summary_data):
     requests.put(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), headers=get_headers(), data=json.dumps(payload)).raise_for_status()
     print("✅ 主週報更新成功！")
 
-
 def main():
-    print("=== Confluence Cleaner (V26: Color Fixed) ===")
-    
+    print("=== Confluence Cleaner (V27: Microscope Debug) ===")
     main_report = find_latest_report()
     targets = extract_all_project_links(main_report['body']['view']['value'])
     if not targets: return
-    
     print(f"📋 找到 {len(targets)} 個專案")
     summary_collection = []
-
     for t in targets:
         print(f"\n🚀 {t['name']}")
         p = None
@@ -430,25 +362,16 @@ def main():
         elif 'title' in t:
             print(f"   使用解析標題: {t['title']}")
             p = get_page_by_title(t['title'])
-            
-        if not p:
-            print("❌ 讀取失敗")
-            continue
-            
+        if not p: print("❌ 讀取失敗"); continue
         new_c, red_items = clean_project_page_content(p['body']['storage']['value'], p['title'])
-        
         if red_items:
             print(f"   📌 收集到 {len(red_items)} 筆紅字摘要")
             summary_collection.append({'project': t['name'], 'items': red_items})
-        
         if new_c: update_page(p, new_c)
         else: print("👌 專案頁面無需變更")
-
     print("-" * 30)
-    if summary_collection:
-        update_main_report_summary(main_report, summary_collection)
-    else:
-        print("📭 沒有紅字摘要，跳過更新。")
+    if summary_collection: update_main_report_summary(main_report, summary_collection)
+    else: print("📭 沒有紅字摘要，跳過更新。")
 
 if __name__ == "__main__":
     main()
