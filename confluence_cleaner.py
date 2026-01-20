@@ -121,7 +121,7 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- V30: 深度過濾邏輯 ---
+# --- V32 邏輯 ---
 
 def is_date_header(text):
     if not text: return False
@@ -149,92 +149,53 @@ def split_cell_content(cell_soup):
     if current_entry: entries.append(current_entry)
     return entries
 
+# 【V32 關鍵修改】：精確定義紅色，排除黑色 (rgb 23...)
 def is_node_red(node):
-    """檢查單一節點是否包含紅色"""
     red_patterns = [
         r'color:\s*red', r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', 
         r'#c9372c', r'#C9372C', 
-        r'rgb\(\s*255\s*,\s*0\s*,\s*0\s*\)', 
-        r'rgb\(\s*255\s*,\s*86\s*,\s*48\s*\)', 
-        r'rgb\(\s*201\s*,\s*55\s*,\s*44\s*\)',
-        r'color:\s*rgb\(\s*2' 
+        r'rgb\(\s*255', # 255, x, x
+        r'rgb\(\s*222', # 222, x, x
+        r'rgb\(\s*201', # 201, x, x
+        r'rgb\(\s*191', # 191, x, x
+        r'--ds-text-danger', # Atlassian Variable
+        r'--ds-icon-accent-red'
     ]
+    # 移除之前的 r'color:\s*rgb\(\s*2'，因為那會匹配到 rgb(23,...)
+    
     combined_regex = re.compile('|'.join(red_patterns), re.IGNORECASE)
     return bool(combined_regex.search(str(node)))
 
 def deep_clean_node(node):
-    """
-    【V30 核心】：遞迴清理節點
-    - 如果是 ul/ol，拆開檢查每個 li。
-    - 如果 li 是紅的 -> 保留。
-    - 如果 li 是黑的 -> 丟棄。
-    - 回傳：(保留的節點, 該節點是否包含紅字)
-    """
     if not isinstance(node, Tag):
-        # 純文字節點，如果是日期標題會在外層處理，這裡視為內容
-        # 如果純文字跟隨在紅字後面，通常要檢查父層顏色，這裡簡單處理：
-        # 如果純文字本身不含色碼，視為非紅字 (除非父層有 style，但這裡只看 node string)
         return node, is_node_red(node)
 
-    # 針對清單進行拆解
     if node.name in ['ul', 'ol']:
         new_list = BeautifulSoup(features='lxml').new_tag(node.name)
         has_red_child = False
-        
-        # 遍歷所有 li
         for li in node.find_all('li', recursive=False):
-            # 檢查這個 li 是否為紅色
             if is_node_red(li):
-                print(f"        [KEEP] Item: {li.get_text().strip()[:40]}...") # Log
                 new_list.append(copy.copy(li))
                 has_red_child = True
-            else:
-                print(f"        [DROP] Item: {li.get_text().strip()[:40]}...") # Log
-        
-        if has_red_child:
-            return new_list, True
-        else:
-            return None, False
+        if has_red_child: return new_list, True
+        else: return None, False
     
-    # 針對一般容器 (p, div)
-    if is_node_red(node):
-        print(f"        [KEEP] Node: {node.get_text().strip()[:40]}...") # Log
-        return node, True
-    else:
-        # 這裡不印 DROP Log 避免日期標題被誤報為 DROP
-        return node, False
+    if is_node_red(node): return node, True
+    else: return node, False
 
 def filter_entry_red_only_deep(entry_nodes):
-    """
-    處理一個日期區塊 (Header + Body Nodes)
-    """
     if not entry_nodes: return None
-    
     header = entry_nodes[0]
     body_nodes = entry_nodes[1:]
-    
     kept_body = []
     
-    # 顯示正在處理的日期
-    header_text = header.get_text().strip() if isinstance(header, Tag) else str(header).strip()
-    print(f"      ▶ 檢查日期區塊: {header_text}")
-
     for node in body_nodes:
         cleaned_node, kept = deep_clean_node(node)
-        if kept and cleaned_node:
-            kept_body.append(cleaned_node)
+        if kept and cleaned_node: kept_body.append(cleaned_node)
     
-    # 規則：只有當 Body 有保留紅字，或是 Header 本身是紅字時，才保留此區塊
     header_is_red = is_node_red(header)
-    
-    if kept_body:
-        return [header] + kept_body
-    elif header_is_red:
-        # 只有標題是紅的，下面沒東西？通常保留標題
-        print(f"        [KEEP] Header only (Red): {header_text}")
-        return [header]
-    
-    print(f"        [DROP] 整個日期區塊無紅字")
+    if kept_body: return [header] + kept_body
+    elif header_is_red: return [header]
     return None
 
 def get_or_create_history_table(soup, main_table):
@@ -273,7 +234,7 @@ def clean_project_page_content(html_content, page_title):
         print(f"   ⚠️  [{page_title}] 找不到主表格，跳過。")
         return None, []
 
-    print(f"   🔍 [{page_title}] 找到主表格，開始深度掃描...")
+    print(f"   🔍 [{page_title}] 找到主表格...")
     sys.stdout.flush()
     rows = main_table.find_all('tr', recursive=False)
     if not rows and main_table.find('tbody', recursive=False):
@@ -289,54 +250,29 @@ def clean_project_page_content(html_content, page_title):
     total_rows = len(rows) - 1
     
     for i, row in enumerate(rows[1:]):
-        # sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...") # 暫時註解進度條以顯示詳細 Log
-        # sys.stdout.flush()
-        print(f"   --- Row {i+1}/{total_rows} ---")
-
+        sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...")
+        sys.stdout.flush()
         cols = row.find_all('td', recursive=False)
         if len(cols) <= max(item_idx, update_idx): continue
         
         update_cell = cols[update_idx]
-        if update_cell.find('table'):
-            print(f"      [SKIP Heavy Table]")
-            continue
+        if update_cell.find('table'): continue
 
         item_name = cols[item_idx].get_text().strip()[:50]
         entries = split_cell_content(update_cell)
         
-        # V30: 深度過濾與重建
         filtered_entries = []
-        has_change_in_this_cell = False # 標記此格是否需要因為過濾黑字而更新
-
-        # 1. 執行過濾 (這會產生只有紅字的列表)
         for entry in entries:
             clean_entry = filter_entry_red_only_deep(entry)
             if clean_entry:
                 filtered_entries.append(clean_entry)
                 extracted_summary_items.append(copy.deepcopy(clean_entry))
-            else:
-                # 如果原本有 entry 但過濾後沒了，代表刪除了黑字 -> 需要更新
-                if entry: has_change_in_this_cell = True
 
-        # 檢查是否原本的 entries 和過濾後的 filtered_entries 不同
-        # 簡單判斷：如果數量變少，或原本有黑字被濾掉
-        # 這裡我們採用積極更新策略：只要過濾後的結果跟原始不同，就更新
-        
-        # 這裡的邏輯：
-        # 我們用 filtered_entries (只含紅字) 來做為新的 Cell 內容
-        # 然後再套用 KEEP_LIMIT 規則把舊的紅字移到 History
-        
         keep = filtered_entries[:KEEP_LIMIT]
         archive = filtered_entries[KEEP_LIMIT:]
         
-        # 判斷是否需要寫入變更
-        # 條件 1: 有東西要歸檔 (Archive)
-        # 條件 2: 雖然沒歸檔，但我們過濾掉了黑字 (Cleaned up) -> 比較難判斷，直接覆寫最簡單
-        
-        # 為了確保「其他項目請刪除」生效，我們必須覆寫 update_cell
-        # 除非原本就是空的
-        if not entries and not filtered_entries:
-            continue
+        # 只要原始不為空，我們就覆寫（為了刪除黑字）
+        if not entries: continue 
 
         changed = True
         update_cell.clear()
@@ -361,7 +297,9 @@ def clean_project_page_content(html_content, page_title):
             for e in archive:
                 for n in e: dest.append(n)
     
-    print(f"      處理完成")
+    print(f"\r      Processing Row {total_rows}/{total_rows} (Done)        ")
+    if extracted_summary_items:
+        print(f"      📌 本專案發現 {len(extracted_summary_items)} 組紅字摘要")
     return (str(soup) if changed else None), extracted_summary_items
 
 def update_page(page_data, new_content):
@@ -381,6 +319,8 @@ def update_main_report_summary(main_report_data, summary_data):
         print("📭 沒有紅字摘要，跳過更新。")
         return
     print(f"\n📝 正在更新主週報指定區塊: {main_report_data['title']}...")
+    sys.stdout.flush() # 強制刷新 Log
+    
     html_content = main_report_data['body']['storage']['value']
     soup = BeautifulSoup(html_content, 'lxml')
     SEPARATOR = "-------------------------------------"
@@ -390,6 +330,7 @@ def update_main_report_summary(main_report_data, summary_data):
         parent = tag.find_parent(['p', 'div'])
         if parent: separators.append(parent)
         else: separators.append(tag)
+    
     target_start = None
     if len(separators) >= 2:
         print("   ✅ 找到現有區塊，準備清空並覆寫...")
@@ -411,14 +352,25 @@ def update_main_report_summary(main_report_data, summary_data):
         p_name = project_data['project']
         p_items = project_data['items']
         if not p_items: continue
+        
+        print(f"   👉 [SUMMARY] 寫入專案: {p_name}")
+        sys.stdout.flush() # 強制刷新
+        
         name_tag = soup.new_tag('p')
         strong = soup.new_tag('strong'); strong.string = p_name
         name_tag.append(strong)
         cursor.insert_after(name_tag); cursor = name_tag
+        
         for entry_nodes in p_items:
+            # Preview Log
+            preview_txt = "".join([n.get_text() if hasattr(n, 'get_text') else str(n) for n in entry_nodes]).strip().replace('\n', ' ')
+            print(f"      + [寫入] {preview_txt[:60]}...")
+            sys.stdout.flush() # 強制刷新
+
             item_container = soup.new_tag('p')
             for node in entry_nodes: item_container.append(copy.copy(node))
             cursor.insert_after(item_container); cursor = item_container
+            
         spacer = soup.new_tag('p'); spacer.append(soup.new_tag('br'))
         cursor.insert_after(spacer); cursor = spacer
 
@@ -434,7 +386,7 @@ def update_main_report_summary(main_report_data, summary_data):
     print("✅ 主週報更新成功！")
 
 def main():
-    print("=== Confluence Cleaner (V30: Deep Clean & Log) ===")
+    print("=== Confluence Cleaner (V32: Precision Color & Flush) ===")
     main_report = find_latest_report()
     targets = extract_all_project_links(main_report['body']['view']['value'])
     if not targets: return
