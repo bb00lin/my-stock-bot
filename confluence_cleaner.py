@@ -121,7 +121,7 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- V32 邏輯 ---
+# --- V33 核心：遞迴清洗邏輯 ---
 
 def is_date_header(text):
     if not text: return False
@@ -149,53 +149,65 @@ def split_cell_content(cell_soup):
     if current_entry: entries.append(current_entry)
     return entries
 
-# 【V32 關鍵修改】：精確定義紅色，排除黑色 (rgb 23...)
-def is_node_red(node):
+# 檢查標籤「本身」是否設定了紅色 (V32定義)
+def is_tag_directly_red(tag):
+    if not isinstance(tag, Tag): return False
+    
     red_patterns = [
         r'color:\s*red', r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', 
         r'#c9372c', r'#C9372C', 
-        r'rgb\(\s*255', # 255, x, x
-        r'rgb\(\s*222', # 222, x, x
-        r'rgb\(\s*201', # 201, x, x
-        r'rgb\(\s*191', # 191, x, x
-        r'--ds-text-danger', # Atlassian Variable
-        r'--ds-icon-accent-red'
+        r'rgb\(\s*255', r'rgb\(\s*222', r'rgb\(\s*201', r'rgb\(\s*191', 
+        r'--ds-text-danger', r'--ds-icon-accent-red'
     ]
-    # 移除之前的 r'color:\s*rgb\(\s*2'，因為那會匹配到 rgb(23,...)
-    
     combined_regex = re.compile('|'.join(red_patterns), re.IGNORECASE)
-    return bool(combined_regex.search(str(node)))
-
-def deep_clean_node(node):
-    if not isinstance(node, Tag):
-        return node, is_node_red(node)
-
-    if node.name in ['ul', 'ol']:
-        new_list = BeautifulSoup(features='lxml').new_tag(node.name)
-        has_red_child = False
-        for li in node.find_all('li', recursive=False):
-            if is_node_red(li):
-                new_list.append(copy.copy(li))
-                has_red_child = True
-        if has_red_child: return new_list, True
-        else: return None, False
     
-    if is_node_red(node): return node, True
-    else: return node, False
+    # 檢查 style 屬性
+    if tag.has_attr('style'):
+        if combined_regex.search(tag['style']): return True
+    
+    # 檢查 font color
+    if tag.name == 'font' and tag.has_attr('color'):
+        if combined_regex.search(tag['color']): return True
+        
+    return False
 
-def filter_entry_red_only_deep(entry_nodes):
-    if not entry_nodes: return None
-    header = entry_nodes[0]
-    body_nodes = entry_nodes[1:]
-    kept_body = []
+# 【V33 核彈級清洗】：遞迴刪除非紅字
+def recursive_prune_non_red(node):
+    """
+    遞迴檢查：
+    1. 如果節點本身是紅的 -> 保留整顆樹 (回傳 node)
+    2. 如果節點是文字 -> 刪除 (回傳 None) (因為如果它是紅的，它早就被父層的紅標籤包住並在第1步返回了)
+    3. 如果節點是標籤但沒顏色 -> 檢查它的子節點，只保留紅色的子節點。如果子節點全死光，自己也自殺。
+    """
     
-    for node in body_nodes:
-        cleaned_node, kept = deep_clean_node(node)
-        if kept and cleaned_node: kept_body.append(cleaned_node)
-    
-    header_is_red = is_node_red(header)
-    if kept_body: return [header] + kept_body
-    elif header_is_red: return [header]
+    # 1. 如果是 Tag 且自帶紅色 -> 保留
+    if isinstance(node, Tag) and is_tag_directly_red(node):
+        return node
+        
+    # 2. 如果是文字節點 (走到這裡代表父層沒紅色) -> 刪除 (這是黑字!)
+    if isinstance(node, NavigableString):
+        if not node.strip(): return node # 保留空白排版
+        return None # 刪除黑字內容
+        
+    # 3. 如果是普通 Tag (p, div, span, ul, li...) -> 檢查子節點
+    if isinstance(node, Tag):
+        # 建立新副本以免破壞原始結構
+        new_node = copy.copy(node)
+        new_node.clear() # 清空子節點，準備重組
+        
+        has_survivor = False
+        for child in node.contents:
+            survivor = recursive_prune_non_red(child)
+            if survivor:
+                new_node.append(copy.copy(survivor)) # 必須 copy 避免參考錯誤
+                has_survivor = True
+        
+        # 如果有子節點存活，就保留這個容器；否則刪除
+        if has_survivor:
+            return new_node
+        else:
+            return None
+            
     return None
 
 def get_or_create_history_table(soup, main_table):
@@ -261,18 +273,38 @@ def clean_project_page_content(html_content, page_title):
         item_name = cols[item_idx].get_text().strip()[:50]
         entries = split_cell_content(update_cell)
         
-        filtered_entries = []
+        # 【V33】使用新的遞迴清洗
+        cleaned_entries = []
         for entry in entries:
-            clean_entry = filter_entry_red_only_deep(entry)
-            if clean_entry:
-                filtered_entries.append(clean_entry)
-                extracted_summary_items.append(copy.deepcopy(clean_entry))
+            # entry 是一組節點 (日期 + 內容)，我們一個個洗
+            cleaned_group = []
+            
+            # 先檢查標題 (日期)
+            header = entry[0]
+            # 標題特例：如果標題本身是紅的，保留；如果是黑的，但下面有紅字，也保留
+            body_nodes = entry[1:]
+            surviving_body = []
+            
+            for node in body_nodes:
+                survivor = recursive_prune_non_red(node)
+                if survivor: surviving_body.append(survivor)
+            
+            header_is_red = False
+            if isinstance(header, Tag) and is_tag_directly_red(header): header_is_red = True
+            if isinstance(header, Tag) and header.find(is_tag_directly_red): header_is_red = True # 檢查子層
+            
+            # 如果有內容存活，或者標題本身是紅的 -> 保留這組
+            if surviving_body or header_is_red:
+                cleaned_group.append(header) # 標題照舊保留 (即使是黑的，只要下面有紅字就留)
+                cleaned_group.extend(surviving_body)
+                cleaned_entries.append(cleaned_group)
+                # 收集摘要
+                extracted_summary_items.append(copy.deepcopy(cleaned_group))
 
-        keep = filtered_entries[:KEEP_LIMIT]
-        archive = filtered_entries[KEEP_LIMIT:]
+        keep = cleaned_entries[:KEEP_LIMIT]
+        archive = cleaned_entries[KEEP_LIMIT:]
         
-        # 只要原始不為空，我們就覆寫（為了刪除黑字）
-        if not entries: continue 
+        if not entries and not cleaned_entries: continue
 
         changed = True
         update_cell.clear()
@@ -319,7 +351,7 @@ def update_main_report_summary(main_report_data, summary_data):
         print("📭 沒有紅字摘要，跳過更新。")
         return
     print(f"\n📝 正在更新主週報指定區塊: {main_report_data['title']}...")
-    sys.stdout.flush() # 強制刷新 Log
+    sys.stdout.flush()
     
     html_content = main_report_data['body']['storage']['value']
     soup = BeautifulSoup(html_content, 'lxml')
@@ -354,7 +386,7 @@ def update_main_report_summary(main_report_data, summary_data):
         if not p_items: continue
         
         print(f"   👉 [SUMMARY] 寫入專案: {p_name}")
-        sys.stdout.flush() # 強制刷新
+        sys.stdout.flush()
         
         name_tag = soup.new_tag('p')
         strong = soup.new_tag('strong'); strong.string = p_name
@@ -365,7 +397,7 @@ def update_main_report_summary(main_report_data, summary_data):
             # Preview Log
             preview_txt = "".join([n.get_text() if hasattr(n, 'get_text') else str(n) for n in entry_nodes]).strip().replace('\n', ' ')
             print(f"      + [寫入] {preview_txt[:60]}...")
-            sys.stdout.flush() # 強制刷新
+            sys.stdout.flush() 
 
             item_container = soup.new_tag('p')
             for node in entry_nodes: item_container.append(copy.copy(node))
@@ -386,7 +418,7 @@ def update_main_report_summary(main_report_data, summary_data):
     print("✅ 主週報更新成功！")
 
 def main():
-    print("=== Confluence Cleaner (V32: Precision Color & Flush) ===")
+    print("=== Confluence Cleaner (V33: Recursive Pruning) ===")
     main_report = find_latest_report()
     targets = extract_all_project_links(main_report['body']['view']['value'])
     if not targets: return
