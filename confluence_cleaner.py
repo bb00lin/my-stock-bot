@@ -20,8 +20,9 @@ if not RAW_URL or not USERNAME or not API_TOKEN:
     sys.exit(1)
 
 parsed = urlparse(RAW_URL)
-BASE_URL = f"{parsed.scheme}://{parsed.netloc}"
-API_ENDPOINT = f"{BASE_URL}/wiki/rest/api/content"
+# 取得網站根目錄 (例如 https://qsiaiot.atlassian.net)
+HOST_URL = f"{parsed.scheme}://{parsed.netloc}"
+API_ENDPOINT = f"{HOST_URL}/wiki/rest/api/content"
 
 def get_headers():
     return {"Content-Type": "application/json"}
@@ -53,6 +54,47 @@ def find_latest_report():
     print(f"✅ 搜尋成功: {results[0]['title']}")
     return results[0]
 
+# --- V20 新增：網址追蹤解析器 ---
+def resolve_real_page_id(href_link):
+    """
+    追蹤網址重導向，獲取最終的 Page ID
+    """
+    if not href_link: return None
+    
+    # 組合完整網址
+    if href_link.startswith('/'):
+        full_url = f"{HOST_URL}{href_link}"
+    else:
+        full_url = href_link
+
+    # 如果網址本身就有 ID，直接回傳 (省時間)
+    if 'pageId=' in full_url:
+        qs = parse_qs(urlparse(full_url).query)
+        if 'pageId' in qs: return qs['pageId'][0]
+    
+    m = re.search(r'/pages/(\d+)', full_url)
+    if m: return m.group(1)
+
+    # 如果看不出來，發送 HEAD 請求追蹤 (Trace)
+    try:
+        # print(f"   ☁️ 追蹤網址: {href_link[:30]}...", end='')
+        # HEAD 請求很快，只拿檔頭不拿內容
+        r = requests.head(full_url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), allow_redirects=True, timeout=10)
+        final_url = r.url
+        
+        # 從最終網址抓 ID
+        qs = parse_qs(urlparse(final_url).query)
+        if 'pageId' in qs: 
+            return qs['pageId'][0]
+        
+        m = re.search(r'/pages/(\d+)', final_url)
+        if m: return m.group(1)
+        
+    except:
+        pass
+    
+    return None
+
 def extract_all_project_links(report_body):
     soup = BeautifulSoup(report_body, 'lxml')
     tables = soup.find_all('table')
@@ -73,49 +115,27 @@ def extract_all_project_links(report_body):
                         link_text = link.get_text().strip()
                         href = link.get('href', '')
                         
-                        target = {'name': link_text} # 預設名稱用文字，方便辨識
+                        target = {'name': link_text}
                         
-                        # 策略 1: 嘗試取得 data-linked-resource-id (最準)
+                        # 1. 優先用 data-id
                         pid = link.get('data-linked-resource-id')
                         if pid:
                             target['id'] = pid
                         else:
-                            # 策略 2: 分析 href 網址
-                            # 情況 A: URL 包含 pageId 參數
-                            if 'pageId=' in href:
-                                qs = parse_qs(urlparse(href).query)
-                                if 'pageId' in qs: 
-                                    target['id'] = qs['pageId'][0]
-                            
-                            # 情況 B: URL 包含 /pages/123456/ (Confluence 標準格式)
-                            # Regex 改良：抓取 /pages/ 後面的數字
-                            elif '/pages/' in href:
-                                m = re.search(r'/pages/(\d+)', href)
-                                if m: 
-                                    target['id'] = m.group(1)
-                                else:
-                                    # 沒 ID，嘗試抓最後一段當標題 (解碼 URL)
-                                    # 例如 .../WeeklyStatus_QCA2066+MP -> WeeklyStatus_QCA2066[MP]
-                                    clean_title = unquote(href.split('/')[-1]).replace('+', ' ')
-                                    target['title'] = clean_title
-
-                            # 情況 C: 一般顯示連結 /display/Space/Page+Title
-                            elif '/display/' in href:
-                                clean_title = unquote(href.split('/')[-1]).replace('+', ' ')
-                                target['title'] = clean_title
-                                
-                            # 策略 3: 真的什麼都沒有，才用連結文字去猜
+                            # 2. 如果沒有，使用 V20 網址追蹤術
+                            real_id = resolve_real_page_id(href)
+                            if real_id:
+                                target['id'] = real_id
                             else:
+                                # 3. 真的沒辦法才用標題猜 (最後手段)
                                 target['title'] = link_text
                         
                         if target.get('id') or target.get('title'):
-                            # 避免重複加入
-                            is_exist = False
+                            # 去重
+                            exists = False
                             for t in project_targets:
-                                if t.get('id') == target.get('id') and target.get('id'): is_exist = True
-                                if t.get('title') == target.get('title') and target.get('title'): is_exist = True
-                            
-                            if not is_exist:
+                                if t.get('id') and t['id'] == target.get('id'): exists = True
+                            if not exists:
                                 project_targets.append(target)
             break 
     return project_targets
@@ -133,7 +153,6 @@ def get_page_by_title(title):
     res = r.json().get('results', [])
     if res: return res[0]
     
-    # 自動補全 WeeklyStatus_ 前綴 (如果網址解析出來的標題本身就沒帶)
     if not title.startswith("WeeklyStatus_"):
         print(f"   嘗試補全標題: WeeklyStatus_{title}")
         r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params={'title': f"WeeklyStatus_{title}", 'expand': 'body.storage,version'})
@@ -141,7 +160,7 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- V18 避雷針模式邏輯 ---
+# --- V18 內容切割邏輯 (避雷針版) ---
 
 def is_date_header(text):
     if not text: return False
@@ -243,6 +262,7 @@ def clean_project_page_content(html_content, page_title):
     total_rows = len(rows) - 1
     
     for i, row in enumerate(rows[1:]):
+        # 進度條
         sys.stdout.write(f"\r      Processing Row {i+1}/{total_rows} ...")
         sys.stdout.flush()
 
@@ -320,7 +340,7 @@ def update_page(page_data, new_content):
     print("✅ 成功！")
 
 def main():
-    print("=== Confluence Cleaner (V19: Smart Link Parsing) ===")
+    print("=== Confluence Cleaner (V20: Link Tracer) ===")
     report = find_latest_report()
     targets = extract_all_project_links(report['body']['view']['value'])
     if not targets: return
@@ -329,9 +349,9 @@ def main():
         print(f"\n🚀 {t['name']}")
         p = None
         if 'id' in t:
+            # V20: 如果有 ID (包含追蹤到的)，直接用 ID
             p = get_page_by_id(t['id'])
         elif 'title' in t:
-            # 優先使用解析出來的標題
             print(f"   使用解析標題: {t['title']}")
             p = get_page_by_title(t['title'])
             
