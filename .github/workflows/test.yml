@@ -22,7 +22,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests beautifulsoup4 lxml
+        pip install atlassian-python-api beautifulsoup4 requests lxml
 
     # 4. 執行清理腳本 (使用原本的 Secrets)
     - name: Run Cleaner Script
