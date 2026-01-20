@@ -121,14 +121,12 @@ def get_page_by_title(title):
         if res: return res[0]
     return None
 
-# --- V37: 線性重組與過濾 ---
+# --- V37改: 線性重組與過濾 ---
 
 def is_date_text(text):
     if not text: return False
-    # 寬鬆匹配日期格式 [YYYY/MM/DD]
     return bool(re.search(r'\[\d{4}/\d{1,2}/\d{1,2}\]', text[:50]))
 
-# 檢查節點本身是否帶有紅色屬性 (精確定義)
 def is_node_red(node):
     red_patterns = [
         r'color:\s*red', r'#ff0000', r'#de350b', r'#bf2600', r'#ff5630', r'#ce0000', 
@@ -138,21 +136,15 @@ def is_node_red(node):
     ]
     combined_regex = re.compile('|'.join(red_patterns), re.IGNORECASE)
     
-    # 檢查 style 屬性 或 font color
     if isinstance(node, Tag):
         if node.has_attr('style') and combined_regex.search(node['style']): return True
         if node.name == 'font' and node.has_attr('color') and combined_regex.search(node['color']): return True
-        # 遞迴檢查子節點是否有紅色 (如果有子節點是紅的，這整塊就視為含紅)
-        # 注意：這裡我們只看「屬性」，內容判斷留給主邏輯
     return False
 
-# 遞迴將 HTML 攤平成「行」 (Nodes List)
-# 每一行代表視覺上的一行 (被 br, p, div, li 切開)
 def flatten_html_to_lines(node, current_line=None, all_lines=None):
     if current_line is None: current_line = []
     if all_lines is None: all_lines = []
     
-    # 區塊元素，強制換行
     block_tags = ['p', 'div', 'li', 'br', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']
     
     if isinstance(node, Tag):
@@ -166,7 +158,6 @@ def flatten_html_to_lines(node, current_line=None, all_lines=None):
             all_lines.append(current_line[:])
             current_line.clear()
             
-        # 遞迴處理子節點
         for child in node.contents:
             flatten_html_to_lines(child, current_line, all_lines)
             
@@ -176,19 +167,11 @@ def flatten_html_to_lines(node, current_line=None, all_lines=None):
             
     elif isinstance(node, NavigableString):
         if node.strip():
-            # 複製節點以保留原始屬性 (顏色等)
-            # 注意：NavigableString 本身沒顏色，顏色在父層。
-            # 這裡我們需要一個技巧：保留父層的樣式資訊。
-            # V37 簡化：直接存 node，之後判斷時往上找 parent 或在 flatten 時傳遞 context。
-            # 但因為 BeautifulSoup 的 parent 屬性是動態的，copy 後會遺失。
-            # 所以我們不 copy，直接存引用。
             current_line.append(node)
 
     return all_lines
 
-# 檢查一個節點(及其父層)是否為紅色
 def is_element_red_context(element):
-    # 往上找直到 table cell (td)
     curr = element
     while curr and curr.name != 'td' and curr.name != 'body':
         if is_node_red(curr): return True
@@ -232,75 +215,47 @@ def clean_project_page_content(html_content, page_title):
         update_cell = cols[update_idx]
         if update_cell.find('table'): continue
 
-        # --- V37 核心：線性分組邏輯 ---
-        
-        # 1. 取得所有「行」 (視覺上的每一行文字)
         raw_lines = []
         flatten_html_to_lines(update_cell, None, raw_lines)
         
-        # 2. 進行分組 (按日期切分)
         groups = []
-        current_group = {'header': [], 'items': []} # header 是節點列表, items 是列表的列表
+        current_group = {'header': [], 'items': []}
         
         for line_nodes in raw_lines:
-            # 取得這一行的純文字
             line_text = "".join([str(n) for n in line_nodes]).strip()
             
             if is_date_text(line_text):
-                # 遇到新日期 -> 結算上一組
-                if current_group['header']:
-                    groups.append(current_group)
-                
-                # 開啟新組
+                if current_group['header']: groups.append(current_group)
                 current_group = {'header': line_nodes, 'items': []}
             else:
-                # 內容行 -> 加入當前組
-                if line_nodes:
-                    current_group['items'].append(line_nodes)
+                if line_nodes: current_group['items'].append(line_nodes)
         
-        # 加入最後一組
-        if current_group['header']:
-            groups.append(current_group)
+        if current_group['header']: groups.append(current_group)
             
-        # 3. 過濾組 (只保留紅字項目)
         for group in groups:
             header_nodes = group['header']
             item_lines = group['items']
-            
             valid_items = []
             
-            # 檢查每個項目行是否為紅字
             for line_nodes in item_lines:
                 is_line_red = False
                 for node in line_nodes:
                     if is_element_red_context(node):
                         is_line_red = True
                         break
-                
-                if is_line_red:
-                    valid_items.append(line_nodes)
+                if is_line_red: valid_items.append(line_nodes)
             
-            # 檢查標題是否為紅字
             header_is_red = False
             for node in header_nodes:
                 if is_element_red_context(node):
                     header_is_red = True
                     break
             
-            # 規則：如果有紅字項目，或者標題本身是紅的 -> 保留
             if valid_items or header_is_red:
-                # 重組這個 Entry
-                # 格式：Header + <br> + Item1 + <br> + Item2 ...
                 reconstructed_entry = []
-                
-                # 加入 Header
-                # 為了避免引用問題，這裡我們用 deepcopy，但要注意 NavigableString 的 context
-                # 簡單起見，我們只複製節點本身，因為我們已經判定過顏色了
                 for n in header_nodes: reconstructed_entry.append(copy.copy(n))
-                
-                # 加入 Items
                 for item_line in valid_items:
-                    reconstructed_entry.append(soup.new_tag('br')) # 換行
+                    reconstructed_entry.append(soup.new_tag('br'))
                     for n in item_line: reconstructed_entry.append(copy.copy(n))
                 
                 extracted_summary_items.append(reconstructed_entry)
@@ -309,7 +264,7 @@ def clean_project_page_content(html_content, page_title):
     if extracted_summary_items:
         print(f"      📌 本專案採集到 {len(extracted_summary_items)} 組紅字摘要")
     
-    return None, extracted_summary_items # Read-Only
+    return None, extracted_summary_items
 
 def update_page(page_data, new_content):
     pass
@@ -356,19 +311,25 @@ def update_main_report_summary(main_report_data, summary_data):
         print(f"   👉 [SUMMARY] 寫入專案: {p_name}")
         sys.stdout.flush()
         
+        # 標題 (Project Name) - 保持黑色 (預設)
         name_tag = soup.new_tag('p')
         strong = soup.new_tag('strong'); strong.string = p_name
         name_tag.append(strong)
         cursor.insert_after(name_tag); cursor = name_tag
         
+        # 內容項目 - 強制標記為紅色 (#C9372C)
         for entry_nodes in p_items:
-            # Preview Log
             preview_txt = "".join([n.get_text() if hasattr(n, 'get_text') else str(n) for n in entry_nodes]).strip().replace('\n', ' ')
             print(f"      + [寫入] {preview_txt[:60]}...")
             sys.stdout.flush() 
 
             item_container = soup.new_tag('p')
-            for node in entry_nodes: item_container.append(copy.copy(node))
+            # 【關鍵修改】: 強制設定紅色樣式，解決文字剝離後變黑的問題
+            item_container['style'] = "color: #C9372C;"
+            
+            for node in entry_nodes:
+                item_container.append(copy.copy(node))
+                
             cursor.insert_after(item_container); cursor = item_container
             
         spacer = soup.new_tag('p'); spacer.append(soup.new_tag('br'))
@@ -386,7 +347,7 @@ def update_main_report_summary(main_report_data, summary_data):
     print("✅ 主週報更新成功！")
 
 def main():
-    print("=== Confluence Cleaner (V37: Linear Reconstructor) ===")
+    print("=== Confluence Cleaner (V38: Forced Red Output) ===")
     main_report = find_latest_report()
     targets = extract_all_project_links(main_report['body']['view']['value'])
     if not targets: return
