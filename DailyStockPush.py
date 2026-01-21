@@ -1,7 +1,7 @@
 import os, yfinance as yf, pandas as pd, requests, time, datetime, sys
 import gspread
 import logging
-import json  # [新增] 必須匯入 json 模組
+import json # [新增] 必須匯入 json 模組
 from google import genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
@@ -381,6 +381,122 @@ def sync_to_sheets(data_list):
     except Exception as e:
         print(f"⚠️ Google Sheets 同步失敗: {e}")
 
+# ==========================================
+# 7. 全局總結報告生成器 (新增)
+# ==========================================
+def generate_and_save_summary(data_rows, report_time_str):
+    """
+    1. 整理 data_rows 資料 (庫存 vs 觀察)
+    2. 呼叫 Gemini Pro 進行高層次總結
+    3. 寫入新工作表 (名稱: report_time_str)
+    """
+    print("🧠 正在生成全域總結報告 (使用 Gemini Pro)...")
+    
+    if not ai_client:
+        print("❌ AI 未啟動，跳過總結報告")
+        return
+
+    # 1. 資料整理
+    inventory_txt = ""
+    watchlist_txt = ""
+    
+    # 根據 append 的順序: 
+    # 0:time, 1:id, 2:name, 3:hold_mark, 4:score, ... 20:hint, 21:ai_strategy
+    for row in data_rows:
+        try:
+            name = row[2]
+            sid = row[1]
+            status = row[3] # 📦庫存 or 👀觀察
+            score = row[4]
+            signal = row[20] # 系統訊號
+            ai_advice = row[21]
+            
+            # 簡化資訊給 AI 閱讀
+            stock_info = f"- {name}({sid}) | 評分:{score} | 訊號:{signal} | AI簡評:{ai_advice[:60]}...\n"
+            
+            if "庫存" in status:
+                inventory_txt += stock_info
+            else:
+                watchlist_txt += stock_info
+        except: continue
+
+    # 2. 組建 Prompt
+    prompt = f"""
+    角色：你是專業的台股投資總監。
+    任務：根據今日的「全能金流診斷報表」數據，撰寫一份高層次的【戰略總結報告】。
+    
+    【庫存持股清單】
+    {inventory_txt}
+    
+    【觀察名單清單】
+    {watchlist_txt}
+    
+    請針對以上資訊，使用繁體中文，撰寫以下三個章節（請條理分明，語氣專業）：
+    
+    ### 1. 庫存持股總體檢
+    (請分析目前持股的整體強弱、是否有出現危險訊號(如跌破均線/過熱)需要立刻處理的股票，並評估整體曝險狀況)
+    
+    ### 2. 觀察名單潛力股
+    (從觀察名單中挑選出評分最高、或籌碼/型態最值得關注的 3-5 檔潛力股進行點評，說明為何值得關注)
+    
+    ### 3. 總結操作建議
+    (給出明日或未來一週的整體操作策略，例如：積極做多、防守為主、現金為王或是調節持股)
+    """
+
+    summary_result = ""
+    target_model = "gemini-pro" # 適合長文分析
+    
+    try:
+        response = ai_client.models.generate_content(
+            model=target_model, 
+            contents=prompt
+        )
+        summary_result = response.text
+    except Exception as e:
+        print(f"❌ 總結報告生成失敗: {e}")
+        return
+
+    # 3. 寫入 Google Sheet 新工作表
+    try:
+        client = get_gspread_client()
+        if not client: return
+        
+        spreadsheet = client.open("全能金流診斷報表")
+        
+        # 處理工作表名稱 (使用傳入的精確時間)
+        sheet_title = report_time_str
+        
+        target_sheet = None
+        
+        # 檢查是否存在同名工作表
+        try:
+            target_sheet = spreadsheet.worksheet(sheet_title)
+            target_sheet.clear() # 清除舊內容
+            print(f"🧹 清除舊工作表: {sheet_title}")
+        except gspread.WorksheetNotFound:
+            # 新增工作表
+            try:
+                target_sheet = spreadsheet.add_worksheet(title=sheet_title, rows=100, cols=10)
+                print(f"🆕 建立新工作表: {sheet_title}")
+            except Exception as create_err:
+                print(f"⚠️ 無法建立工作表 (可能名稱不合法): {create_err}")
+                return
+            
+        # 寫入內容 (將長文按行寫入 A 欄)
+        lines = summary_result.split('\n')
+        cell_data = [[line] for line in lines]
+        
+        target_sheet.update(range_name='A1', values=cell_data)
+        
+        # 調整格式 (自動換行與欄寬)
+        target_sheet.format("A1:A100", {"wrapStrategy": "WRAP"})
+        target_sheet.columns_auto_resize(0, 0)
+        
+        print(f"✅ 戰略總結報告已寫入工作表: [{sheet_title}]")
+        
+    except Exception as e:
+        print(f"⚠️ 寫入總結工作表失敗: {e}")
+
 def main():
     # 時間顯示到分鐘 (修正為台灣時間 UTC+8)
     # 透過 timedelta 加上 8 小時
@@ -436,7 +552,11 @@ def main():
         requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
 
     if results_sheet:
+        # 1. 寫入原始報表
         sync_to_sheets(results_sheet)
+        
+        # 2. [新增] 生成並寫入 AI 總結報告 (傳入整理好的數據 與 時間名稱)
+        generate_and_save_summary(results_sheet, current_time)
 
 if __name__ == "__main__":
     main()
