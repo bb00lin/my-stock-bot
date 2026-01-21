@@ -47,7 +47,7 @@ def sync_to_sheets(data_list):
         print(f"⚠️ '法人精選監測' 同步失敗: {e}")
 
 def update_watch_list_sheet(recommended_stocks):
-    """將推薦標的匯入 'WATCH_LIST' (新增寫入股票名稱至B欄)"""
+    """將推薦標的匯入 'WATCH_LIST' (包含股票名稱與精確時間)"""
     if not recommended_stocks: return
 
     try:
@@ -63,18 +63,21 @@ def update_watch_list_sheet(recommended_stocks):
         existing_ids = set(str(row.get('股票代號', '')).strip() for row in existing_records)
         
         new_rows = []
-        today_str = datetime.date.today().strftime('%Y-%m-%d')
+        # [修改] 獲取當前時間精確到分鐘
+        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
         print(f"📋 準備將 {len(recommended_stocks)} 檔潛力股匯入 WATCH_LIST...")
 
         for stock in recommended_stocks:
             sid = stock['id']
-            name = stock['name'] # [新增] 獲取股票名稱
+            name = stock['name']
             
             if sid not in existing_ids:
-                # 寫入格式: A欄=代號, B欄=名稱, CDE欄空, F欄=推薦理由
-                reason_note = f"{today_str} {stock['reason']}"
-                new_rows.append([sid, name, "", "", "", reason_note]) # [修改] B欄填入 name
+                # [修改] reason_note 加入精確時間
+                reason_note = f"[{now_str}] {stock['reason']}"
+                
+                # 寫入格式: A欄=代號, B欄=名稱, CDE欄空, F欄=推薦理由(含時間)
+                new_rows.append([sid, name, "", "", "", reason_note])
                 existing_ids.add(sid)
 
         if new_rows:
@@ -196,12 +199,10 @@ def analyze_v14(ticker, name):
 
             if is_stable:
                 reason = f"🛡️AI穩健: {type_tag} (量{vol_ratio:.1f}x/RSI{rsi_val:.0f})"
-                # [修改] 加入 'name': name
                 recommendation = {'id': pure_id, 'name': name, 'reason': reason}
             
             elif is_aggressive:
                 reason = f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs}投{ss})"
-                # [修改] 加入 'name': name
                 recommendation = {'id': pure_id, 'name': name, 'reason': reason}
 
             return line_txt, sheet_data, recommendation
