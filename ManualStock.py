@@ -1,8 +1,22 @@
 import os, yfinance as yf, pandas as pd, requests, datetime, time, sys
 import gspread
-import json  # [新增] 必須匯入 json 模組
+import json
+import logging  # [新增] 引入 logging 模組
 from oauth2client.service_account import ServiceAccountCredentials
 from ta.momentum import RSIIndicator
+
+# ==========================================
+# 0. Log 設定 (新增部分)
+# ==========================================
+# 設定 Log 格式與輸出位置
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("execution_log.txt", mode='a', encoding='utf-8'), # 寫入檔案 (附加模式)
+        logging.StreamHandler() # 顯示在終端機
+    ]
+)
 
 # ==========================================
 # 1. 環境設定
@@ -25,7 +39,7 @@ def get_finmind_data(dataset, stock_id, start_date):
         data = res_json.get("data", [])
         return pd.DataFrame(data), res_json.get("msg", "")
     except Exception as e:
-        print(f"❌ API 請求失敗: {e}")
+        logging.error(f"❌ API 請求失敗: {e}") # 改用 logging
         return pd.DataFrame(), str(e)
 
 def get_stock_name_map():
@@ -38,7 +52,6 @@ def get_stock_name_map():
 
 STOCK_NAME_MAP = get_stock_name_map()
 
-# === [重要修正] 改為使用 GitHub Secrets 進行連線 ===
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     
@@ -46,7 +59,7 @@ def get_gspread_client():
     json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
     
     if not json_key_str:
-        print("❌ 錯誤：找不到 GOOGLE_SHEETS_JSON 環境變數！")
+        logging.error("❌ 錯誤：找不到 GOOGLE_SHEETS_JSON 環境變數！")
         return None
 
     try:
@@ -55,7 +68,7 @@ def get_gspread_client():
         client = gspread.authorize(creds)
         return client
     except Exception as e:
-        print(f"❌ 解析金鑰或連線失敗: {e}")
+        logging.error(f"❌ 解析金鑰或連線失敗: {e}")
         return None
 
 def sync_to_sheets(data_list):
@@ -65,26 +78,27 @@ def sync_to_sheets(data_list):
 
         sheet = client.open("個股深度診斷").get_worksheet(0)
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
-        print(f"✅ 成功同步 {len(data_list)} 筆診斷結果至雲端")
+        logging.info(f"✅ 成功同步 {len(data_list)} 筆診斷結果至雲端")
     except Exception as e:
-        print(f"⚠️ Google Sheets 同步失敗: {e}")
+        logging.error(f"⚠️ Google Sheets 同步失敗: {e}")
 
 def send_line_message(message):
-    if not LINE_ACCESS_TOKEN: return
+    if not LINE_ACCESS_TOKEN: 
+        logging.warning("⚠️ 未設定 LINE Token，跳過發送")
+        return
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": message}]}
-    try: requests.post(url, headers=headers, json=payload)
-    except: pass
+    try: 
+        requests.post(url, headers=headers, json=payload)
+        logging.info("✅ LINE 訊息發送成功")
+    except Exception as e:
+        logging.error(f"❌ LINE 發送失敗: {e}")
 
 # ==========================================
-# 2. 籌碼邏輯 (具備三重防禦機制 & 修正量能抓取)
+# 2. 籌碼邏輯
 # ==========================================
 def get_detailed_chips(sid_clean, specific_ticker=None):
-    """
-    sid_clean: 純數字代號 (給 FinMind 用)
-    specific_ticker: 完整的 Yahoo 代號 (例如 5443.TWO，給量能計算用)
-    """
     chips = {"fs": 0, "ss": 0, "chip_val": "無數據", "chip_name": "籌碼指標", "v_ratio": 0.0, "v_status": "未知"}
     
     try:
@@ -104,7 +118,6 @@ def get_detailed_chips(sid_clean, specific_ticker=None):
             chips["fs"], chips["ss"] = streak('Foreign_Investor'), streak('Investment_Trust')
 
         # --- 2. 籌碼價值判斷 (FinMind) ---
-        # 優先嘗試：大戶持股
         df_h, msg = get_finmind_data("TaiwanStockHoldingSharesPer", sid_clean, start_d)
         
         if not df_h.empty and "update your user level" not in msg:
@@ -116,7 +129,6 @@ def get_detailed_chips(sid_clean, specific_ticker=None):
             chips["chip_val"] = f"{val}%"
             chips["chip_name"] = "大戶%"
         else:
-            # 備援 A：融資增減
             df_m, _ = get_finmind_data("TaiwanStockMarginPurchaseEvid", sid_clean, start_d)
             if not df_m.empty:
                 df_m = df_m.sort_values('date')
@@ -124,17 +136,15 @@ def get_detailed_chips(sid_clean, specific_ticker=None):
                 chips["chip_val"] = f"{'+' if m_diff > 0 else ''}{m_diff}張"
                 chips["chip_name"] = "融資增減"
             else:
-                # 備援 B：法人連買
                 total_inst = chips["fs"] + chips["ss"]
                 chips["chip_val"] = f"連買{total_inst}d"
                 chips["chip_name"] = "法人力道"
 
     except Exception as e:
-        print(f"❌ 籌碼解析異常 ({sid_clean}): {e}")
+        logging.error(f"❌ 籌碼解析異常 ({sid_clean}): {e}")
 
     # --- 3. 量能計算 (Yahoo Finance) ---
     try:
-        # 使用傳入的正確 Ticker (解決 5443.TW 找不到的問題)
         target = specific_ticker if specific_ticker else (f"{sid_clean}.TW" if int(sid_clean) < 9000 else f"{sid_clean}.TWO")
         h = yf.Ticker(target).history(period="10d")
         if not h.empty and len(h) >= 2:
@@ -147,23 +157,22 @@ def get_detailed_chips(sid_clean, specific_ticker=None):
 
 def run_diagnostic(sid):
     try:
+        logging.info(f"🔎 開始診斷股票: {sid}")
         clean_id = str(sid).split('.')[0].strip()
         
-        # --- 修正後的市場判斷邏輯 (Try TW first, then TWO) ---
+        # --- 市場判斷邏輯 ---
         tk_str = f"{clean_id}.TW"
         stock = yf.Ticker(tk_str)
         df = stock.history(period="1y")
         
-        # 如果上市找不到，改找上櫃 (.TWO)
         if df.empty:
             tk_str = f"{clean_id}.TWO"
             stock = yf.Ticker(tk_str)
             df = stock.history(period="1y")
             
         if df.empty:
-            print(f"❌ 找不到股票 {clean_id} 的數據")
+            logging.warning(f"❌ 找不到股票 {clean_id} 的數據")
             return None, None
-        # ------------------------------------------------
         
         ch_name = STOCK_NAME_MAP.get(clean_id, stock.info.get('shortName', '未知'))
         curr_p = round(df.iloc[-1]['Close'], 2)
@@ -175,7 +184,6 @@ def run_diagnostic(sid):
         margin = round((info.get('grossMargins', 0) or 0) * 100, 1)
         pe = info.get('trailingPE', 0) or "N/A"
         
-        # 將正確的 ticker 傳給籌碼分析，確保量能計算正確
         c = get_detailed_chips(clean_id, tk_str)
         
         bias = round(((curr_p-ma60)/ma60)*100, 1)
@@ -190,6 +198,9 @@ def run_diagnostic(sid):
             f"提示：{'⚠️高檔防回' if bias > 15 else '✅位階安全'}"
         )
 
+        # 將診斷結果也寫入 log
+        logging.info(f"診斷結果:\n{line_msg}")
+
         sheet_row = [
             str(datetime.date.today()), clean_id, ch_name, 
             curr_p, rsi, eps, pe, margin, 
@@ -199,7 +210,7 @@ def run_diagnostic(sid):
         ]
         return line_msg, sheet_row
     except Exception as e:
-        print(f"❌ 診斷出錯 ({sid}): {e}")
+        logging.error(f"❌ 診斷出錯 ({sid}): {e}")
         return None, None
 
 if __name__ == "__main__":
@@ -208,6 +219,8 @@ if __name__ == "__main__":
     targets = input_str.replace(',', ' ').split()
     results_sheet = []
     
+    logging.info(f"🚀 開始執行，目標股票: {targets}")
+
     for t in targets:
         l_msg, s_row = run_diagnostic(t.strip())
         if l_msg:
@@ -217,3 +230,5 @@ if __name__ == "__main__":
     
     if results_sheet:
         sync_to_sheets(results_sheet)
+    
+    logging.info("🏁 執行結束")
