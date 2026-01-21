@@ -1,7 +1,7 @@
 import os, yfinance as yf, pandas as pd, requests, time, datetime
 import numpy as np
 import gspread
-import json  # [新增] 必須匯入 json 模組
+import json
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
@@ -19,11 +19,8 @@ def send_line(msg):
     try: requests.post(url, headers=headers, json=payload)
     except: pass
 
-# === [重要修正] 改為使用 GitHub Secrets 進行連線 ===
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    
-    # 從環境變數讀取 Secret
     json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
     
     if not json_key_str:
@@ -33,8 +30,7 @@ def get_gspread_client():
     try:
         creds_dict = json.loads(json_key_str)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        return client
+        return gspread.authorize(creds)
     except Exception as e:
         print(f"❌ 解析金鑰或連線失敗: {e}")
         return None
@@ -51,7 +47,7 @@ def sync_to_sheets(data_list):
         print(f"⚠️ '法人精選監測' 同步失敗: {e}")
 
 def update_watch_list_sheet(recommended_stocks):
-    """將推薦標的匯入 'WATCH_LIST'"""
+    """將推薦標的匯入 'WATCH_LIST' (新增寫入股票名稱至B欄)"""
     if not recommended_stocks: return
 
     try:
@@ -73,10 +69,12 @@ def update_watch_list_sheet(recommended_stocks):
 
         for stock in recommended_stocks:
             sid = stock['id']
+            name = stock['name'] # [新增] 獲取股票名稱
+            
             if sid not in existing_ids:
-                # 寫入格式: 代號, (空), (空), (空), (空), 推薦理由
+                # 寫入格式: A欄=代號, B欄=名稱, CDE欄空, F欄=推薦理由
                 reason_note = f"{today_str} {stock['reason']}"
-                new_rows.append([sid, "", "", "", "", reason_note])
+                new_rows.append([sid, name, "", "", "", reason_note]) # [修改] B欄填入 name
                 existing_ids.add(sid)
 
         if new_rows:
@@ -180,31 +178,31 @@ def analyze_v14(ticker, name):
             # --- 進階 AI 雙軌推薦邏輯 ---
             recommendation = None
             
-            # 策略 A: 🛡️ AI 穩健型 (低風險，買起漲)
-            # 條件：籌碼穩定 + 量能溫和 + 技術面未過熱
+            # 策略 A: 🛡️ AI 穩健型
             is_stable = (
-                (ss >= 2 or fs >= 3) and        # 籌碼連續性要求高
-                (vol_ratio > 1.2) and           # 有量但不失控
-                (50 <= rsi_val <= 75) and       # 趨勢健康
-                (k_val <= 80)                   # KD未鈍化
+                (ss >= 2 or fs >= 3) and        
+                (vol_ratio > 1.2) and           
+                (50 <= rsi_val <= 75) and       
+                (k_val <= 80)                   
             )
 
-            # 策略 B: 🚀 AI 飆股型 (高風險，追噴出)
-            # 條件：爆量攻擊 + 技術面強勢 (不限RSI/KD上限) + 必須站上5日線
+            # 策略 B: 🚀 AI 飆股型
             is_aggressive = (
-                (ss >= 1 or fs >= 2) and        # 籌碼有點火即可
-                (vol_ratio > 2.5) and           # 必須爆大量 (攻擊訊號)
-                (rsi_val > 60) and              # 動能要強
-                (cp > ma5)                      # 股價必須強勢在5日線上
+                (ss >= 1 or fs >= 2) and        
+                (vol_ratio > 2.5) and           
+                (rsi_val > 60) and              
+                (cp > ma5)                      
             )
 
             if is_stable:
                 reason = f"🛡️AI穩健: {type_tag} (量{vol_ratio:.1f}x/RSI{rsi_val:.0f})"
-                recommendation = {'id': pure_id, 'reason': reason}
+                # [修改] 加入 'name': name
+                recommendation = {'id': pure_id, 'name': name, 'reason': reason}
             
             elif is_aggressive:
                 reason = f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs}投{ss})"
-                recommendation = {'id': pure_id, 'reason': reason}
+                # [修改] 加入 'name': name
+                recommendation = {'id': pure_id, 'name': name, 'reason': reason}
 
             return line_txt, sheet_data, recommendation
 
