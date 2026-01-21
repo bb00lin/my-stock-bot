@@ -382,8 +382,9 @@ def sync_to_sheets(data_list):
         print(f"⚠️ Google Sheets 同步失敗: {e}")
 
 def main():
-    # 時間顯示到分鐘
-    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    # 時間顯示到分鐘 (修正為台灣時間 UTC+8)
+    # 透過 timedelta 加上 8 小時
+    current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
     results_line, results_sheet = [], []
 
     watch_data_list = get_watch_list_from_sheet()
