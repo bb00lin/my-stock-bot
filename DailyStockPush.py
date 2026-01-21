@@ -7,14 +7,10 @@ from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
 # ==========================================
-# 0. 靜音設定
+# 0. 靜音設定與全域變數
 # ==========================================
-# 讓 yfinance 安靜一點，除非有重大錯誤
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
-# ==========================================
-# 1. 環境與全域設定
-# ==========================================
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -28,15 +24,17 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"❌ Gemini Client 初始化失敗: {e}")
 
-# 模型清單
+# 模型清單 (優先順序：免費且快 -> 強大但慢 -> 舊版)
 MODEL_CANDIDATES = [
-    "gemini-2.0-flash-exp", 
     "gemini-1.5-flash",
     "gemini-1.5-flash-latest",
+    "gemini-2.0-flash-exp",
     "gemini-pro"
 ]
 
-# === Google Sheets 連線 ===
+# ==========================================
+# 1. Google Sheets 連線與資料獲取
+# ==========================================
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
@@ -64,7 +62,7 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. 輔助數據獲取
+# 2. 輔助數據獲取 (FinMind & yfinance)
 # ==========================================
 def get_streak_only(sid_clean):
     """獲取外資與投信連買天數"""
@@ -72,7 +70,7 @@ def get_streak_only(sid_clean):
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
         clean_id = ''.join(filter(str.isdigit, str(sid_clean)))
-        # FinMind 這裡會自動印出 log，我們保留它
+        # FinMind 會印出 download log，這是正常的
         df = dl.taiwan_stock_institutional_investors(stock_id=clean_id, start_date=start)
         
         if df is None or df.empty: return 0, 0
@@ -120,7 +118,7 @@ def check_ma_status(p, ma5, ma10, ma20, ma60):
     return " | ".join(alerts) if alerts else ""
 
 # ==========================================
-# 3. AI 策略生成器
+# 3. AI 策略生成器 (個股與總結)
 # ==========================================
 def get_gemini_strategy(data):
     if not ai_client: return "AI 未啟動"
@@ -162,13 +160,118 @@ def get_gemini_strategy(data):
             )
             return response.text.replace('\n', ' ').strip()
         except Exception as e:
-            if "429" in str(e):
+            if "429" in str(e): # 額度滿了換下一個模型
                 continue
             pass
     return "AI 分析暫時無法使用"
 
+def generate_and_save_summary(data_rows, report_time_str):
+    print("🧠 正在生成全域總結報告 (使用 Gemini)...")
+    
+    if not ai_client:
+        print("❌ AI 未啟動，跳過總結報告")
+        return
+
+    inventory_txt = ""
+    watchlist_txt = ""
+    
+    # 資料整理
+    for row in data_rows:
+        try:
+            # 確保欄位足夠 (避免 Index Error)
+            if len(row) < 22: continue
+            
+            name, sid, status, score = row[2], row[1], row[3], row[4]
+            signal, ai_advice = row[20], row[21]
+            
+            stock_info = f"- {name}({sid}) | 評分:{score} | 訊號:{signal} | AI簡評:{ai_advice[:60]}...\n"
+            
+            if "庫存" in status:
+                inventory_txt += stock_info
+            else:
+                watchlist_txt += stock_info
+        except: continue
+
+    if not inventory_txt and not watchlist_txt:
+        print("⚠️ 無有效數據可供總結")
+        return
+
+    prompt = f"""
+    角色：你是專業的台股投資總監。
+    任務：根據今日的「全能金流診斷報表」數據，撰寫一份高層次的【戰略總結報告】。
+    
+    【庫存持股清單】
+    {inventory_txt}
+    
+    【觀察名單清單】
+    {watchlist_txt}
+    
+    請針對以上資訊，使用繁體中文，撰寫以下三個章節（請條理分明，語氣專業）：
+    
+    ### 1. 庫存持股總體檢
+    (請分析目前持股的整體強弱、是否有出現危險訊號(如跌破均線/過熱)需要立刻處理的股票，並評估整體曝險狀況)
+    
+    ### 2. 觀察名單潛力股
+    (從觀察名單中挑選出評分最高、或籌碼/型態最值得關注的 3-5 檔潛力股進行點評，說明為何值得關注)
+    
+    ### 3. 總結操作建議
+    (給出明日或未來一週的整體操作策略，例如：積極做多、防守為主、現金為王或是調節持股)
+    """
+
+    summary_result = ""
+    
+    # 迴圈嘗試所有模型，修復 404 Error
+    for model_name in MODEL_CANDIDATES:
+        try:
+            print(f"   ...嘗試使用模型: {model_name}")
+            response = ai_client.models.generate_content(
+                model=model_name, 
+                contents=prompt
+            )
+            summary_result = response.text
+            print("   ✅ 總結報告生成成功！")
+            break
+        except Exception as e:
+            print(f"   ⚠️ 模型 {model_name} 失敗: {e}")
+            continue
+
+    if not summary_result:
+        print("❌ 所有模型皆嘗試失敗，無法生成總結報告")
+        return
+
+    # 寫入新工作表
+    try:
+        client = get_gspread_client()
+        if not client: return
+        
+        spreadsheet = client.open("全能金流診斷報表")
+        sheet_title = report_time_str
+        
+        try:
+            target_sheet = spreadsheet.worksheet(sheet_title)
+            target_sheet.clear() 
+            print(f"🧹 清除舊工作表: {sheet_title}")
+        except gspread.WorksheetNotFound:
+            try:
+                target_sheet = spreadsheet.add_worksheet(title=sheet_title, rows=100, cols=10)
+                print(f"🆕 建立新工作表: {sheet_title}")
+            except: 
+                print("⚠️ 建立分頁失敗，可能名稱重複或格式錯誤")
+                return
+            
+        lines = summary_result.split('\n')
+        cell_data = [[line] for line in lines]
+        target_sheet.update(range_name='A1', values=cell_data)
+        target_sheet.format("A1:A100", {"wrapStrategy": "WRAP"})
+        target_sheet.columns_auto_resize(0, 0)
+        
+        print(f"✅ 戰略總結報告已寫入工作表: [{sheet_title}]")
+        
+    except Exception as e:
+        print(f"⚠️ 寫入總結工作表失敗: {e}")
+
 # ==========================================
-# 4. 資料讀取與計算
+# 4. 核心邏輯
 # ==========================================
 def get_watch_list_from_sheet():
     try:
@@ -221,9 +324,8 @@ def get_tw_stock(sid):
     for suffix in suffixes:
         target = f"{clean_id}{suffix}"
         try:
-            # 嘗試抓取
             stock = yf.Ticker(target)
-            hist = stock.history(period="5d") # 先抓少一點確認存在
+            hist = stock.history(period="5d")
             if not hist.empty: return stock, target
         except: continue
     return None, None
@@ -295,7 +397,7 @@ def fetch_pro_metrics(stock_data):
         m6 = (curr_p / df_hist['Close'].iloc[-121]) - 1
         vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean() if df_hist['Volume'].iloc[-6:-1].mean() > 0 else 0
 
-        # 2. 抓取籌碼 (FinMind) - 這裡會印出 download log
+        # 2. 抓取籌碼 (FinMind)
         pure_id = ''.join(filter(str.isdigit, sid))
         fs, ss = get_streak_only(pure_id) 
         vol_str = get_vol_status_str(vol_ratio)
@@ -330,7 +432,7 @@ def fetch_pro_metrics(stock_data):
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
-        # 3. 個股 AI 分析
+        # 3. 個股 AI 分析 (自動換模型)
         res['ai_strategy'] = get_gemini_strategy(res)
         
         return res
@@ -349,98 +451,8 @@ def sync_to_sheets(data_list):
         print(f"⚠️ Google Sheets 同步失敗: {e}")
 
 # ==========================================
-# 5. 全域總結報告生成器
+# 5. 主程式入口
 # ==========================================
-def generate_and_save_summary(data_rows, report_time_str):
-    print("🧠 正在生成全域總結報告 (使用 Gemini Pro)...")
-    
-    if not ai_client:
-        print("❌ AI 未啟動，跳過總結報告")
-        return
-
-    inventory_txt = ""
-    watchlist_txt = ""
-    
-    for row in data_rows:
-        try:
-            # 格式檢查: 確保 row 長度足夠
-            if len(row) < 22: continue
-            
-            name, sid, status, score = row[2], row[1], row[3], row[4]
-            signal, ai_advice = row[20], row[21]
-            
-            stock_info = f"- {name}({sid}) | 評分:{score} | 訊號:{signal} | AI簡評:{ai_advice[:60]}...\n"
-            
-            if "庫存" in status:
-                inventory_txt += stock_info
-            else:
-                watchlist_txt += stock_info
-        except: continue
-
-    if not inventory_txt and not watchlist_txt:
-        print("⚠️ 無有效數據可供總結")
-        return
-
-    prompt = f"""
-    角色：你是專業的台股投資總監。
-    任務：根據今日的「全能金流診斷報表」數據，撰寫一份高層次的【戰略總結報告】。
-    
-    【庫存持股清單】
-    {inventory_txt}
-    
-    【觀察名單清單】
-    {watchlist_txt}
-    
-    請針對以上資訊，使用繁體中文，撰寫以下三個章節（請條理分明，語氣專業）：
-    
-    ### 1. 庫存持股總體檢
-    (請分析目前持股的整體強弱、是否有出現危險訊號(如跌破均線/過熱)需要立刻處理的股票，並評估整體曝險狀況)
-    
-    ### 2. 觀察名單潛力股
-    (從觀察名單中挑選出評分最高、或籌碼/型態最值得關注的 3-5 檔潛力股進行點評，說明為何值得關注)
-    
-    ### 3. 總結操作建議
-    (給出明日或未來一週的整體操作策略，例如：積極做多、防守為主、現金為王或是調節持股)
-    """
-
-    summary_result = ""
-    try:
-        response = ai_client.models.generate_content(model="gemini-pro", contents=prompt)
-        summary_result = response.text
-    except Exception as e:
-        print(f"❌ 總結報告生成失敗: {e}")
-        return
-
-    try:
-        client = get_gspread_client()
-        if not client: return
-        
-        spreadsheet = client.open("全能金流診斷報表")
-        sheet_title = report_time_str
-        
-        try:
-            target_sheet = spreadsheet.worksheet(sheet_title)
-            target_sheet.clear() 
-            print(f"🧹 清除舊工作表: {sheet_title}")
-        except gspread.WorksheetNotFound:
-            try:
-                target_sheet = spreadsheet.add_worksheet(title=sheet_title, rows=100, cols=10)
-                print(f"🆕 建立新工作表: {sheet_title}")
-            except: 
-                print("⚠️ 建立分頁失敗，可能名稱重複或格式錯誤")
-                return
-            
-        lines = summary_result.split('\n')
-        cell_data = [[line] for line in lines]
-        target_sheet.update(range_name='A1', values=cell_data)
-        target_sheet.format("A1:A100", {"wrapStrategy": "WRAP"})
-        target_sheet.columns_auto_resize(0, 0)
-        
-        print(f"✅ 戰略總結報告已寫入工作表: [{sheet_title}]")
-        
-    except Exception as e:
-        print(f"⚠️ 寫入總結工作表失敗: {e}")
-
 def main():
     # 台灣時間修正
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -455,10 +467,9 @@ def main():
 
     print(f"🚀 開始分析 {total_stocks} 檔股票 (每檔間隔 15 秒)...")
 
+    # 顯示進度條
     for idx, stock_data in enumerate(watch_data_list):
         sid = stock_data['sid']
-        
-        # [新增] 進度條顯示，避免讓您覺得程式卡住
         print(f"[{idx+1}/{total_stocks}] 正在分析: {sid} ... ", end="", flush=True)
         
         try:
@@ -483,11 +494,10 @@ def main():
         except Exception as e:
             print(f"❌ 嚴重錯誤: {e}")
 
-        # 這裡會停留 15 秒，是正常的
         if idx < total_stocks - 1:
             time.sleep(15.0) 
     
-    # --- 報告生成與發送 ---
+    # 報告與總結
     if results_line:
         results_line.sort(key=lambda x: x['score'], reverse=True)
         
