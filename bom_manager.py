@@ -1,4 +1,3 @@
-# bom_manager.py
 import os
 import re
 import time
@@ -12,16 +11,16 @@ from gspread_formatting import *
 
 # ================= 設定區 =================
 
-# 【重要】請將下方的 URL 換成您 "EE BOM Cost V0.6" 檔案的真實網址
-DB_SHEET_URL = "https://docs.google.com/spreadsheets/d/QkYn0px-EAlUs91e5smW0gAKq202lPQn/edit"
+# 【已更新】您的真實檔案連結
+DB_SHEET_URL = "https://docs.google.com/spreadsheets/d/1ovCEzxlz-383PLl4Dmtu8GybxfxI7tCKOl-6-oXNRa0/edit?usp=sharing"
 
-# Input 分頁名稱 (必須完全一致)
+# Input 分頁名稱 (請確保您的 Google Sheet 中有這個分頁，且名稱完全一致)
 INPUT_SHEET_NAME = "Input_BOM"
 
 # Gemini API Key
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# 分頁關鍵字映射 (規則庫)
+# 分頁關鍵字映射 (規則庫：決定零件要去哪個分頁)
 SHEET_MAP = {
     "RES": ["RES", "OHM", "Ω", "RESISTOR"],
     "MLCC(TMTC)": ["CAP", "UF", "NF", "PF", "CERAMIC", "MLCC"],
@@ -102,7 +101,6 @@ class DatabaseManager:
                     return pd.DataFrame()
                 df = pd.DataFrame(data)
                 # 紀錄原始行號 (Row 1 is header, data starts at 2)
-                # get_all_records return list of dicts. Index 0 is Row 2.
                 df['_row_index'] = range(2, len(data) + 2) 
                 self.sheet_cache[sheet_name] = df
             except gspread.exceptions.WorksheetNotFound:
@@ -193,7 +191,9 @@ class DatabaseManager:
             rows_to_move = sorted([r for r in existing_rows if r != target_index], reverse=True)
         else:
             # 插在最後一行
-            all_vals = ws.col_values(1) # 假設第一欄有值
+            # ws.col_values(1) 可能會空，用 row_count 雖然不準確但較安全
+            # 更安全是用 get_all_values
+            all_vals = ws.col_values(1) 
             target_index = len(all_vals) + 1
             rows_to_move = []
 
@@ -215,13 +215,10 @@ class DatabaseManager:
         # 3. 插入新零件 (Insert New)
         # 最終插入位置
         final_insert_pos = target_index + moved_count + (1 if existing_rows else 0)
-        # 如果是全新品 (無 existing)，final_insert_pos 就是 target_index，但 insert_row 會插在該行之上...
-        # 修正：gspread insert_row(idx) 會把原本 idx 的擠下去。
-        # 如果是 append (全新品)，用 append_row 最安全；如果是插入中間，用 insert_row
         
         if not existing_rows:
              ws.append_row(new_item_data)
-             final_insert_pos = ws.row_count # 近似值
+             final_insert_pos = len(ws.col_values(1)) # 更新為當前最後一行
         else:
              ws.insert_row(new_item_data, final_insert_pos)
 
@@ -280,8 +277,15 @@ def main():
         print("❌ Error: GOOGLE_SHEETS_JSON secret is missing.")
         return
 
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_key), scope)
-    client = gspread.authorize(creds)
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_key), scope)
+        client = gspread.authorize(creds)
+        
+        # 顯示機器人 Email，方便您檢查權限
+        print(f"🤖 Service Account Email: {creds.service_account_email}", flush=True)
+    except Exception as e:
+        print(f"❌ Auth Error: {e}")
+        return
     
     # 初始化管理者
     try:
@@ -297,8 +301,8 @@ def main():
         print(f"✅ Found Input Sheet: {INPUT_SHEET_NAME}")
     except gspread.exceptions.WorksheetNotFound:
         print(f"❌ Critical Error: Sheet '{INPUT_SHEET_NAME}' not found.")
-        print(f"ℹ️  Available sheets: {[s.title for s in db_manager.workbook.worksheets()]}")
-        print("Please rename your new BOM sheet to 'Input_BOM' exactly.")
+        print(f"ℹ️  Available sheets in your file: {[s.title for s in db_manager.workbook.worksheets()]}")
+        print("💡 Please rename your new BOM sheet to 'Input_BOM' exactly.")
         return
 
     input_data = input_ws.get_all_records()
@@ -319,8 +323,6 @@ def main():
     
     # 如果標題列還沒這些欄位，補上去
     if "Status" not in headers:
-        # 轉換 column index to letter (簡單處理 A-Z, AA-ZZ)
-        # 這裡直接用 update cells
         input_ws.update(range_name=gspread.utils.rowcol_to_a1(1, start_output_col), values=[output_headers])
 
     print(f"🔄 Processing {len(input_data)} items...", flush=True)
@@ -335,7 +337,9 @@ def main():
         value = str(row.get(headers[col_val_idx-1])) if col_val_idx else ""
         
         # 跳過已處理的 (假設 Status 有值就跳過)
-        if len(row) >= start_output_col and row.get("Status"): 
+        # 注意：get_all_records 讀出來的 key 是 header name
+        status_key = next((h for h in row.keys() if "Status" in h), None)
+        if status_key and row.get(status_key): 
             continue
 
         print(f"   [{i+1}/{len(input_data)}] Processing: {desc[:20]}...", end=" ")
@@ -348,7 +352,9 @@ def main():
         print(f"-> [{target_sheet}]")
         
         if target_sheet == "Others" or target_sheet not in SHEET_MAP:
-             input_ws.update_cell(row_num, start_output_col, "Skipped (Unknown)")
+             try:
+                 input_ws.update_cell(row_num, start_output_col, "Skipped (Unknown)")
+             except: pass
              continue
 
         # B. 搜尋 (Search)
@@ -357,8 +363,9 @@ def main():
         # C. 歸檔 (Organize)
         existing_indices = [m['row'] for m in matches]
         
-        # 建構新的一行資料 (這裡簡化處理：將 Input 資訊整合填入)
-        # 實際應用建議建立一個 Column Mapper
+        # 建構新的一行資料
+        # 這裡需要注意：我們現在是簡單的將 Input 資訊整合填入，
+        # 如果您的目標 Sheet 有特定的欄位順序，您可能需要調整這裡
         new_row_data = [""] * 10 
         new_row_data[0] = f"{desc} [NEW]" # 填入第一個欄位
         new_row_data[1] = mpn             # 填入第二個欄位
@@ -388,10 +395,9 @@ def main():
         # 候選清單
         candidates_str = "\n".join([f"{m['data'].get('MPN')} ${m['data'].get('Price',0)}" for m in matches[1:]])
         
-        # 寫入
+        # 寫入 Input BOM
         out_values = [status, best_price, ref_source, match_type, link_formula, candidates_str]
         
-        # update range
         start_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col)
         end_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col + 5)
         input_ws.update(range_name=f"{start_cell}:{end_cell}", values=[out_values], value_input_option="USER_ENTERED")
