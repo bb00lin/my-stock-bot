@@ -13,7 +13,7 @@ from gspread_formatting import *
 # ================= 設定區 =================
 
 # 【重要】請將下方的 URL 換成您 "EE BOM Cost V0.6" 檔案的真實網址
-DB_SHEET_URL = "https://docs.google.com/spreadsheets/d/您的檔案ID_請替換這裡/edit"
+DB_SHEET_URL = "https://docs.google.com/spreadsheets/d/https://docs.google.com/spreadsheets/d/1QkYn0px-EAlUs91e5smW0gAKq202lPQn/edit?gid=889936666#gid=889936666/edit"
 
 # Input 分頁名稱 (必須完全一致)
 INPUT_SHEET_NAME = "Input_BOM"
