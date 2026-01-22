@@ -1,0 +1,29 @@
+name: BOM Automation Logic
+
+on:
+  workflow_dispatch: # 手動觸發
+  push:
+    paths:
+      - 'bom_manager.py'
+
+jobs:
+  run-bom-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run BOM Manager
+        env:
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python bom_manager.py
