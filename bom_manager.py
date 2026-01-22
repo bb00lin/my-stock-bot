@@ -184,7 +184,6 @@ class DatabaseManager:
 
         return [], "None"
 
-    # ★★★ 套用重試機制 ★★★
     @retry_with_backoff(retries=5, delay=10) 
     def organize_and_insert(self, sheet_name, existing_rows, new_item_data):
         ws = self.workbook.worksheet(sheet_name)
@@ -208,7 +207,7 @@ class DatabaseManager:
             
             insert_ptr += 1
             moved_count += 1
-            time.sleep(2) # 增加延遲，保護配額
+            time.sleep(2) 
 
         final_insert_pos = target_index + moved_count + (1 if existing_rows else 0)
         
@@ -218,7 +217,6 @@ class DatabaseManager:
         else:
              ws.insert_row(new_item_data, final_insert_pos)
 
-        # Coloring
         start_row = target_index
         end_row = final_insert_pos
         color = random.choice(PASTEL_COLORS)
@@ -249,7 +247,6 @@ def find_column_index(headers, keywords):
             if kw.upper() in str(h).upper(): return i + 1
     return None
 
-# ★★★ 建立一個帶有重試機制的更新函式 ★★★
 @retry_with_backoff(retries=5, delay=10)
 def safe_update_sheet(worksheet, range_name, values):
     worksheet.update(range_name=range_name, values=values, value_input_option="USER_ENTERED")
@@ -288,20 +285,26 @@ def main():
         print(f"❌ Critical Error: Sheet '{INPUT_SHEET_NAME}' not found.")
         return
 
-    input_data = input_ws.get_all_records()
-    if not input_data:
+    # ★★★ 修改點：改用 get_all_values() 讀取原始資料，避免 Header 重複報錯 ★★★
+    all_values = input_ws.get_all_values()
+    if not all_values:
         print("ℹ️ Input BOM is empty.")
         return
 
-    headers = input_ws.row_values(1)
+    headers = all_values[0] # 第一列是標題
+    input_data = all_values[1:] # 剩下的資料
+
+    # 自動偵測 Input 欄位位置
     col_desc_idx = find_column_index(headers, ["Description", "Part Description"])
     col_mpn_idx = find_column_index(headers, ["MPN", "Part No", "P/N"])
     col_val_idx = find_column_index(headers, ["Value", "Val"])
+    col_status_idx = find_column_index(headers, ["Status"]) # 用於檢查是否已處理
     
     output_headers = ["Status", "Est. Price", "Ref Source", "Match Type", "Link", "Candidates"]
     start_output_col = len(headers) + 1
     
-    if "Status" not in headers:
+    # 如果還沒有 Status 欄位，就寫入新的 Header
+    if not col_status_idx:
         input_ws.update(range_name=gspread.utils.rowcol_to_a1(1, start_output_col), values=[output_headers])
 
     print(f"🔄 Processing {len(input_data)} items...", flush=True)
@@ -310,12 +313,19 @@ def main():
     for i, row in enumerate(input_data):
         row_num = i + 2 
         
-        desc = str(row.get(headers[col_desc_idx-1])) if col_desc_idx else ""
-        mpn = str(row.get(headers[col_mpn_idx-1])) if col_mpn_idx else ""
-        value = str(row.get(headers[col_val_idx-1])) if col_val_idx else ""
+        # 使用索引安全存取 list (避免 index out of range)
+        def get_val(idx):
+            if idx and len(row) >= idx:
+                return str(row[idx-1])
+            return ""
+
+        desc = get_val(col_desc_idx)
+        mpn = get_val(col_mpn_idx)
+        value = get_val(col_val_idx)
         
-        status_key = next((h for h in row.keys() if "Status" in h), None)
-        if status_key and row.get(status_key): 
+        # 檢查 Status 欄位是否已有值
+        current_status = get_val(col_status_idx) if col_status_idx else ""
+        if current_status: 
             continue
 
         print(f"   [{i+1}/{len(input_data)}] Processing: {desc[:20]}...", end=" ")
@@ -343,13 +353,12 @@ def main():
         status = "Processed"
         inserted_row = 0
         
-        # 呼叫帶有重試機制的插入功能
         try:
             inserted_row = db_manager.organize_and_insert(target_sheet, existing_indices, new_row_data)
             status = "Moved & Inserted"
         except Exception as e:
             print(f"      ❌ Error inserting: {e}")
-            status = f"Error: {str(e)[:50]}" # 縮短錯誤訊息避免太長
+            status = f"Error: {str(e)[:50]}"
 
         best_price = matches[0]['data'].get('Price', 'N/A') if matches else 'N/A'
         ref_source = matches[0]['data'].get('Description', '') if matches else ''
@@ -368,10 +377,8 @@ def main():
         start_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col)
         end_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col + 5)
         
-        # 呼叫帶有重試機制的更新功能
         safe_update_sheet(input_ws, f"{start_cell}:{end_cell}", [out_values])
         
-        # ★★★ 每一行處理完後，強制休息 2 秒，避免連續轟炸 API ★★★
         time.sleep(2)
 
     print("✅ All tasks completed successfully!")
