@@ -15,8 +15,6 @@ from bs4 import BeautifulSoup
 RAW_URL = os.environ.get("CONF_URL")
 USERNAME = os.environ.get("CONF_USER")
 API_TOKEN = os.environ.get("CONF_PASS")
-
-# 父頁面標題
 PARENT_PAGE_TITLE = "Personal Tasks"
 
 if not RAW_URL or not USERNAME or not API_TOKEN:
@@ -31,25 +29,22 @@ def get_headers():
     return {"Content-Type": "application/json"}
 
 # ==========================================
-# 2. 核心功能函式
+# 2. 核心功能
 # ==========================================
 
 def get_page_id_by_title(title):
-    """透過標題搜尋頁面 ID"""
     url = f"{API_ENDPOINT}"
     params = {'title': title, 'expand': 'body.storage,version,ancestors,space'}
     try:
         r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
         r.raise_for_status()
         results = r.json().get('results', [])
-        if results:
-            return results[0]
+        if results: return results[0]
     except Exception as e:
         print(f"❌ 搜尋頁面 '{title}' 失敗: {e}")
     return None
 
 def get_child_pages(parent_id):
-    """取得某頁面下的所有子頁面"""
     url = f"{API_ENDPOINT}/{parent_id}/child/page"
     params = {'limit': 100, 'expand': 'version'} 
     try:
@@ -72,10 +67,8 @@ def find_latest_monthly_page():
 
     children = get_child_pages(parent_id)
     monthly_pages = []
-    
     for child in children:
-        title = child['title']
-        if re.match(r'^\d{6}$', title):
+        if re.match(r'^\d{6}$', child['title']):
             monthly_pages.append(child)
     
     if not monthly_pages:
@@ -84,70 +77,65 @@ def find_latest_monthly_page():
 
     monthly_pages.sort(key=lambda x: x['title'], reverse=True)
     latest_page = monthly_pages[0]
-    
     full_latest_page = get_page_id_by_title(latest_page['title'])
     
     print(f"📅 找到最新月份頁面: {full_latest_page['title']} (ID: {full_latest_page['id']})")
     return full_latest_page
 
 def increment_date_match(match):
-    """正則替換的回調函式：將匹配到的日期 +1 個月"""
-    full_date = match.group(0) # e.g., 2025-11-01
-    sep = match.group(2)       # e.g., - or /
-    
+    full_date = match.group(0)
+    sep = match.group(2)
     try:
         fmt = f"%Y{sep}%m{sep}%d"
         dt = datetime.strptime(full_date, fmt)
         new_dt = dt + relativedelta(months=1)
-        new_date_str = new_dt.strftime(fmt)
-        print(f"      👉 日期變更: {full_date} -> {new_date_str}")
-        return new_date_str
+        return new_dt.strftime(fmt)
     except ValueError:
         return full_date
 
 def process_jql_content(html_content):
-    """
-    解析 Storage Format XML，找到 Jira Macro 的 JQL 參數並修改日期
-    """
     print("🔧 正在解析頁面結構 (XML Mode)...")
     
-    # 【關鍵修正】使用 'xml' 解析器 (需要 pip install lxml)
+    # 檢查是否安裝 lxml，這是關鍵
     try:
-        soup = BeautifulSoup(html_content, 'xml')
-    except Exception as e:
-        print(f"⚠️ XML 解析失敗，嘗試退回 html.parser: {e}")
-        soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # 1. 找到所有 Jira Macro
+        import lxml
+    except ImportError:
+        print("❌ 嚴重錯誤：未安裝 'lxml' 套件。請執行 `pip install lxml`")
+        print("   Confluence 頁面需要 XML 解析器才能正確讀取 JQL 標籤。")
+        sys.exit(1)
+
+    # 1. 嘗試正規 XML 解析
+    soup = BeautifulSoup(html_content, 'xml')
     jira_macros = soup.find_all('ac:structured-macro', attrs={"ac:name": "jira"})
-    print(f"   🔎 頁面中發現 {len(jira_macros)} 個 Jira 表格")
+    
+    print(f"   🔎 偵測到 {len(jira_macros)} 個 Jira Macro")
     
     total_dates_modified = 0
-    
-    for i, macro in enumerate(jira_macros):
-        # 2. 在 Macro 中找到 JQL 參數
-        jql_param = macro.find('ac:parameter', attrs={"ac:name": "jql"})
-        
-        if jql_param:
-            original_jql = jql_param.get_text() # 使用 get_text() 確保抓到內容
-            
-            # 簡單過濾掉空白的
-            if not original_jql.strip():
-                continue
+    date_pattern = re.compile(r'(\d{4})([-/.])(\d{1,2})\2(\d{1,2})')
 
-            # print(f"   📄 表格[{i+1}] JQL 原文: {original_jql[:60]}...")
-            
-            # 3. 使用 Regex 搜尋並替換日期
-            date_pattern = re.compile(r'(\d{4})([-/.])(\d{1,2})\2(\d{1,2})')
-            
+    for macro in jira_macros:
+        jql_param = macro.find('ac:parameter', attrs={"ac:name": "jql"})
+        if jql_param:
+            original_jql = jql_param.get_text()
             new_jql, count = date_pattern.subn(increment_date_match, original_jql)
             
             if count > 0:
-                # 更新 BeautifulSoup 物件中的字串
+                print(f"      🔄 JQL 更新: {original_jql[:40]}... -> {new_jql[:40]}...")
                 jql_param.string = new_jql
                 total_dates_modified += count
-            else:
-                print(f"      ⚠️ 表格[{i+1}] 未發現符合格式的日期 (YYYY-MM-DD)")
+
+    # 2. 暴力補償機制 (Fallback)
+    # 如果 XML 解析沒改到任何東西，但內容裡明明有日期，就直接對字串硬幹
+    if total_dates_modified == 0:
+        print("⚠️ 結構化解析未修改任何日期，啟動「暴力補償模式」...")
+        # 直接對原始 HTML 字串進行正則替換
+        new_html_content, raw_count = date_pattern.subn(increment_date_match, html_content)
+        if raw_count > 0:
+            print(f"   💪 暴力模式成功修改了 {raw_count} 個日期！")
+            return new_html_content
+        else:
+            print("   ⚠️ 暴力模式也未發現符合 YYYY-MM-DD 的日期。請確認 JQL 格式。")
+            return str(soup)
 
     print(f"📊 總計修改了 {total_dates_modified} 個 JQL 日期")
     return str(soup)
@@ -171,6 +159,7 @@ def create_new_month_page(latest_page):
     original_body = latest_page['body']['storage']['value']
     new_body = process_jql_content(original_body)
 
+    # 取得父層 ID
     if latest_page.get('ancestors'):
         parent_id = latest_page['ancestors'][-1]['id']
     else:
@@ -216,7 +205,7 @@ def create_new_month_page(latest_page):
         sys.exit(1)
 
 def main():
-    print(f"=== Confluence 月度 JQL 更新機器人 (v2.1 Debug版) ===")
+    print(f"=== Confluence 月度 JQL 更新機器人 (v3.0 最終強力版) ===")
     try:
         latest_page = find_latest_monthly_page()
         create_new_month_page(latest_page)
