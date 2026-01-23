@@ -45,25 +45,20 @@ PASTEL_COLORS = [
 
 # ================= 輔助工具：自動重試機制 =================
 
-def retry_with_backoff(retries=5, delay=5):
-    """
-    裝飾器：當遇到 Google API 429 (Quota exceeded) 錯誤時，
-    自動暫停並重試，而不是直接讓程式崩潰。
-    """
+def retry_with_backoff(retries=5, delay=2):
     def decorator(func):
         def wrapper(*args, **kwargs):
             for i in range(retries):
                 try:
                     return func(*args, **kwargs)
                 except APIError as e:
-                    # 檢查是否為 Quota exceeded (429)
                     if "429" in str(e) or "Quota exceeded" in str(e):
-                        wait_time = delay * (2 ** i) + random.uniform(0, 1) # 指數退避
-                        print(f"⏳ Quota limit hit. Sleeping for {wait_time:.1f}s before retry {i+1}/{retries}...", flush=True)
+                        wait_time = delay * (2 ** i) + random.uniform(0, 1)
+                        print(f"⏳ Quota hit. Sleeping {wait_time:.1f}s...", flush=True)
                         time.sleep(wait_time)
                     else:
-                        raise e # 其他錯誤直接拋出
-            raise Exception("Max retries exceeded for API limit.")
+                        raise e
+            raise Exception("Max retries exceeded.")
         return wrapper
     return decorator
 
@@ -81,21 +76,15 @@ class GeminiBrain:
                 self.model = None
         else:
             self.model = None
-            print("⚠️ Warning: No Gemini API Key found. AI features disabled.")
+            print("⚠️ Warning: No Gemini API Key found.")
 
     def classify_component_fallback(self, description, value):
         if not self.model: return "Others"
-        
         prompt = f"""
-        You are an electronic component expert. 
-        I have a database with these sheets: {list(SHEET_MAP.keys())}.
-        
-        Component Info:
-        Description: {description}
-        Value: {value}
-        
-        Which sheet does this component belong to? 
-        Return ONLY the sheet name. If unsure, return 'Others'.
+        Act as an electronic component expert.
+        Database sheets: {list(SHEET_MAP.keys())}.
+        Item: {description} (Value: {value})
+        Which sheet does this belong to? Return ONLY the sheet name. If unknown, return 'Others'.
         """
         try:
             response = self.model.generate_content(prompt)
@@ -106,282 +95,362 @@ class GeminiBrain:
 class DatabaseManager:
     def __init__(self, client, sheet_url):
         self.client = client
-        try:
-            self.workbook = self.client.open_by_url(sheet_url)
-            print(f"📂 Successfully connected to Database: {self.workbook.title}")
-        except Exception as e:
-            print(f"❌ Failed to open spreadsheet by URL. Error: {e}")
-            raise e
-            
+        self.workbook = self.client.open_by_url(sheet_url)
         self.sheet_cache = {} 
+        self.headers_cache = {}
 
     def get_sheet_df(self, sheet_name):
         if sheet_name not in self.sheet_cache:
             try:
                 worksheet = self.workbook.worksheet(sheet_name)
-                data = worksheet.get_all_records()
-                if not data:
-                    return pd.DataFrame()
-                df = pd.DataFrame(data)
-                df['_row_index'] = range(2, len(data) + 2) 
+                all_values = worksheet.get_all_values()
+                if not all_values:
+                    return pd.DataFrame(), []
+                
+                headers = all_values[0]
+                # 簡單處理重複標題問題
+                unique_headers = []
+                seen = {}
+                for h in headers:
+                    clean_h = str(h).strip()
+                    if clean_h in seen:
+                        seen[clean_h] += 1
+                        unique_headers.append(f"{clean_h}_{seen[clean_h]}")
+                    else:
+                        seen[clean_h] = 0
+                        unique_headers.append(clean_h)
+                
+                df = pd.DataFrame(all_values[1:], columns=unique_headers)
+                df['_row_index'] = range(2, len(all_values) + 2)
+                
                 self.sheet_cache[sheet_name] = df
+                self.headers_cache[sheet_name] = unique_headers 
             except gspread.exceptions.WorksheetNotFound:
-                print(f"⚠️ Sheet '{sheet_name}' not found in DB.")
-                return pd.DataFrame()
-        return self.sheet_cache[sheet_name]
+                return pd.DataFrame(), []
+        return self.sheet_cache[sheet_name], self.headers_cache[sheet_name]
 
     def find_best_matches(self, sheet_name, mpn, description, value):
-        df = self.get_sheet_df(sheet_name)
-        if df.empty:
-            return [], "None"
+        df, headers = self.get_sheet_df(sheet_name)
+        if df.empty: return [], "None"
 
         matches = []
-        match_type = "None"
-        
-        mpn_clean = str(mpn).strip().upper()
-        desc_clean = str(description).strip().upper()
-        val_clean = str(value).strip().upper()
+        mpn_str = str(mpn).strip().upper()
+        desc_str = str(description).strip().upper()
+        val_str = str(value).strip().upper()
 
         # 1. MPN 精確比對
-        mpn_col = next((col for col in df.columns if 'MPN' in col.upper() or 'PART' in col.upper() or 'PN' in col.upper()), None)
-        
-        if mpn_col and mpn_clean:
-            found = df[df[mpn_col].astype(str).str.strip().str.upper() == mpn_clean]
+        mpn_col = next((c for c in df.columns if 'MPN' in c.upper() or 'PART' in c.upper() or 'PN' in c.upper()), None)
+        if mpn_col and mpn_str:
+            found = df[df[mpn_col].astype(str).str.strip().str.upper() == mpn_str]
             if not found.empty:
-                match_type = "Exact Match (MPN)"
                 for _, row in found.iterrows():
                     matches.append({'row': row['_row_index'], 'data': row})
-                return matches, match_type
+                return matches, "Exact Match (MPN)"
 
-        # 2. 模糊比對
+        # 2. 嚴格規格比對
+        def is_structure_match(str1, str2):
+            if not str1 or not str2: return False
+            has_space1 = ' ' in str1
+            has_space2 = ' ' in str2
+            if len(str1) > 8 and len(str2) > 8:
+                if has_space1 != has_space2:
+                    return False 
+            return True
+
         candidates = []
-        desc_keywords = set(re.split(r'[\s,\-_]+', desc_clean))
-        desc_col = next((col for col in df.columns if 'DESC' in col.upper()), None)
-        value_col = next((col for col in df.columns if 'VAL' in col.upper()), None)
-        
+        desc_keywords = set(re.split(r'[\s,\-_/]+', desc_str))
+        desc_col = next((c for c in df.columns if 'DESC' in c.upper()), None)
+        val_col = next((c for c in df.columns if 'VAL' in c.upper()), None)
+
         if not desc_col: return [], "None"
 
         for _, row in df.iterrows():
             row_desc = str(row[desc_col]).upper()
-            row_val = str(row[value_col]).upper() if value_col and pd.notna(row[value_col]) else ""
+            row_val = str(row[val_col]).upper() if val_col else ""
             
             score = 0
-            if val_clean and val_clean == row_val: score += 10
-            elif val_clean and val_clean in row_desc: score += 8
-            
-            common_words = 0
-            for word in desc_keywords:
-                if len(word) > 2 and word in row_desc: common_words += 1
-            score += common_words
+            if val_str:
+                if val_str == row_val: score += 20
+                elif val_str in row_desc: score += 15
+                else: continue
 
-            if score >= 8:
+            if not is_structure_match(desc_str, row_desc):
+                continue 
+
+            hit_count = 0
+            for word in desc_keywords:
+                if len(word) > 2 and word in row_desc:
+                    hit_count += 1
+            score += hit_count
+
+            if score >= 18: 
                 candidates.append({'row': row['_row_index'], 'data': row, 'score': score})
 
         candidates.sort(key=lambda x: x['score'], reverse=True)
         if candidates:
-            match_type = "Parametric Match"
-            return candidates[:3], match_type
-
+            return candidates[:3], "Parametric Match"
+        
         return [], "None"
 
-    @retry_with_backoff(retries=5, delay=10) 
-    def organize_and_insert(self, sheet_name, existing_rows, new_item_data):
+    @retry_with_backoff(retries=5, delay=2)
+    def organize_and_insert(self, sheet_name, existing_rows, input_row_dict):
         ws = self.workbook.worksheet(sheet_name)
+        
+        # 動態欄位檢查
+        current_headers = self.headers_cache.get(sheet_name, [])
+        if not current_headers:
+            current_headers = ws.row_values(1)
+            clean_headers = [] 
+            for h in current_headers:
+                if h: clean_headers.append(str(h).strip())
+            current_headers = clean_headers
+
+        missing_cols = []
+        header_map = {} 
+        db_header_index = {h.upper(): i for i, h in enumerate(current_headers)}
+        
+        for key in input_row_dict.keys():
+            if not key: continue
+            u_key = key.upper()
+            if u_key in db_header_index:
+                header_map[key] = db_header_index[u_key]
+            else:
+                missing_cols.append(key)
+
+        if missing_cols:
+            print(f"      🆕 Creating new columns: {missing_cols}")
+            start_col_idx = len(current_headers) + 1
+            range_start = gspread.utils.rowcol_to_a1(1, start_col_idx)
+            range_end = gspread.utils.rowcol_to_a1(1, start_col_idx + len(missing_cols) - 1)
+            ws.update(range_name=f"{range_start}:{range_end}", values=[missing_cols])
+            
+            for i, col_name in enumerate(missing_cols):
+                new_idx = len(current_headers) + i
+                current_headers.append(col_name)
+                header_map[col_name] = new_idx
+                
+        row_data_list = [""] * len(current_headers)
+        for key, value in input_row_dict.items():
+            if key in header_map:
+                col_idx = header_map[key]
+                row_data_list[col_idx] = value
         
         if existing_rows:
             target_index = min(existing_rows)
             rows_to_move = sorted([r for r in existing_rows if r != target_index], reverse=True)
         else:
-            all_vals = ws.col_values(1) 
+            all_vals = ws.col_values(1)
             target_index = len(all_vals) + 1
             rows_to_move = []
 
         insert_ptr = target_index + 1
-        
         moved_count = 0
         for r_idx in rows_to_move:
-            print(f"      Moving row {r_idx} to {insert_ptr}...")
-            row_values = ws.row_values(r_idx)
+            row_vals = ws.row_values(r_idx)
             ws.delete_rows(r_idx)
-            ws.insert_row(row_values, insert_ptr)
-            
+            ws.insert_row(row_vals, insert_ptr)
             insert_ptr += 1
             moved_count += 1
-            time.sleep(2) 
+            time.sleep(1.5) 
 
         final_insert_pos = target_index + moved_count + (1 if existing_rows else 0)
         
         if not existing_rows:
-             ws.append_row(new_item_data)
-             final_insert_pos = len(ws.col_values(1))
+            ws.append_row(row_data_list)
+            final_insert_pos = len(ws.col_values(1))
         else:
-             ws.insert_row(new_item_data, final_insert_pos)
+            ws.insert_row(row_data_list, final_insert_pos)
 
-        start_row = target_index
-        end_row = final_insert_pos
         color = random.choice(PASTEL_COLORS)
         fmt = cellFormat(backgroundColor=color)
-        range_str = f"A{start_row}:Z{end_row}"
-        format_cell_range(ws, range_str, fmt)
+        format_cell_range(ws, f"A{target_index}:Z{final_insert_pos}", fmt)
         
         return final_insert_pos
 
-# ================= 輔助函式 =================
-
-def get_sheet_by_rules(description, value):
-    desc_u = str(description).upper()
-    val_u = str(value).upper()
-    
-    if "UF" in val_u or "PF" in val_u or "NF" in val_u: return "MLCC(TMTC)"
-    if re.search(r'\d+[KM]', val_u) or "OHM" in val_u or "Ω" in val_u:
-         if "IC" not in desc_u and "CHIP" not in desc_u: return "RES"
-
-    for sheet, keywords in SHEET_MAP.items():
-        for kw in keywords:
-            if kw in desc_u: return sheet
-    return None
-
-def find_column_index(headers, keywords):
-    for i, h in enumerate(headers):
-        for kw in keywords:
-            if kw.upper() in str(h).upper(): return i + 1
-    return None
-
-@retry_with_backoff(retries=5, delay=10)
-def safe_update_sheet(worksheet, range_name, values):
-    worksheet.update(range_name=range_name, values=values, value_input_option="USER_ENTERED")
-
 # ================= 主程式 =================
 
-def main():
-    print("🚀 Starting BOM Automation Logic...", flush=True)
+def get_user_mode():
+    """獲取用戶希望執行的模式"""
+    print("\n==========================================")
+    print("請選擇執行模式 (Select Execution Mode):")
+    print("1. 僅詢價 (Price Check Only)")
+    print("   - 僅搜尋 DB 並回填價格到 BOM")
+    print("   - ❌ 不會寫入或修改資料庫")
+    print("2. 僅歸檔 (Filing Only)")
+    print("   - 將零件分類並插入資料庫")
+    print("   - ❌ 不回填價格 (但會回填 Status 讓你知道它去哪了)")
+    print("3. 完整模式 (Full Mode) [預設]")
+    print("   - ✅ 歸檔到資料庫 + ✅ 回填價格到 BOM")
+    print("==========================================\n")
     
+    # 支援 GitHub Actions 環境變數
+    env_mode = os.environ.get("EXECUTION_MODE")
+    if env_mode in ['1', '2', '3']:
+        print(f"🤖 Detected Env Var: Mode {env_mode}")
+        return int(env_mode)
+
+    # 本地端互動
+    try:
+        choice = input("👉 請輸入 1, 2 或 3 (Enter default 3): ").strip()
+        if choice in ['1', '2', '3']:
+            return int(choice)
+    except:
+        pass
+    
+    print("Using Default: Mode 3")
+    return 3
+
+def main():
+    mode = get_user_mode()
+    print(f"🚀 Starting BOM Automation (Mode {mode})...", flush=True)
+    
+    enable_db_write = (mode in [2, 3]) # 模式 2,3 允許寫入 DB
+    enable_price_fill = (mode in [1, 3]) # 模式 1,3 允許回填價格
+
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     json_key = os.environ.get('GOOGLE_SHEETS_JSON')
     
-    if not json_key:
-        print("❌ Error: GOOGLE_SHEETS_JSON secret is missing.")
-        return
+    if not json_key: return
 
     try:
         creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_key), scope)
         client = gspread.authorize(creds)
-        print(f"🤖 Service Account Email: {creds.service_account_email}", flush=True)
-    except Exception as e:
-        print(f"❌ Auth Error: {e}")
-        return
-    
-    try:
         db_manager = DatabaseManager(client, DB_SHEET_URL)
         gemini = GeminiBrain(GEMINI_API_KEY)
     except Exception as e:
-        print(f"❌ Initialization Error: {e}")
+        print(f"❌ Init Error: {e}")
         return
 
     try:
         input_ws = db_manager.workbook.worksheet(INPUT_SHEET_NAME)
-        print(f"✅ Found Input Sheet: {INPUT_SHEET_NAME}")
-    except gspread.exceptions.WorksheetNotFound:
-        print(f"❌ Critical Error: Sheet '{INPUT_SHEET_NAME}' not found.")
+        all_input_values = input_ws.get_all_values()
+        if not all_input_values: return
+        
+        input_headers = all_input_values[0] 
+        input_rows = all_input_values[1:]   
+    except Exception as e:
+        print(f"❌ Read Input Error: {e}")
         return
 
-    # ★★★ 修改點：改用 get_all_values() 讀取原始資料，避免 Header 重複報錯 ★★★
-    all_values = input_ws.get_all_values()
-    if not all_values:
-        print("ℹ️ Input BOM is empty.")
-        return
+    def get_col_idx(names):
+        for n in names:
+            for i, h in enumerate(input_headers):
+                if n.upper() in str(h).upper(): return i
+        return None
 
-    headers = all_values[0] # 第一列是標題
-    input_data = all_values[1:] # 剩下的資料
+    col_desc_idx = get_col_idx(["Description", "Part Description"])
+    col_mpn_idx = get_col_idx(["MPN", "Part No", "P/N"])
+    col_val_idx = get_col_idx(["Value", "Val"])
+    col_status_idx = get_col_idx(["Status"])
 
-    # 自動偵測 Input 欄位位置
-    col_desc_idx = find_column_index(headers, ["Description", "Part Description"])
-    col_mpn_idx = find_column_index(headers, ["MPN", "Part No", "P/N"])
-    col_val_idx = find_column_index(headers, ["Value", "Val"])
-    col_status_idx = find_column_index(headers, ["Status"]) # 用於檢查是否已處理
-    
     output_headers = ["Status", "Est. Price", "Ref Source", "Match Type", "Link", "Candidates"]
-    start_output_col = len(headers) + 1
+    start_output_col = len(input_headers) + 1
     
-    # 如果還沒有 Status 欄位，就寫入新的 Header
-    if not col_status_idx:
+    if col_status_idx is None:
         input_ws.update(range_name=gspread.utils.rowcol_to_a1(1, start_output_col), values=[output_headers])
 
-    print(f"🔄 Processing {len(input_data)} items...", flush=True)
+    print(f"🔄 Processing {len(input_rows)} items...", flush=True)
 
-    # 3. 逐行處理
-    for i, row in enumerate(input_data):
-        row_num = i + 2 
+    for i, row in enumerate(input_rows):
+        row_num = i + 2
         
-        # 使用索引安全存取 list (避免 index out of range)
-        def get_val(idx):
-            if idx and len(row) >= idx:
-                return str(row[idx-1])
-            return ""
+        def get_val(idx): return str(row[idx]) if idx is not None and idx < len(row) else ""
+
+        if col_status_idx is not None and col_status_idx < len(row) and row[col_status_idx]:
+            continue
 
         desc = get_val(col_desc_idx)
         mpn = get_val(col_mpn_idx)
         value = get_val(col_val_idx)
-        
-        # 檢查 Status 欄位是否已有值
-        current_status = get_val(col_status_idx) if col_status_idx else ""
-        if current_status: 
-            continue
 
-        print(f"   [{i+1}/{len(input_data)}] Processing: {desc[:20]}...", end=" ")
+        print(f"   [{i+1}/{len(input_rows)}] {desc[:20]}...", end=" ")
+
+        # 1. 分類 (Classify)
+        target_sheet = None
+        if not value:
+             target_sheet = gemini.classify_component_fallback(desc, value)
         
-        target_sheet = get_sheet_by_rules(desc, value)
-        if not target_sheet:
-            target_sheet = gemini.classify_component_fallback(desc, value)
+        if not target_sheet or target_sheet == "Others":
+             desc_u = desc.upper()
+             val_u = value.upper()
+             if "UF" in val_u or "PF" in val_u: target_sheet = "MLCC(TMTC)"
+             elif "RES" in desc_u or "OHM" in val_u: target_sheet = "RES"
+             else:
+                 for k, v in SHEET_MAP.items():
+                     if any(kw in desc_u for kw in v): 
+                         target_sheet = k
+                         break
         
+        if not target_sheet: target_sheet = "Others"
         print(f"-> [{target_sheet}]")
         
-        if target_sheet == "Others" or target_sheet not in SHEET_MAP:
-             try:
-                 safe_update_sheet(input_ws, gspread.utils.rowcol_to_a1(row_num, start_output_col), [["Skipped (Unknown)"]])
+        if target_sheet not in SHEET_MAP and target_sheet != "Others":
+             try: input_ws.update_cell(row_num, start_output_col, "Skipped")
              except: pass
              continue
 
+        # 2. 搜尋 (Search)
         matches, match_type = db_manager.find_best_matches(target_sheet, mpn, desc, value)
-        existing_indices = [m['row'] for m in matches]
         
-        new_row_data = [""] * 10 
-        new_row_data[0] = f"{desc} [NEW]" 
-        new_row_data[1] = mpn             
-        new_row_data[2] = value           
-        
-        status = "Processed"
+        # 3. 歸檔 (Filing) - 僅在 Mode 2,3 執行
+        status = "Checked Only"
         inserted_row = 0
         
-        try:
-            inserted_row = db_manager.organize_and_insert(target_sheet, existing_indices, new_row_data)
-            status = "Moved & Inserted"
-        except Exception as e:
-            print(f"      ❌ Error inserting: {e}")
-            status = f"Error: {str(e)[:50]}"
+        if enable_db_write:
+            input_row_dict = {}
+            for h_idx, h_name in enumerate(input_headers):
+                if h_idx < len(row):
+                    input_row_dict[h_name] = row[h_idx]
+            
+            try:
+                existing_indices = [m['row'] for m in matches]
+                inserted_row = db_manager.organize_and_insert(target_sheet, existing_indices, input_row_dict)
+                status = "Moved & Inserted"
+            except Exception as e:
+                print(f"      ❌ DB Write Error: {e}")
+                status = f"DB Error: {str(e)[:20]}"
+        elif matches:
+            # 如果是 Mode 1 (Read Only)，我們還是需要知道 match 到哪一行才能給連結
+            inserted_row = matches[0]['row']
+            status = "Match Found (Read Only)"
 
-        best_price = matches[0]['data'].get('Price', 'N/A') if matches else 'N/A'
-        ref_source = matches[0]['data'].get('Description', '') if matches else ''
+        # 4. 準備回填資料
+        # 根據模式決定要不要填價格
+        best_price = "Skipped"
+        if enable_price_fill:
+            best_price = matches[0]['data'].get('Price', 'N/A') if matches else 'N/A'
         
+        ref_source = ""
+        if matches:
+            d_keys = [k for k in matches[0]['data'].keys() if 'DESC' in k.upper()]
+            if d_keys: ref_source = matches[0]['data'][d_keys[0]]
+
+        link_formula = ""
+        if inserted_row > 0:
+            try:
+                sid = db_manager.workbook.worksheet(target_sheet).id
+                link_url = f"https://docs.google.com/spreadsheets/d/{db_manager.workbook.id}/edit#gid={sid}&range=A{inserted_row}"
+                link_formula = f'=HYPERLINK("{link_url}", "Go")'
+            except: pass
+
+        cand_str = "\n".join([f"{m['data'].get('MPN','')} ${m['data'].get('Price',0)}" for m in matches[1:]])
+        
+        out_values = [status, best_price, ref_source, match_type, link_formula, cand_str]
+        
+        # 5. 更新 Input BOM (所有模式都會更新狀態，確保使用者知道進度)
         try:
-            sheet_id = db_manager.workbook.worksheet(target_sheet).id
-            link_url = f"https://docs.google.com/spreadsheets/d/{db_manager.workbook.id}/edit#gid={sheet_id}&range=A{inserted_row}"
-            link_formula = f'=HYPERLINK("{link_url}", "Go to {target_sheet}")'
+            start_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col)
+            end_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col + 5)
+            input_ws.update(range_name=f"{start_cell}:{end_cell}", values=[out_values], value_input_option="USER_ENTERED")
         except:
-            link_formula = ""
+            time.sleep(5)
+            try:
+                input_ws.update(range_name=f"{start_cell}:{end_cell}", values=[out_values], value_input_option="USER_ENTERED")
+            except: pass
 
-        candidates_str = "\n".join([f"{m['data'].get('MPN')} ${m['data'].get('Price',0)}" for m in matches[1:]])
-        
-        out_values = [status, best_price, ref_source, match_type, link_formula, candidates_str]
-        
-        start_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col)
-        end_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col + 5)
-        
-        safe_update_sheet(input_ws, f"{start_cell}:{end_cell}", [out_values])
-        
-        time.sleep(2)
+        time.sleep(1) 
 
-    print("✅ All tasks completed successfully!")
+    print("✅ Done!")
 
 if __name__ == "__main__":
     main()
