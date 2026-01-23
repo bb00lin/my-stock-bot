@@ -5,23 +5,19 @@ import json
 import random
 import pandas as pd
 import gspread
-import google.generativeai as genai
 from oauth2client.service_account import ServiceAccountCredentials
 from gspread_formatting import *
 from gspread.exceptions import APIError
 
 # ================= 設定區 =================
 
-# 您的真實檔案連結
 DB_SHEET_URL = "https://docs.google.com/spreadsheets/d/1ovCEzxlz-383PLl4Dmtu8GybxfxI7tCKOl-6-oXNRa0/edit?usp=sharing"
-
-# Input 分頁名稱
 INPUT_SHEET_NAME = "Input_BOM"
 
-# Gemini API Key
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# 報表專用欄位 (不會被寫入資料庫)
+REPORT_COLUMNS = ["Status", "Est. Price", "Ref Source", "Match Type", "Link", "Candidates"]
 
-# 分頁關鍵字映射
+# 分頁關鍵字映射 (規則庫)
 SHEET_MAP = {
     "RES": ["RES", "OHM", "Ω", "RESISTOR"],
     "MLCC(TMTC)": ["CAP", "UF", "NF", "PF", "CERAMIC", "MLCC"],
@@ -30,20 +26,19 @@ SHEET_MAP = {
     "diode and transistor": ["DIODE", "TRANSISTOR", "MOSFET", "RECTIFIER"],
     "IC": ["IC", "MCU", "CPU", "CHIP"],
     "Connectors": ["CONN", "HEADER", "JACK", "USB", "SOCKET"],
-    "switch and fuse": ["SWITCH", "FUSE", "BUTTON"],
+    "switch and fuse": ["SWITCH", "FUSE", "BUTTON", "PTC", "POLY"],
     "Led_Xtal": ["LED", "CRYSTAL", "XTAL", "OSCILLATOR"]
 }
 
-# 顏色庫
 PASTEL_COLORS = [
-    {"red": 1.0, "green": 1.0, "blue": 0.8}, # 淺黃
-    {"red": 0.8, "green": 1.0, "blue": 0.8}, # 淺綠
-    {"red": 0.8, "green": 0.9, "blue": 1.0}, # 淺藍
-    {"red": 1.0, "green": 0.8, "blue": 0.8}, # 淺紅
-    {"red": 0.9, "green": 0.8, "blue": 1.0}, # 淺紫
+    {"red": 1.0, "green": 1.0, "blue": 0.8},
+    {"red": 0.8, "green": 1.0, "blue": 0.8},
+    {"red": 0.8, "green": 0.9, "blue": 1.0},
+    {"red": 1.0, "green": 0.8, "blue": 0.8},
+    {"red": 0.9, "green": 0.8, "blue": 1.0},
 ]
 
-# ================= 輔助工具：自動重試機制 =================
+# ================= 輔助工具 =================
 
 def retry_with_backoff(retries=5, delay=2):
     def decorator(func):
@@ -64,34 +59,6 @@ def retry_with_backoff(retries=5, delay=2):
 
 # ================= 類別定義 =================
 
-class GeminiBrain:
-    def __init__(self, api_key):
-        if api_key:
-            try:
-                genai.configure(api_key=api_key)
-                self.model = genai.GenerativeModel('gemini-pro')
-                print("✅ Gemini AI Connected.")
-            except Exception as e:
-                print(f"⚠️ Gemini Init Failed: {e}")
-                self.model = None
-        else:
-            self.model = None
-            print("⚠️ Warning: No Gemini API Key found.")
-
-    def classify_component_fallback(self, description, value):
-        if not self.model: return "Others"
-        prompt = f"""
-        Act as an electronic component expert.
-        Database sheets: {list(SHEET_MAP.keys())}.
-        Item: {description} (Value: {value})
-        Which sheet does this belong to? Return ONLY the sheet name. If unknown, return 'Others'.
-        """
-        try:
-            response = self.model.generate_content(prompt)
-            return response.text.strip()
-        except:
-            return "Others"
-
 class DatabaseManager:
     def __init__(self, client, sheet_url):
         self.client = client
@@ -108,7 +75,6 @@ class DatabaseManager:
                     return pd.DataFrame(), []
                 
                 headers = all_values[0]
-                # 簡單處理重複標題問題
                 unique_headers = []
                 seen = {}
                 for h in headers:
@@ -121,12 +87,7 @@ class DatabaseManager:
                         unique_headers.append(clean_h)
                 
                 df = pd.DataFrame(all_values[1:], columns=unique_headers)
-                
-                # ★★★ 錯誤修正點：範圍長度必須與資料長度一致 ★★★
-                # all_values 包含標題，df 是從 [1:] 開始
-                # 行號從 2 開始 (因為 Row 1 是 Header)
-                # range(start, stop) -> stop 是不包含的
-                # 正確邏輯：Row 2 到 Row (len+1) -> 共 len-1 行
+                # 修正 range 長度問題
                 df['_row_index'] = range(2, len(all_values) + 1)
                 
                 self.sheet_cache[sheet_name] = df
@@ -159,8 +120,7 @@ class DatabaseManager:
             has_space1 = ' ' in str1
             has_space2 = ' ' in str2
             if len(str1) > 8 and len(str2) > 8:
-                if has_space1 != has_space2:
-                    return False 
+                if has_space1 != has_space2: return False 
             return True
 
         candidates = []
@@ -175,33 +135,35 @@ class DatabaseManager:
             row_val = str(row[val_col]).upper() if val_col else ""
             
             score = 0
+            # 數值比對
             if val_str:
                 if val_str == row_val: score += 20
                 elif val_str in row_desc: score += 15
-                else: continue
+                else: continue # 數值不同直接跳過
 
-            if not is_structure_match(desc_str, row_desc):
-                continue 
+            # 結構比對
+            if not is_structure_match(desc_str, row_desc): continue 
 
+            # 關鍵字比對
             hit_count = 0
             for word in desc_keywords:
-                if len(word) > 2 and word in row_desc:
-                    hit_count += 1
+                if len(word) > 2 and word in row_desc: hit_count += 1
             score += hit_count
 
             if score >= 18: 
                 candidates.append({'row': row['_row_index'], 'data': row, 'score': score})
 
         candidates.sort(key=lambda x: x['score'], reverse=True)
-        if candidates:
-            return candidates[:3], "Parametric Match"
-        
+        if candidates: return candidates[:3], "Parametric Match"
         return [], "None"
 
     @retry_with_backoff(retries=5, delay=2)
     def organize_and_insert(self, sheet_name, existing_rows, input_row_dict):
         ws = self.workbook.worksheet(sheet_name)
         
+        # 1. 過濾掉報表專用欄位
+        db_input_data = {k: v for k, v in input_row_dict.items() if k not in REPORT_COLUMNS}
+
         current_headers = self.headers_cache.get(sheet_name, [])
         if not current_headers:
             current_headers = ws.row_values(1)
@@ -214,7 +176,7 @@ class DatabaseManager:
         header_map = {} 
         db_header_index = {h.upper(): i for i, h in enumerate(current_headers)}
         
-        for key in input_row_dict.keys():
+        for key in db_input_data.keys():
             if not key: continue
             u_key = key.upper()
             if u_key in db_header_index:
@@ -222,8 +184,14 @@ class DatabaseManager:
             else:
                 missing_cols.append(key)
 
+        # 2. 自動擴充欄位
         if missing_cols:
-            print(f"      🆕 Creating new columns: {missing_cols}")
+            print(f"      🆕 Creating new columns in '{sheet_name}': {missing_cols}")
+            needed_cols = len(current_headers) + len(missing_cols)
+            if needed_cols > ws.col_count:
+                ws.resize(cols=needed_cols + 5)
+                time.sleep(1)
+
             start_col_idx = len(current_headers) + 1
             range_start = gspread.utils.rowcol_to_a1(1, start_col_idx)
             range_end = gspread.utils.rowcol_to_a1(1, start_col_idx + len(missing_cols) - 1)
@@ -233,13 +201,18 @@ class DatabaseManager:
                 new_idx = len(current_headers) + i
                 current_headers.append(col_name)
                 header_map[col_name] = new_idx
-                
-        row_data_list = [""] * len(current_headers)
-        for key, value in input_row_dict.items():
+        
+        # 3. 準備資料 List
+        max_idx = max(header_map.values()) if header_map else 0
+        list_size = max(len(current_headers), max_idx + 1)
+        row_data_list = [""] * list_size
+
+        for key, value in db_input_data.items():
             if key in header_map:
                 col_idx = header_map[key]
                 row_data_list[col_idx] = value
         
+        # 4. 插入位置邏輯
         if existing_rows:
             target_index = min(existing_rows)
             rows_to_move = sorted([r for r in existing_rows if r != target_index], reverse=True)
@@ -262,22 +235,23 @@ class DatabaseManager:
         
         if not existing_rows:
             ws.append_row(row_data_list)
-            final_insert_pos = len(ws.col_values(1))
+            final_insert_pos = len(ws.col_values(1)) 
         else:
             ws.insert_row(row_data_list, final_insert_pos)
 
-        color = random.choice(PASTEL_COLORS)
-        fmt = cellFormat(backgroundColor=color)
-        format_cell_range(ws, f"A{target_index}:Z{final_insert_pos}", fmt)
+        # 5. 上色
+        if target_index <= final_insert_pos:
+            color = random.choice(PASTEL_COLORS)
+            fmt = cellFormat(backgroundColor=color)
+            format_cell_range(ws, f"A{target_index}:Z{final_insert_pos}", fmt)
         
         return final_insert_pos
 
-# ================= 顏色重置功能 =================
+# ================= 顏色與資料重置 =================
 
 @retry_with_backoff(retries=3, delay=5)
 def reset_database_colors(client, sheet_url):
-    """清除資料庫與 Input 表中所有的背景顏色標示"""
-    print("🧹 Cleaning up colors in all sheets...", flush=True)
+    print("🧹 Cleaning up colors...", flush=True)
     try:
         workbook = client.open_by_url(sheet_url)
         target_sheets = [INPUT_SHEET_NAME] + list(SHEET_MAP.keys())
@@ -286,64 +260,62 @@ def reset_database_colors(client, sheet_url):
         for sheet_name in target_sheets:
             try:
                 ws = workbook.worksheet(sheet_name)
-                # 只清前 3000 行
                 format_cell_range(ws, "A2:Z3000", white_bg)
-                print(f"   ✨ Cleared colors in '{sheet_name}'")
-                time.sleep(1.5) 
-            except gspread.exceptions.WorksheetNotFound:
-                continue 
-            except Exception as e:
-                print(f"   ⚠️ Could not clear '{sheet_name}': {e}")
-                
-    except Exception as e:
-        print(f"❌ Failed to reset colors: {e}")
+            except: continue
+    except: pass
+
+def clear_input_report_columns(ws, headers):
+    """清除 Input_BOM 中報表欄位的舊資料，保留標題"""
+    print("🧹 Clearing old report data in Input_BOM...", flush=True)
+    
+    cols_to_clear = []
+    for i, h in enumerate(headers):
+        if str(h).strip() in REPORT_COLUMNS:
+            cols_to_clear.append(i + 1)
+    
+    if not cols_to_clear: return
+
+    for col_idx in cols_to_clear:
+        col_letter = gspread.utils.rowcol_to_a1(1, col_idx)[0] 
+        range_name = f"{col_letter}2:{col_letter}2000"
+        try:
+            ws.batch_clear([range_name])
+        except: pass
+    time.sleep(1)
 
 # ================= 主程式 =================
 
 def get_user_mode():
-    """獲取用戶希望執行的模式"""
     print("\n==========================================")
     print("📋 請選擇執行模式 (Select Execution Mode):")
-    print("------------------------------------------")
     print("1️⃣  僅詢價 (Price Check Only)")
-    print("    💡 情境：我有一個新 BOM，想知道大概多少錢，但我不想動到資料庫。")
-    print("    🔹 行為：搜尋 DB -> 回填價格 -> 結束。")
-    print("------------------------------------------")
     print("2️⃣  僅歸檔 (Filing Only)")
-    print("    💡 情境：我確認這個 BOM 的零件都要加入資料庫，但我現在不在乎價格。")
-    print("    🔹 行為：分類零件 -> 插入資料庫 -> 上色整理。")
-    print("------------------------------------------")
     print("3️⃣  完整模式 (Full Mode) [推薦/預設]")
-    print("    💡 情境：我要把這些零件加入資料庫，並且順便知道價格。")
-    print("    🔹 行為：全部都做 (歸檔 + 詢價)。")
     print("==========================================\n")
     
     env_mode = os.environ.get("EXECUTION_MODE")
-    if env_mode in ['1', '2', '3']:
-        print(f"🤖 偵測到環境變數設定: Mode {env_mode}")
-        return int(env_mode)
+    if env_mode: 
+        # 解析 GitHub UI 傳入的字串 "3. 完整模式" -> 3
+        try:
+            val = str(env_mode).strip()[0]
+            if val in ['1', '2', '3']: return int(val)
+        except: pass
 
     try:
-        choice = input("👉 請輸入 1, 2 或 3 (預設 3): ").strip()
-        if choice in ['1', '2', '3']:
-            return int(choice)
-    except:
-        pass
-    
-    print("使用預設模式: Mode 3")
+        choice = input("👉 請輸入 1, 2 或 3: ").strip()
+        if choice in ['1', '2', '3']: return int(choice)
+    except: pass
     return 3
 
 def main():
     mode = get_user_mode()
-    mode_names = {1: "僅詢價 (Price Check)", 2: "僅歸檔 (Filing)", 3: "完整模式 (Full)"}
-    print(f"🚀 Starting BOM Automation | Mode: {mode} ({mode_names.get(mode, 'Unknown')})", flush=True)
+    print(f"🚀 Starting BOM Automation (No AI) | Mode: {mode}", flush=True)
     
     enable_db_write = (mode in [2, 3]) 
     enable_price_fill = (mode in [1, 3]) 
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     json_key = os.environ.get('GOOGLE_SHEETS_JSON')
-    
     if not json_key: return
 
     try:
@@ -354,7 +326,6 @@ def main():
             reset_database_colors(client, DB_SHEET_URL)
             
         db_manager = DatabaseManager(client, DB_SHEET_URL)
-        gemini = GeminiBrain(GEMINI_API_KEY)
     except Exception as e:
         print(f"❌ Init Error: {e}")
         return
@@ -366,6 +337,9 @@ def main():
         
         input_headers = all_input_values[0] 
         input_rows = all_input_values[1:]   
+        
+        clear_input_report_columns(input_ws, input_headers)
+        
     except Exception as e:
         print(f"❌ Read Input Error: {e}")
         return
@@ -381,11 +355,17 @@ def main():
     col_val_idx = get_col_idx(["Value", "Val"])
     col_status_idx = get_col_idx(["Status"])
 
-    output_headers = ["Status", "Est. Price", "Ref Source", "Match Type", "Link", "Candidates"]
-    start_output_col = len(input_headers) + 1
-    
-    if col_status_idx is None:
-        input_ws.update(range_name=gspread.utils.rowcol_to_a1(1, start_output_col), values=[output_headers])
+    # 確保 Output Headers 存在
+    output_headers_needed = [h for h in REPORT_COLUMNS if h not in input_headers]
+    if output_headers_needed:
+        start_col_idx = len(input_headers) + 1
+        range_start = gspread.utils.rowcol_to_a1(1, start_col_idx)
+        range_end = gspread.utils.rowcol_to_a1(1, start_col_idx + len(output_headers_needed) - 1)
+        input_ws.update(range_name=f"{range_start}:{range_end}", values=[output_headers_needed])
+        input_headers.extend(output_headers_needed)
+        col_status_idx = get_col_idx(["Status"])
+
+    header_map = {h: i for i, h in enumerate(input_headers)}
 
     print(f"🔄 Processing {len(input_rows)} items...", flush=True)
 
@@ -394,8 +374,9 @@ def main():
         
         def get_val(idx): return str(row[idx]) if idx is not None and idx < len(row) else ""
 
-        if col_status_idx is not None and col_status_idx < len(row) and row[col_status_idx]:
-            continue
+        if col_status_idx is not None:
+             status_val = get_val(col_status_idx)
+             if status_val and "Processed" in status_val: continue
 
         desc = get_val(col_desc_idx)
         mpn = get_val(col_mpn_idx)
@@ -403,34 +384,30 @@ def main():
 
         print(f"   [{i+1}/{len(input_rows)}] {desc[:20]}...", end=" ")
 
-        # 1. 分類 (Classify)
-        target_sheet = None
-        if not value:
-             target_sheet = gemini.classify_component_fallback(desc, value)
+        # 1. 分類 (純規則)
+        target_sheet = "Others"
+        desc_u = desc.upper()
+        val_u = value.upper()
+
+        # 規則 A: 數值單位判斷
+        if "UF" in val_u or "PF" in val_u or "NF" in val_u: target_sheet = "MLCC(TMTC)"
+        elif "RES" in desc_u or "OHM" in val_u or "Ω" in val_u: target_sheet = "RES"
+        else:
+            # 規則 B: 關鍵字映射
+            for k, v in SHEET_MAP.items():
+                if any(kw in desc_u for kw in v): 
+                    target_sheet = k
+                    break
         
-        if not target_sheet or target_sheet == "Others":
-             desc_u = desc.upper()
-             val_u = value.upper()
-             if "UF" in val_u or "PF" in val_u: target_sheet = "MLCC(TMTC)"
-             elif "RES" in desc_u or "OHM" in val_u: target_sheet = "RES"
-             else:
-                 for k, v in SHEET_MAP.items():
-                     if any(kw in desc_u for kw in v): 
-                         target_sheet = k
-                         break
-        
-        if not target_sheet: target_sheet = "Others"
         print(f"-> [{target_sheet}]")
         
         if target_sheet not in SHEET_MAP and target_sheet != "Others":
-             try: input_ws.update_cell(row_num, start_output_col, "Skipped")
-             except: pass
              continue
 
-        # 2. 搜尋 (Search)
+        # 2. 搜尋
         matches, match_type = db_manager.find_best_matches(target_sheet, mpn, desc, value)
         
-        # 3. 歸檔 (Filing)
+        # 3. 歸檔
         status = "Checked Only"
         inserted_row = 0
         
@@ -449,7 +426,7 @@ def main():
                 status = f"DB Error: {str(e)[:20]}"
         elif matches:
             inserted_row = matches[0]['row']
-            status = "Match Found (Read Only)"
+            status = "Match Found"
 
         # 4. 回填
         best_price = "Skipped"
@@ -471,18 +448,22 @@ def main():
 
         cand_str = "\n".join([f"{m['data'].get('MPN','')} ${m['data'].get('Price',0)}" for m in matches[1:]])
         
-        out_values = [status, best_price, ref_source, match_type, link_formula, cand_str]
+        updates = {
+            "Status": status,
+            "Est. Price": best_price,
+            "Ref Source": ref_source,
+            "Match Type": match_type,
+            "Link": link_formula,
+            "Candidates": cand_str
+        }
         
-        try:
-            start_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col)
-            end_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col + 5)
-            input_ws.update(range_name=f"{start_cell}:{end_cell}", values=[out_values], value_input_option="USER_ENTERED")
-        except:
-            time.sleep(5)
-            try:
-                input_ws.update(range_name=f"{start_cell}:{end_cell}", values=[out_values], value_input_option="USER_ENTERED")
-            except: pass
-
+        for col_name, val in updates.items():
+            if col_name in header_map:
+                col_idx = header_map[col_name] + 1
+                try:
+                    input_ws.update_cell(row_num, col_idx, val)
+                except: pass
+        
         time.sleep(1) 
 
     print("✅ Done!")
