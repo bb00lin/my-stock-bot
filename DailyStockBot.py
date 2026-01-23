@@ -63,8 +63,10 @@ def update_watch_list_sheet(recommended_stocks):
         existing_ids = set(str(row.get('股票代號', '')).strip() for row in existing_records)
         
         new_rows = []
-        # [修改] 獲取當前時間精確到分鐘
-        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        
+        # [修正] 強制使用 UTC+8 (台灣時間)
+        tw_time = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        now_str = tw_time.strftime('%Y-%m-%d %H:%M')
 
         print(f"📋 準備將 {len(recommended_stocks)} 檔潛力股匯入 WATCH_LIST...")
 
@@ -73,7 +75,7 @@ def update_watch_list_sheet(recommended_stocks):
             name = stock['name']
             
             if sid not in existing_ids:
-                # [修改] reason_note 加入精確時間
+                # [修改] reason_note 加入精確的台灣時間
                 reason_note = f"[{now_str}] {stock['reason']}"
                 
                 # 寫入格式: A欄=代號, B欄=名稱, CDE欄空, F欄=推薦理由(含時間)
@@ -172,8 +174,11 @@ def analyze_v14(ticker, name):
                         f"現價：{cp:.2f}\n"
                         f"-----------------------------------")
             
+            # 這裡的日期也建議同步修正為台灣時間
+            tw_today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
+            
             sheet_data = [
-                str(datetime.date.today()), pure_id, name, type_tag, 
+                tw_today, pure_id, name, type_tag, 
                 fs, ss, round(vol_ratio, 2), status_label, 
                 round(rsi_val, 1), round(k_val, 1), cp
             ]
@@ -253,7 +258,9 @@ def main():
         update_watch_list_sheet(watch_list_candidates)
 
     if line_results:
-        msg = f"🔍 【{datetime.date.today()} 法人精選(1000檔)】\n\n" + "\n".join(line_results)
+        # 使用台灣時間顯示標題
+        tw_date = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
+        msg = f"🔍 【{tw_date} 法人精選(1000檔)】\n\n" + "\n".join(line_results)
         send_line(msg)
     else:
         print("今日無符合標的。")
