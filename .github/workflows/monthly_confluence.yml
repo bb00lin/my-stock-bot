@@ -1,0 +1,30 @@
+name: Monthly Confluence Task
+
+on:
+  schedule:
+    # UTC 時間每月 1 號 00:00 (對應台灣時間 08:00)
+    - cron: '0 0 1 * *'
+  workflow_dispatch: # 允許手動測試
+
+jobs:
+  run-monthly-task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 python-dateutil
+
+      - name: Run Automator
+        env:
+          CONF_URL: ${{ secrets.CONF_URL }}
+          CONF_USER: ${{ secrets.CONF_USER }}
+          CONF_PASS: ${{ secrets.CONF_PASS }}
+        run: python monthly_confluence_copy.py
