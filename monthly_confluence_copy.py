@@ -10,20 +10,19 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
 # ==========================================
-# 1. 設定區 (使用與原腳本相同的環境變數)
+# 1. 設定區
 # ==========================================
 RAW_URL = os.environ.get("CONF_URL")
 USERNAME = os.environ.get("CONF_USER")
 API_TOKEN = os.environ.get("CONF_PASS")
 
-# 父頁面標題，用來定位基準點
+# 父頁面標題
 PARENT_PAGE_TITLE = "Personal Tasks"
 
 if not RAW_URL or not USERNAME or not API_TOKEN:
     print("❌ 錯誤：缺少環境變數 (CONF_URL, CONF_USER, CONF_PASS)")
     sys.exit(1)
 
-# 處理 URL
 parsed_url = urlparse(RAW_URL)
 BASE_URL = f"{parsed_url.scheme}://{parsed_url.netloc}"
 API_ENDPOINT = f"{BASE_URL}/wiki/rest/api/content"
@@ -62,12 +61,7 @@ def get_child_pages(parent_id):
         return []
 
 def find_latest_monthly_page():
-    """
-    1. 找到 'Personal Tasks'
-    2. 找到底下格式為 YYYYMM 的子頁面
-    3. 回傳月份最大的一個
-    """
-    print(f"正在搜尋父頁面: {PARENT_PAGE_TITLE}...")
+    print(f"🔍 正在搜尋父頁面: {PARENT_PAGE_TITLE}...")
     parent_page = get_page_id_by_title(PARENT_PAGE_TITLE)
     if not parent_page:
         print(f"❌ 找不到父頁面: {PARENT_PAGE_TITLE}")
@@ -81,7 +75,7 @@ def find_latest_monthly_page():
     
     for child in children:
         title = child['title']
-        # 檢查是否為 6 位數字 (例如 202512)
+        # 嚴格匹配 6 位數字 (YYYYMM)
         if re.match(r'^\d{6}$', title):
             monthly_pages.append(child)
     
@@ -89,74 +83,90 @@ def find_latest_monthly_page():
         print("⚠️ 在 Personal Tasks 下找不到任何 YYYYMM 格式的頁面。")
         sys.exit(1)
 
-    # 排序找到最新的月份
+    # 排序並取最新
     monthly_pages.sort(key=lambda x: x['title'], reverse=True)
     latest_page = monthly_pages[0]
     
-    # 這裡我們需要重新取得一次 latest_page 的詳細內容 (包含 body.storage)，因為 child API 給的資訊較少
+    # 重新讀取完整內容 (含 body.storage)
     full_latest_page = get_page_id_by_title(latest_page['title'])
     
     print(f"📅 找到最新月份頁面: {full_latest_page['title']} (ID: {full_latest_page['id']})")
     return full_latest_page
 
-def increment_date_in_text(text):
-    """
-    將文字中的日期 (YYYY-MM-DD 或 YYYY/MM/DD) 加 1 個月
-    """
-    date_pattern = re.compile(r'(\d{4})([-/])(\d{1,2})([-/])(\d{1,2})')
-
-    def replace_date(match):
-        year, sep1, month, sep2, day = match.groups()
-        try:
-            current_date = datetime(int(year), int(month), int(day))
-            new_date = current_date + relativedelta(months=1)
-            # 保持原始分隔符號
-            return f"{new_date.year}{sep1}{new_date.month:02d}{sep2}{new_date.day:02d}"
-        except ValueError:
-            return match.group(0)
-
-    return date_pattern.sub(replace_date, text)
+def increment_date_match(match):
+    """正則替換的回調函式：將匹配到的日期 +1 個月"""
+    full_date = match.group(0) # e.g., 2025-11-01
+    sep = match.group(2)       # e.g., - or /
+    
+    try:
+        # 嘗試解析 YYYY-MM-DD 或 YYYY/MM/DD
+        fmt = f"%Y{sep}%m{sep}%d"
+        dt = datetime.strptime(full_date, fmt)
+        
+        # 加一個月
+        new_dt = dt + relativedelta(months=1)
+        
+        # 轉回字串
+        new_date_str = new_dt.strftime(fmt)
+        # print(f"   Debug: 日期變更 {full_date} -> {new_date_str}")
+        return new_date_str
+    except ValueError:
+        return full_date
 
 def process_jql_content(html_content):
     """
-    解析 HTML，只修改 Jira Macro (JQL) 中的日期
+    解析 Storage Format XML，找到 Jira Macro 的 JQL 參數並修改日期
     """
-    print("正在處理 JQL 日期遞增...")
+    print("🔧 正在解析頁面結構並修改 JQL...")
+    
+    # 使用 lxml-xml 或 html.parser 解析 Confluence Storage Format
+    # Confluence 儲存格式其實是 XHTML/XML
     soup = BeautifulSoup(html_content, 'html.parser')
     
-    # 找到所有 Jira Macro
+    # 1. 找到所有 Jira Macro
+    # 在 Storage Format 中，標籤通常是 <ac:structured-macro ac:name="jira">
     jira_macros = soup.find_all('ac:structured-macro', attrs={"ac:name": "jira"})
-    modified_count = 0
+    
+    total_dates_modified = 0
     
     for macro in jira_macros:
+        # 2. 在 Macro 中找到 JQL 參數
+        # <ac:parameter ac:name="jql">project = ...</ac:parameter>
         jql_param = macro.find('ac:parameter', attrs={"ac:name": "jql"})
+        
         if jql_param and jql_param.string:
             original_jql = jql_param.string
-            new_jql = increment_date_in_text(original_jql)
             
-            if original_jql != new_jql:
-                # 注意：BeautifulSoup 修改 string 的方式
+            # 3. 使用 Regex 搜尋並替換日期
+            # 匹配格式: 2025-11-01 或 2025/11/01
+            date_pattern = re.compile(r'(\d{4})([-/.])(\d{1,2})\2(\d{1,2})')
+            
+            new_jql, count = date_pattern.subn(increment_date_match, original_jql)
+            
+            if count > 0:
+                print(f"   🔄 發現 JQL: {original_jql[:50]}...")
+                print(f"      修改後: {new_jql[:50]}...")
+                # 更新 BeautifulSoup 物件中的字串
                 jql_param.string.replace_with(new_jql)
-                modified_count += 1
-                # print(f"   Debug: {original_jql} -> {new_jql}")
+                total_dates_modified += count
 
-    print(f"📊 共修改了 {modified_count} 個 JQL 日期")
+    print(f"📊 總計修改了 {total_dates_modified} 個 JQL 日期")
     return str(soup)
 
 def create_new_month_page(latest_page):
-    # 1. 計算新標題 (月份+1)
+    # 1. 計算新標題
     current_title = latest_page['title']
     try:
         current_date_obj = datetime.strptime(current_title, "%Y%m")
         next_date_obj = current_date_obj + relativedelta(months=1)
         next_title = next_date_obj.strftime("%Y%m")
     except ValueError:
-        print("❌ 標題日期格式解析錯誤，無法計算下個月。")
+        print("❌ 標題日期格式錯誤")
         sys.exit(1)
 
-    print(f"🚀 目標建立新頁面: {next_title}")
+    print(f"🚀 準備建立新頁面: {next_title}")
 
-    # 2. 檢查重複
+    # 2. 檢查是否已存在
     if get_page_id_by_title(next_title):
         print(f"⚠️ 跳過：頁面 '{next_title}' 已經存在！")
         return
@@ -165,13 +175,12 @@ def create_new_month_page(latest_page):
     original_body = latest_page['body']['storage']['value']
     new_body = process_jql_content(original_body)
 
-    # 4. 準備 Payload
-    # 取得 parent_id (Personal Tasks 的 ID)
-    # latest_page['ancestors'] 列表的最後一個通常是直接父層
+    # 4. 準備建立 (含不通知設定)
+    # 取得父層 ID
     if latest_page.get('ancestors'):
         parent_id = latest_page['ancestors'][-1]['id']
     else:
-        # 如果取不到 ancestor，重新查詢 Personal Tasks 的 ID
+        # Fallback
         p_page = get_page_id_by_title(PARENT_PAGE_TITLE)
         parent_id = p_page['id']
 
@@ -186,11 +195,13 @@ def create_new_month_page(latest_page):
                 "representation": "storage"
             }
         },
-        # 不通知追蹤者設定
+        # 嘗試使用 version.minorEdit 來減少通知 (雖主要用於更新，但建議加上)
         "version": {
             "number": 1,
-            "minorEdit": True 
-        }
+            "minorEdit": True
+        },
+        # Confluence Cloud 有時支援 status="current" 避免發送通知草稿，但這裡是直接發佈
+        "status": "current"
     }
 
     # 5. 發送請求
@@ -204,26 +215,21 @@ def create_new_month_page(latest_page):
         response.raise_for_status()
         
         data = response.json()
-        webui = data['_links']['webui']
-        # 處理連結格式 (有時 API 回傳的 webui 包含 base url，有時不含)
-        if webui.startswith('http'):
-            link = webui
-        else:
-            link = f"{BASE_URL}/wiki{webui}" if not webui.startswith('/wiki') else f"{BASE_URL}{webui}"
+        base_url = BASE_URL.rstrip('/')
+        link_suffix = data['_links']['webui']
+        full_link = f"{base_url}/wiki{link_suffix}" if not link_suffix.startswith('/wiki') else f"{base_url}{link_suffix}"
         
-        print(f"🎉 成功建立！連結: {link}")
+        print(f"🎉 成功建立！連結: {full_link}")
 
     except requests.exceptions.HTTPError as e:
         print(f"❌ 建立失敗: {e}")
-        print(response.text)
+        print(f"錯誤回應: {response.text}")
         sys.exit(1)
 
 def main():
-    print(f"=== Confluence 月度任務自動化 (v1.0) ===")
+    print(f"=== Confluence 月度 JQL 更新機器人 (v2.0) ===")
     try:
-        # 1. 找到最新的月份頁面
         latest_page = find_latest_monthly_page()
-        # 2. 建立下個月的頁面 (含內容修改)
         create_new_month_page(latest_page)
     except Exception as e:
         print(f"執行中斷: {str(e)}")
