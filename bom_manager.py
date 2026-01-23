@@ -108,7 +108,6 @@ class DatabaseManager:
                     return pd.DataFrame(), []
                 
                 headers = all_values[0]
-                # 簡單處理重複標題問題
                 unique_headers = []
                 seen = {}
                 for h in headers:
@@ -196,7 +195,6 @@ class DatabaseManager:
     def organize_and_insert(self, sheet_name, existing_rows, input_row_dict):
         ws = self.workbook.worksheet(sheet_name)
         
-        # 動態欄位檢查
         current_headers = self.headers_cache.get(sheet_name, [])
         if not current_headers:
             current_headers = ws.row_values(1)
@@ -267,45 +265,57 @@ class DatabaseManager:
         
         return final_insert_pos
 
+# ================= 顏色重置功能 =================
+
+@retry_with_backoff(retries=3, delay=5)
+def reset_database_colors(client, sheet_url):
+    """清除資料庫與 Input 表中所有的背景顏色標示"""
+    print("🧹 Cleaning up colors in all sheets...", flush=True)
+    try:
+        workbook = client.open_by_url(sheet_url)
+        # 取得所有需要清理的分頁 (SHEET_MAP + Input_BOM)
+        target_sheets = [INPUT_SHEET_NAME] + list(SHEET_MAP.keys())
+        
+        # 為了安全，我們也可以直接讀取所有分頁，但這比較慢
+        # 這裡我們只清理我們認識的，避免動到 config 頁
+        
+        white_bg = cellFormat(backgroundColor={"red": 1.0, "green": 1.0, "blue": 1.0})
+        
+        for sheet_name in target_sheets:
+            try:
+                ws = workbook.worksheet(sheet_name)
+                # 清除背景色 (假設資料最多到 Z 欄，行數 5000)
+                # 直接清除格式會比較快，但會把邊框也清掉，所以我們用設定白色背景
+                # 或者使用 gspread-formatting 的 clear_format (如果只傳送 range 不傳 format)
+                # 這裡使用 format_cell_range 設為白色最保險
+                
+                # 為了節省配額，我們只清前 3000 行 (通常夠用)
+                format_cell_range(ws, "A2:Z3000", white_bg)
+                print(f"   ✨ Cleared colors in '{sheet_name}'")
+                time.sleep(1.5) # 避免太快觸發 429
+            except gspread.exceptions.WorksheetNotFound:
+                continue # 找不到分頁就跳過
+            except Exception as e:
+                print(f"   ⚠️ Could not clear '{sheet_name}': {e}")
+                
+    except Exception as e:
+        print(f"❌ Failed to reset colors: {e}")
+
 # ================= 主程式 =================
 
-def get_user_mode():
-    """獲取用戶希望執行的模式"""
-    print("\n==========================================")
-    print("請選擇執行模式 (Select Execution Mode):")
-    print("1. 僅詢價 (Price Check Only)")
-    print("   - 僅搜尋 DB 並回填價格到 BOM")
-    print("   - ❌ 不會寫入或修改資料庫")
-    print("2. 僅歸檔 (Filing Only)")
-    print("   - 將零件分類並插入資料庫")
-    print("   - ❌ 不回填價格 (但會回填 Status 讓你知道它去哪了)")
-    print("3. 完整模式 (Full Mode) [預設]")
-    print("   - ✅ 歸檔到資料庫 + ✅ 回填價格到 BOM")
-    print("==========================================\n")
-    
-    # 支援 GitHub Actions 環境變數
-    env_mode = os.environ.get("EXECUTION_MODE")
-    if env_mode in ['1', '2', '3']:
-        print(f"🤖 Detected Env Var: Mode {env_mode}")
-        return int(env_mode)
-
-    # 本地端互動
-    try:
-        choice = input("👉 請輸入 1, 2 或 3 (Enter default 3): ").strip()
-        if choice in ['1', '2', '3']:
-            return int(choice)
-    except:
-        pass
-    
-    print("Using Default: Mode 3")
-    return 3
-
 def main():
-    mode = get_user_mode()
-    print(f"🚀 Starting BOM Automation (Mode {mode})...", flush=True)
+    # 從 GitHub Actions 的環境變數讀取模式
+    env_mode = os.environ.get("EXECUTION_MODE", "3") # 預設為 3
+    try:
+        mode = int(env_mode)
+    except:
+        mode = 3
+        
+    mode_names = {1: "僅詢價 (Price Check)", 2: "僅歸檔 (Filing)", 3: "完整模式 (Full)"}
+    print(f"🚀 Starting BOM Automation | Mode: {mode} ({mode_names.get(mode, 'Unknown')})", flush=True)
     
-    enable_db_write = (mode in [2, 3]) # 模式 2,3 允許寫入 DB
-    enable_price_fill = (mode in [1, 3]) # 模式 1,3 允許回填價格
+    enable_db_write = (mode in [2, 3]) 
+    enable_price_fill = (mode in [1, 3]) 
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     json_key = os.environ.get('GOOGLE_SHEETS_JSON')
@@ -315,6 +325,11 @@ def main():
     try:
         creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_key), scope)
         client = gspread.authorize(creds)
+        
+        # ★★★ 步驟 0: 先清除所有顏色 ★★★
+        if enable_db_write: # 只有要歸檔(寫入)時才需要清理顏色，避免視覺混亂
+            reset_database_colors(client, DB_SHEET_URL)
+            
         db_manager = DatabaseManager(client, DB_SHEET_URL)
         gemini = GeminiBrain(GEMINI_API_KEY)
     except Exception as e:
@@ -392,7 +407,7 @@ def main():
         # 2. 搜尋 (Search)
         matches, match_type = db_manager.find_best_matches(target_sheet, mpn, desc, value)
         
-        # 3. 歸檔 (Filing) - 僅在 Mode 2,3 執行
+        # 3. 歸檔 (Filing)
         status = "Checked Only"
         inserted_row = 0
         
@@ -410,12 +425,10 @@ def main():
                 print(f"      ❌ DB Write Error: {e}")
                 status = f"DB Error: {str(e)[:20]}"
         elif matches:
-            # 如果是 Mode 1 (Read Only)，我們還是需要知道 match 到哪一行才能給連結
             inserted_row = matches[0]['row']
             status = "Match Found (Read Only)"
 
-        # 4. 準備回填資料
-        # 根據模式決定要不要填價格
+        # 4. 回填
         best_price = "Skipped"
         if enable_price_fill:
             best_price = matches[0]['data'].get('Price', 'N/A') if matches else 'N/A'
@@ -437,7 +450,6 @@ def main():
         
         out_values = [status, best_price, ref_source, match_type, link_formula, cand_str]
         
-        # 5. 更新 Input BOM (所有模式都會更新狀態，確保使用者知道進度)
         try:
             start_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col)
             end_cell = gspread.utils.rowcol_to_a1(row_num, start_output_col + 5)
