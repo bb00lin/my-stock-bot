@@ -75,7 +75,6 @@ def find_latest_monthly_page():
     
     for child in children:
         title = child['title']
-        # 嚴格匹配 6 位數字 (YYYYMM)
         if re.match(r'^\d{6}$', title):
             monthly_pages.append(child)
     
@@ -83,11 +82,9 @@ def find_latest_monthly_page():
         print("⚠️ 在 Personal Tasks 下找不到任何 YYYYMM 格式的頁面。")
         sys.exit(1)
 
-    # 排序並取最新
     monthly_pages.sort(key=lambda x: x['title'], reverse=True)
     latest_page = monthly_pages[0]
     
-    # 重新讀取完整內容 (含 body.storage)
     full_latest_page = get_page_id_by_title(latest_page['title'])
     
     print(f"📅 找到最新月份頁面: {full_latest_page['title']} (ID: {full_latest_page['id']})")
@@ -99,16 +96,11 @@ def increment_date_match(match):
     sep = match.group(2)       # e.g., - or /
     
     try:
-        # 嘗試解析 YYYY-MM-DD 或 YYYY/MM/DD
         fmt = f"%Y{sep}%m{sep}%d"
         dt = datetime.strptime(full_date, fmt)
-        
-        # 加一個月
         new_dt = dt + relativedelta(months=1)
-        
-        # 轉回字串
         new_date_str = new_dt.strftime(fmt)
-        # print(f"   Debug: 日期變更 {full_date} -> {new_date_str}")
+        print(f"      👉 日期變更: {full_date} -> {new_date_str}")
         return new_date_str
     except ValueError:
         return full_date
@@ -117,44 +109,50 @@ def process_jql_content(html_content):
     """
     解析 Storage Format XML，找到 Jira Macro 的 JQL 參數並修改日期
     """
-    print("🔧 正在解析頁面結構並修改 JQL...")
+    print("🔧 正在解析頁面結構 (XML Mode)...")
     
-    # 使用 lxml-xml 或 html.parser 解析 Confluence Storage Format
-    # Confluence 儲存格式其實是 XHTML/XML
-    soup = BeautifulSoup(html_content, 'html.parser')
+    # 【關鍵修正】使用 'xml' 解析器 (需要 pip install lxml)
+    try:
+        soup = BeautifulSoup(html_content, 'xml')
+    except Exception as e:
+        print(f"⚠️ XML 解析失敗，嘗試退回 html.parser: {e}")
+        soup = BeautifulSoup(html_content, 'html.parser')
     
     # 1. 找到所有 Jira Macro
-    # 在 Storage Format 中，標籤通常是 <ac:structured-macro ac:name="jira">
     jira_macros = soup.find_all('ac:structured-macro', attrs={"ac:name": "jira"})
+    print(f"   🔎 頁面中發現 {len(jira_macros)} 個 Jira 表格")
     
     total_dates_modified = 0
     
-    for macro in jira_macros:
+    for i, macro in enumerate(jira_macros):
         # 2. 在 Macro 中找到 JQL 參數
-        # <ac:parameter ac:name="jql">project = ...</ac:parameter>
         jql_param = macro.find('ac:parameter', attrs={"ac:name": "jql"})
         
-        if jql_param and jql_param.string:
-            original_jql = jql_param.string
+        if jql_param:
+            original_jql = jql_param.get_text() # 使用 get_text() 確保抓到內容
+            
+            # 簡單過濾掉空白的
+            if not original_jql.strip():
+                continue
+
+            # print(f"   📄 表格[{i+1}] JQL 原文: {original_jql[:60]}...")
             
             # 3. 使用 Regex 搜尋並替換日期
-            # 匹配格式: 2025-11-01 或 2025/11/01
             date_pattern = re.compile(r'(\d{4})([-/.])(\d{1,2})\2(\d{1,2})')
             
             new_jql, count = date_pattern.subn(increment_date_match, original_jql)
             
             if count > 0:
-                print(f"   🔄 發現 JQL: {original_jql[:50]}...")
-                print(f"      修改後: {new_jql[:50]}...")
                 # 更新 BeautifulSoup 物件中的字串
-                jql_param.string.replace_with(new_jql)
+                jql_param.string = new_jql
                 total_dates_modified += count
+            else:
+                print(f"      ⚠️ 表格[{i+1}] 未發現符合格式的日期 (YYYY-MM-DD)")
 
     print(f"📊 總計修改了 {total_dates_modified} 個 JQL 日期")
     return str(soup)
 
 def create_new_month_page(latest_page):
-    # 1. 計算新標題
     current_title = latest_page['title']
     try:
         current_date_obj = datetime.strptime(current_title, "%Y%m")
@@ -166,21 +164,16 @@ def create_new_month_page(latest_page):
 
     print(f"🚀 準備建立新頁面: {next_title}")
 
-    # 2. 檢查是否已存在
     if get_page_id_by_title(next_title):
         print(f"⚠️ 跳過：頁面 '{next_title}' 已經存在！")
         return
 
-    # 3. 處理內容
     original_body = latest_page['body']['storage']['value']
     new_body = process_jql_content(original_body)
 
-    # 4. 準備建立 (含不通知設定)
-    # 取得父層 ID
     if latest_page.get('ancestors'):
         parent_id = latest_page['ancestors'][-1]['id']
     else:
-        # Fallback
         p_page = get_page_id_by_title(PARENT_PAGE_TITLE)
         parent_id = p_page['id']
 
@@ -195,16 +188,12 @@ def create_new_month_page(latest_page):
                 "representation": "storage"
             }
         },
-        # 嘗試使用 version.minorEdit 來減少通知 (雖主要用於更新，但建議加上)
         "version": {
             "number": 1,
             "minorEdit": True
-        },
-        # Confluence Cloud 有時支援 status="current" 避免發送通知草稿，但這裡是直接發佈
-        "status": "current"
+        }
     }
 
-    # 5. 發送請求
     try:
         response = requests.post(
             API_ENDPOINT, 
@@ -227,7 +216,7 @@ def create_new_month_page(latest_page):
         sys.exit(1)
 
 def main():
-    print(f"=== Confluence 月度 JQL 更新機器人 (v2.0) ===")
+    print(f"=== Confluence 月度 JQL 更新機器人 (v2.1 Debug版) ===")
     try:
         latest_page = find_latest_monthly_page()
         create_new_month_page(latest_page)
