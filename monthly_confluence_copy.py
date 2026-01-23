@@ -7,7 +7,6 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from requests.auth import HTTPBasicAuth
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup
 
 # ==========================================
 # 1. 設定區
@@ -18,7 +17,7 @@ API_TOKEN = os.environ.get("CONF_PASS")
 PARENT_PAGE_TITLE = "Personal Tasks"
 
 if not RAW_URL or not USERNAME or not API_TOKEN:
-    print("❌ 錯誤：缺少環境變數 (CONF_URL, CONF_USER, CONF_PASS)")
+    print("❌ 錯誤：缺少環境變數")
     sys.exit(1)
 
 parsed_url = urlparse(RAW_URL)
@@ -32,9 +31,22 @@ def get_headers():
 # 2. 核心功能
 # ==========================================
 
+def get_page_by_id(page_id):
+    """直接透過 ID 取得頁面內容 (最準確)"""
+    url = f"{API_ENDPOINT}/{page_id}"
+    params = {'expand': 'body.storage,version,ancestors,space'}
+    try:
+        r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"❌ 讀取頁面(ID: {page_id})失敗: {e}")
+    return None
+
 def get_page_id_by_title(title):
+    """透過標題搜尋 (僅用於找父頁面)"""
     url = f"{API_ENDPOINT}"
-    params = {'title': title, 'expand': 'body.storage,version,ancestors,space'}
+    params = {'title': title, 'expand': 'body.storage,version,ancestors'}
     try:
         r = requests.get(url, auth=HTTPBasicAuth(USERNAME, API_TOKEN), params=params)
         r.raise_for_status()
@@ -45,6 +57,7 @@ def get_page_id_by_title(title):
     return None
 
 def get_child_pages(parent_id):
+    """取得子頁面列表"""
     url = f"{API_ENDPOINT}/{parent_id}/child/page"
     params = {'limit': 100, 'expand': 'version'} 
     try:
@@ -67,78 +80,63 @@ def find_latest_monthly_page():
 
     children = get_child_pages(parent_id)
     monthly_pages = []
+    
     for child in children:
-        if re.match(r'^\d{6}$', child['title']):
+        title = child['title']
+        if re.match(r'^\d{6}$', title):
             monthly_pages.append(child)
     
     if not monthly_pages:
         print("⚠️ 在 Personal Tasks 下找不到任何 YYYYMM 格式的頁面。")
         sys.exit(1)
 
+    # 排序取最新
     monthly_pages.sort(key=lambda x: x['title'], reverse=True)
-    latest_page = monthly_pages[0]
-    full_latest_page = get_page_id_by_title(latest_page['title'])
+    latest_basic_info = monthly_pages[0]
     
-    print(f"📅 找到最新月份頁面: {full_latest_page['title']} (ID: {full_latest_page['id']})")
-    return full_latest_page
+    print(f"📅 找到最新月份標題: {latest_basic_info['title']} (ID: {latest_basic_info['id']})")
+    
+    # 【關鍵修正】: 直接用 ID 抓取完整內容，而不是用標題搜尋 (避免抓到同名頁面)
+    full_page = get_page_by_id(latest_basic_info['id'])
+    
+    return full_page
 
 def increment_date_match(match):
+    """正則替換: 日期 + 1個月"""
     full_date = match.group(0)
     sep = match.group(2)
     try:
         fmt = f"%Y{sep}%m{sep}%d"
         dt = datetime.strptime(full_date, fmt)
         new_dt = dt + relativedelta(months=1)
-        return new_dt.strftime(fmt)
+        new_str = new_dt.strftime(fmt)
+        # print(f"   Debug: {full_date} -> {new_str}")
+        return new_str
     except ValueError:
         return full_date
 
-def process_jql_content(html_content):
-    print("🔧 正在解析頁面結構 (XML Mode)...")
+def process_jql_content_robust(html_content):
+    """
+    使用純文字暴力替換模式 (最穩健，不依賴 XML 解析結構)
+    """
+    print("🔧 正在處理內容 (Regex Mode)...")
     
-    # 檢查是否安裝 lxml，這是關鍵
-    try:
-        import lxml
-    except ImportError:
-        print("❌ 嚴重錯誤：未安裝 'lxml' 套件。請執行 `pip install lxml`")
-        print("   Confluence 頁面需要 XML 解析器才能正確讀取 JQL 標籤。")
-        sys.exit(1)
-
-    # 1. 嘗試正規 XML 解析
-    soup = BeautifulSoup(html_content, 'xml')
-    jira_macros = soup.find_all('ac:structured-macro', attrs={"ac:name": "jira"})
+    # 診斷：印出前 300 個字元確認抓對內容
+    print(f"   👀 內容預覽 (前300字): {html_content[:300]}...")
     
-    print(f"   🔎 偵測到 {len(jira_macros)} 個 Jira Macro")
-    
-    total_dates_modified = 0
+    # 針對 JQL 中的日期格式 YYYY-MM-DD 或 YYYY/MM/DD
+    # 格式: 4位數字 + 分隔符 + 1或2位數字 + 相同分隔符 + 1或2位數字
     date_pattern = re.compile(r'(\d{4})([-/.])(\d{1,2})\2(\d{1,2})')
-
-    for macro in jira_macros:
-        jql_param = macro.find('ac:parameter', attrs={"ac:name": "jql"})
-        if jql_param:
-            original_jql = jql_param.get_text()
-            new_jql, count = date_pattern.subn(increment_date_match, original_jql)
-            
-            if count > 0:
-                print(f"      🔄 JQL 更新: {original_jql[:40]}... -> {new_jql[:40]}...")
-                jql_param.string = new_jql
-                total_dates_modified += count
-
-    # 2. 暴力補償機制 (Fallback)
-    # 如果 XML 解析沒改到任何東西，但內容裡明明有日期，就直接對字串硬幹
-    if total_dates_modified == 0:
-        print("⚠️ 結構化解析未修改任何日期，啟動「暴力補償模式」...")
-        # 直接對原始 HTML 字串進行正則替換
-        new_html_content, raw_count = date_pattern.subn(increment_date_match, html_content)
-        if raw_count > 0:
-            print(f"   💪 暴力模式成功修改了 {raw_count} 個日期！")
-            return new_html_content
-        else:
-            print("   ⚠️ 暴力模式也未發現符合 YYYY-MM-DD 的日期。請確認 JQL 格式。")
-            return str(soup)
-
-    print(f"📊 總計修改了 {total_dates_modified} 個 JQL 日期")
-    return str(soup)
+    
+    # 執行替換
+    new_content, count = date_pattern.subn(increment_date_match, html_content)
+    
+    print(f"📊 總計修改了 {count} 個日期")
+    
+    if count == 0:
+        print("⚠️ 警告：沒有發現任何符合格式的日期。請確認來源頁面是否包含 JQL 表格。")
+    
+    return new_content
 
 def create_new_month_page(latest_page):
     current_title = latest_page['title']
@@ -152,14 +150,17 @@ def create_new_month_page(latest_page):
 
     print(f"🚀 準備建立新頁面: {next_title}")
 
+    # 檢查是否已存在 (避免重複建立)
     if get_page_id_by_title(next_title):
         print(f"⚠️ 跳過：頁面 '{next_title}' 已經存在！")
         return
 
+    # 處理內容
     original_body = latest_page['body']['storage']['value']
-    new_body = process_jql_content(original_body)
+    new_body = process_jql_content_robust(original_body)
 
-    # 取得父層 ID
+    # 準備建立
+    # 優先使用原頁面的 parent ID
     if latest_page.get('ancestors'):
         parent_id = latest_page['ancestors'][-1]['id']
     else:
@@ -205,10 +206,13 @@ def create_new_month_page(latest_page):
         sys.exit(1)
 
 def main():
-    print(f"=== Confluence 月度 JQL 更新機器人 (v3.0 最終強力版) ===")
+    print(f"=== Confluence 月度 JQL 更新機器人 (v4.0 ID鎖定版) ===")
     try:
         latest_page = find_latest_monthly_page()
-        create_new_month_page(latest_page)
+        if latest_page:
+            create_new_month_page(latest_page)
+        else:
+            print("❌ 無法取得來源頁面資料")
     except Exception as e:
         print(f"執行中斷: {str(e)}")
         sys.exit(1)
