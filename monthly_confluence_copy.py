@@ -10,7 +10,7 @@ from requests.auth import HTTPBasicAuth
 from urllib.parse import urlparse
 
 # ==========================================
-# 1. Configuration
+# 1. 設定區
 # ==========================================
 RAW_URL = os.environ.get("CONF_URL")
 USERNAME = os.environ.get("CONF_USER")
@@ -18,7 +18,7 @@ API_TOKEN = os.environ.get("CONF_PASS")
 PARENT_PAGE_TITLE = "Personal Tasks"
 
 if not RAW_URL or not USERNAME or not API_TOKEN:
-    print("❌ Error: Missing environment variables (CONF_URL, CONF_USER, CONF_PASS)")
+    print("❌ 錯誤：缺少環境變數 (CONF_URL, CONF_USER, CONF_PASS)")
     sys.exit(1)
 
 parsed_url = urlparse(RAW_URL)
@@ -29,11 +29,11 @@ def get_headers():
     return {"Content-Type": "application/json"}
 
 # ==========================================
-# 2. Core Functions
+# 2. 核心功能
 # ==========================================
 
 def get_page_by_id(page_id):
-    """Fetch full page content by ID"""
+    """透過 ID 取得完整頁面內容"""
     url = f"{API_ENDPOINT}/{page_id}"
     params = {'expand': 'body.storage,version,ancestors,space'}
     try:
@@ -41,11 +41,11 @@ def get_page_by_id(page_id):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"❌ Failed to fetch page (ID: {page_id}): {e}")
+        print(f"❌ 讀取頁面失敗 (ID: {page_id}): {e}")
     return None
 
 def get_page_id_by_title(title):
-    """Fetch page ID by title"""
+    """透過標題搜尋 ID"""
     url = f"{API_ENDPOINT}"
     params = {'title': title, 'expand': 'body.storage,version,ancestors'}
     try:
@@ -54,11 +54,11 @@ def get_page_id_by_title(title):
         results = r.json().get('results', [])
         if results: return results[0]
     except Exception as e:
-        print(f"❌ Search failed for '{title}': {e}")
+        print(f"❌ 搜尋頁面 '{title}' 失敗: {e}")
     return None
 
 def get_child_pages(parent_id):
-    """Get all child pages"""
+    """取得所有子頁面"""
     url = f"{API_ENDPOINT}/{parent_id}/child/page"
     params = {'limit': 100, 'expand': 'version'} 
     try:
@@ -66,18 +66,18 @@ def get_child_pages(parent_id):
         r.raise_for_status()
         return r.json().get('results', [])
     except Exception as e:
-        print(f"❌ Failed to get child pages: {e}")
+        print(f"❌ 取得子頁面失敗: {e}")
         return []
 
 def find_latest_monthly_page():
-    print(f"🔍 Searching for parent page: {PARENT_PAGE_TITLE}...")
+    print(f"🔍 正在搜尋父頁面: {PARENT_PAGE_TITLE}...")
     parent_page = get_page_id_by_title(PARENT_PAGE_TITLE)
     if not parent_page:
-        print(f"❌ Parent page not found: {PARENT_PAGE_TITLE}")
+        print(f"❌ 找不到父頁面: {PARENT_PAGE_TITLE}")
         sys.exit(1)
 
     parent_id = parent_page['id']
-    print(f"✅ Parent ID found: {parent_id}")
+    print(f"✅ 找到父頁面 ID: {parent_id}")
 
     children = get_child_pages(parent_id)
     monthly_pages = []
@@ -88,105 +88,77 @@ def find_latest_monthly_page():
             monthly_pages.append(child)
     
     if not monthly_pages:
-        print("⚠️ No YYYYMM pages found under Personal Tasks.")
+        print("⚠️ 在 Personal Tasks 下找不到任何 YYYYMM 格式的頁面。")
         sys.exit(1)
 
-    # Sort to find the latest
     monthly_pages.sort(key=lambda x: x['title'], reverse=True)
     latest_basic_info = monthly_pages[0]
     
-    print(f"📅 Latest month found: {latest_basic_info['title']} (ID: {latest_basic_info['id']})")
+    print(f"📅 找到最新月份標題: {latest_basic_info['title']} (ID: {latest_basic_info['id']})")
     
-    # Fetch full content using ID
+    # 使用 ID 獲取完整內容
     full_page = get_page_by_id(latest_basic_info['id'])
-    
     return full_page
 
+# ------------------------------------------
+# 日期處理邏輯 (YYYY-MM-DD)
+# ------------------------------------------
 def increment_date_match(match):
-    """Callback: Increment date by 1 month"""
     full_date = match.group(0)
     sep = match.group(2)
     try:
-        # Format: YYYY-MM-DD or YYYY/MM/DD
         fmt = f"%Y{sep}%m{sep}%d"
         dt = datetime.strptime(full_date, fmt)
         new_dt = dt + relativedelta(months=1)
-        new_str = new_dt.strftime(fmt)
-        return new_str
+        return new_dt.strftime(fmt)
     except ValueError:
         return full_date
 
-def process_jql_content_smart(html_content):
-    """
-    Locates JQL inside XML structure (Confluence Storage Format) 
-    and updates dates safely.
-    """
-    print("🔧 Processing content (Smart XML Mode)...")
-    
-    # Debug: Print a snippet to verify content retrieval
-    # print(f"   👀 Raw Content Snippet: {html_content[:500]}...")
-
+# ------------------------------------------
+# 【新增】NPI 標籤處理邏輯 (NPI_YYYYMM)
+# ------------------------------------------
+def increment_npi_match(match):
+    prefix = match.group(1) # "NPI_"
+    date_str = match.group(2) # "202512"
     try:
-        from bs4 import BeautifulSoup
-        # Use 'xml' parser to handle Confluence Storage Format correctly
-        soup = BeautifulSoup(html_content, 'xml')
-    except Exception as e:
-        print(f"⚠️ XML parser failed, falling back to html.parser: {e}")
-        soup = BeautifulSoup(html_content, 'html.parser')
-
-    # Find all Jira macros
-    # The tag is usually <ac:structured-macro ac:name="jira">
-    jira_macros = soup.find_all('ac:structured-macro', attrs={"ac:name": "jira"})
-    
-    print(f"   🔎 Found {len(jira_macros)} Jira macros.")
-    
-    total_modified = 0
-    # Regex for YYYY-MM-DD
-    date_pattern = re.compile(r'(\d{4})([-/.])(\d{1,2})\2(\d{1,2})')
-
-    for i, macro in enumerate(jira_macros):
-        # Find the JQL parameter
-        # <ac:parameter ac:name="jql"> ... </ac:parameter>
-        jql_param = macro.find('ac:parameter', attrs={"ac:name": "jql"})
+        # 解析 YYYYMM
+        dt = datetime.strptime(date_str, "%Y%m")
+        # 加一個月
+        new_dt = dt + relativedelta(months=1)
+        # 格式化回 YYYYMM
+        new_date_str = new_dt.strftime("%Y%m")
         
-        if jql_param:
-            raw_jql = jql_param.string
-            if not raw_jql: continue
+        result = f"{prefix}{new_date_str}"
+        # print(f"      👉 NPI更新: {match.group(0)} -> {result}")
+        return result
+    except ValueError:
+        return match.group(0)
 
-            # Decode HTML entities (e.g. &quot; -> ") just in case, though BS usually handles it
-            decoded_jql = html.unescape(raw_jql)
-            
-            # Apply regex substitution
-            new_jql, count = date_pattern.subn(increment_date_match, decoded_jql)
-            
-            if count > 0:
-                print(f"      🔄 Table #{i+1}: Modified {count} dates.")
-                # print(f"         OLD: {decoded_jql}")
-                # print(f"         NEW: {new_jql}")
-                
-                # Update the soup content
-                jql_param.string = new_jql
-                total_modified += count
-            else:
-                print(f"      ⚠️ Table #{i+1}: No dates found in JQL.")
-                # print(f"         JQL: {raw_jql}")
-
-    if total_modified > 0:
-        return str(soup)
+def process_content_all(html_content):
+    """
+    執行所有的內容替換邏輯：
+    1. 日期格式 (2025-12-01)
+    2. NPI 標籤 (NPI_202512)
+    """
+    print("🔧 正在處理內容 (包含日期與 NPI 標籤)...")
     
-    # --- FALLBACK: Plain Text Regex (if XML parsing missed it) ---
-    print("⚠️ Smart XML mode made no changes. Trying Brute Force Regex on raw string...")
+    # --- 1. 處理標準日期 (YYYY-MM-DD 或 YYYY/MM/DD) ---
+    date_pattern = re.compile(r'(\d{4})([-/.])(\d{1,2})\2(\d{1,2})')
+    content_v1, count_date = date_pattern.subn(increment_date_match, html_content)
     
-    # NOTE: Confluence often stores quotes as &quot; or &#34;
-    # We will run regex on the raw string. The regex (\d{4}-\d{2}-\d{2}) is robust against surrounding quotes.
-    new_raw_content, raw_count = date_pattern.subn(increment_date_match, html_content)
+    # --- 2. 處理 NPI 標籤 (NPI_YYYYMM) ---
+    # Regex 說明: (NPI_) 接 6位數字
+    npi_pattern = re.compile(r'(NPI_)(\d{6})')
+    content_final, count_npi = npi_pattern.subn(increment_npi_match, content_v1)
     
-    if raw_count > 0:
-        print(f"   💪 Brute Force updated {raw_count} dates!")
-        return new_raw_content
+    print(f"📊 處理報告:")
+    print(f"   - 修改了 {count_date} 個標準日期 (如 2025-12-01)")
+    print(f"   - 修改了 {count_npi} 個 NPI 標籤 (如 NPI_202512)")
     
-    print("❌ No dates modified in either mode.")
-    return html_content
+    if count_date == 0 and count_npi == 0:
+        print("⚠️ 警告：沒有發現任何需修改的日期或標籤。")
+    
+    return content_final
 
 def create_new_month_page(latest_page):
     current_title = latest_page['title']
@@ -195,21 +167,22 @@ def create_new_month_page(latest_page):
         next_date_obj = current_date_obj + relativedelta(months=1)
         next_title = next_date_obj.strftime("%Y%m")
     except ValueError:
-        print("❌ Title date format error (expected YYYYMM)")
+        print("❌ 標題日期格式錯誤")
         sys.exit(1)
 
-    print(f"🚀 Preparing to create page: {next_title}")
+    print(f"🚀 準備建立新頁面: {next_title}")
 
     if get_page_id_by_title(next_title):
-        print(f"⚠️ Page '{next_title}' already exists. Skipping.")
+        print(f"⚠️ 跳過：頁面 '{next_title}' 已經存在！")
         return
 
+    # 取得原始內容
     original_body = latest_page['body']['storage']['value']
     
-    # Process content
-    new_body = process_jql_content_smart(original_body)
+    # 執行所有替換
+    new_body = process_content_all(original_body)
 
-    # Determine Parent ID
+    # 取得父層 ID
     if latest_page.get('ancestors'):
         parent_id = latest_page['ancestors'][-1]['id']
     else:
@@ -227,10 +200,12 @@ def create_new_month_page(latest_page):
                 "representation": "storage"
             }
         },
+        # 【不通知追蹤者設定】
         "version": {
             "number": 1,
             "minorEdit": True
-        }
+        },
+        "status": "current"
     }
 
     try:
@@ -247,23 +222,23 @@ def create_new_month_page(latest_page):
         link_suffix = data['_links']['webui']
         full_link = f"{base_url}/wiki{link_suffix}" if not link_suffix.startswith('/wiki') else f"{base_url}{link_suffix}"
         
-        print(f"🎉 Success! New Page: {full_link}")
+        print(f"🎉 成功建立！連結: {full_link}")
 
     except requests.exceptions.HTTPError as e:
-        print(f"❌ Creation Failed: {e}")
-        print(f"Response: {response.text}")
+        print(f"❌ 建立失敗: {e}")
+        print(f"錯誤回應: {response.text}")
         sys.exit(1)
 
 def main():
-    print(f"=== Confluence Monthly Task Automator (v5.0) ===")
+    print(f"=== Confluence 月度 JQL 更新機器人 (v6.0 NPI支援版) ===")
     try:
         latest_page = find_latest_monthly_page()
         if latest_page:
             create_new_month_page(latest_page)
         else:
-            print("❌ Could not retrieve source page data.")
+            print("❌ 無法取得來源頁面資料")
     except Exception as e:
-        print(f"Execution Error: {str(e)}")
+        print(f"執行中斷: {str(e)}")
         sys.exit(1)
 
 if __name__ == "__main__":
