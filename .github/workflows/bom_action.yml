@@ -2,6 +2,16 @@ name: BOM Automation Logic
 
 on:
   workflow_dispatch: # 手動觸發
+    inputs:
+      mode:
+        description: '執行模式 (Select Mode)'
+        required: true
+        default: '3'
+        type: choice
+        options:
+          - '1' # 僅詢價
+          - '2' # 僅歸檔
+          - '3' # 完整模式
   push:
     paths:
       - 'bom_manager.py'
@@ -26,4 +36,6 @@ jobs:
         env:
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 將使用者在 GitHub 介面選的值傳入 Python
+          EXECUTION_MODE: ${{ github.event.inputs.mode || '3' }} 
         run: python bom_manager.py
