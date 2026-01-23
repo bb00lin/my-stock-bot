@@ -108,6 +108,7 @@ class DatabaseManager:
                     return pd.DataFrame(), []
                 
                 headers = all_values[0]
+                # 簡單處理重複標題問題
                 unique_headers = []
                 seen = {}
                 for h in headers:
@@ -120,7 +121,13 @@ class DatabaseManager:
                         unique_headers.append(clean_h)
                 
                 df = pd.DataFrame(all_values[1:], columns=unique_headers)
-                df['_row_index'] = range(2, len(all_values) + 2)
+                
+                # ★★★ 錯誤修正點：範圍長度必須與資料長度一致 ★★★
+                # all_values 包含標題，df 是從 [1:] 開始
+                # 行號從 2 開始 (因為 Row 1 是 Header)
+                # range(start, stop) -> stop 是不包含的
+                # 正確邏輯：Row 2 到 Row (len+1) -> 共 len-1 行
+                df['_row_index'] = range(2, len(all_values) + 1)
                 
                 self.sheet_cache[sheet_name] = df
                 self.headers_cache[sheet_name] = unique_headers 
@@ -273,28 +280,18 @@ def reset_database_colors(client, sheet_url):
     print("🧹 Cleaning up colors in all sheets...", flush=True)
     try:
         workbook = client.open_by_url(sheet_url)
-        # 取得所有需要清理的分頁 (SHEET_MAP + Input_BOM)
         target_sheets = [INPUT_SHEET_NAME] + list(SHEET_MAP.keys())
-        
-        # 為了安全，我們也可以直接讀取所有分頁，但這比較慢
-        # 這裡我們只清理我們認識的，避免動到 config 頁
-        
         white_bg = cellFormat(backgroundColor={"red": 1.0, "green": 1.0, "blue": 1.0})
         
         for sheet_name in target_sheets:
             try:
                 ws = workbook.worksheet(sheet_name)
-                # 清除背景色 (假設資料最多到 Z 欄，行數 5000)
-                # 直接清除格式會比較快，但會把邊框也清掉，所以我們用設定白色背景
-                # 或者使用 gspread-formatting 的 clear_format (如果只傳送 range 不傳 format)
-                # 這裡使用 format_cell_range 設為白色最保險
-                
-                # 為了節省配額，我們只清前 3000 行 (通常夠用)
+                # 只清前 3000 行
                 format_cell_range(ws, "A2:Z3000", white_bg)
                 print(f"   ✨ Cleared colors in '{sheet_name}'")
-                time.sleep(1.5) # 避免太快觸發 429
+                time.sleep(1.5) 
             except gspread.exceptions.WorksheetNotFound:
-                continue # 找不到分頁就跳過
+                continue 
             except Exception as e:
                 print(f"   ⚠️ Could not clear '{sheet_name}': {e}")
                 
@@ -303,14 +300,41 @@ def reset_database_colors(client, sheet_url):
 
 # ================= 主程式 =================
 
-def main():
-    # 從 GitHub Actions 的環境變數讀取模式
-    env_mode = os.environ.get("EXECUTION_MODE", "3") # 預設為 3
+def get_user_mode():
+    """獲取用戶希望執行的模式"""
+    print("\n==========================================")
+    print("📋 請選擇執行模式 (Select Execution Mode):")
+    print("------------------------------------------")
+    print("1️⃣  僅詢價 (Price Check Only)")
+    print("    💡 情境：我有一個新 BOM，想知道大概多少錢，但我不想動到資料庫。")
+    print("    🔹 行為：搜尋 DB -> 回填價格 -> 結束。")
+    print("------------------------------------------")
+    print("2️⃣  僅歸檔 (Filing Only)")
+    print("    💡 情境：我確認這個 BOM 的零件都要加入資料庫，但我現在不在乎價格。")
+    print("    🔹 行為：分類零件 -> 插入資料庫 -> 上色整理。")
+    print("------------------------------------------")
+    print("3️⃣  完整模式 (Full Mode) [推薦/預設]")
+    print("    💡 情境：我要把這些零件加入資料庫，並且順便知道價格。")
+    print("    🔹 行為：全部都做 (歸檔 + 詢價)。")
+    print("==========================================\n")
+    
+    env_mode = os.environ.get("EXECUTION_MODE")
+    if env_mode in ['1', '2', '3']:
+        print(f"🤖 偵測到環境變數設定: Mode {env_mode}")
+        return int(env_mode)
+
     try:
-        mode = int(env_mode)
+        choice = input("👉 請輸入 1, 2 或 3 (預設 3): ").strip()
+        if choice in ['1', '2', '3']:
+            return int(choice)
     except:
-        mode = 3
-        
+        pass
+    
+    print("使用預設模式: Mode 3")
+    return 3
+
+def main():
+    mode = get_user_mode()
     mode_names = {1: "僅詢價 (Price Check)", 2: "僅歸檔 (Filing)", 3: "完整模式 (Full)"}
     print(f"🚀 Starting BOM Automation | Mode: {mode} ({mode_names.get(mode, 'Unknown')})", flush=True)
     
@@ -326,8 +350,7 @@ def main():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_key), scope)
         client = gspread.authorize(creds)
         
-        # ★★★ 步驟 0: 先清除所有顏色 ★★★
-        if enable_db_write: # 只有要歸檔(寫入)時才需要清理顏色，避免視覺混亂
+        if enable_db_write: 
             reset_database_colors(client, DB_SHEET_URL)
             
         db_manager = DatabaseManager(client, DB_SHEET_URL)
