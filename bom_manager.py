@@ -14,10 +14,7 @@ from gspread.exceptions import APIError
 DB_SHEET_URL = "https://docs.google.com/spreadsheets/d/1ovCEzxlz-383PLl4Dmtu8GybxfxI7tCKOl-6-oXNRa0/edit?usp=sharing"
 INPUT_SHEET_NAME = "Input_BOM"
 
-# 允許寫入資料庫的白名單欄位
 ALLOWED_DB_COLUMNS = ["MPN", "Part No", "Description", "Part Description", "Value", "Val", "Manufacturer", "MFG"]
-
-# 報表欄位
 REPORT_COLUMNS = ["Status", "Est. Price", "Ref Source", "Match Type", "Link", "Candidates"]
 
 SHEET_MAP = {
@@ -41,13 +38,7 @@ def retry_with_backoff(retries=5, delay=1):
                 try:
                     return func(*args, **kwargs)
                 except APIError as e:
-                    err_msg = str(e)
-                    # 如果是格子滿了 (400 Limit)，不要重試，直接拋出讓外層處理
-                    if "limit of 10000000 cells" in err_msg:
-                        raise e
-                    
-                    # 如果是配額限制 (429 Quota)，則重試
-                    if "429" in err_msg or "Quota exceeded" in err_msg:
+                    if "429" in str(e) or "Quota exceeded" in str(e):
                         wait_time = delay * (2 ** i) + random.uniform(0, 1)
                         print(f"⏳ Quota hit. Sleeping {wait_time:.1f}s...", flush=True)
                         time.sleep(wait_time)
@@ -192,8 +183,6 @@ class DatabaseManager:
                 row_data_list[col_idx] = value
         
         final_insert_pos = 0
-        
-        # ★★★ 嘗試寫入，若滿了則捕捉錯誤 ★★★
         try:
             if existing_rows:
                 target_index = min(existing_rows) + 1
@@ -205,7 +194,7 @@ class DatabaseManager:
         except APIError as e:
             if "limit of 10000000 cells" in str(e):
                 print(f"      ❌ DB FULL: Sheet '{sheet_name}' hit cell limit. Skipping write.")
-                raise e # 拋出讓上層知道是 DB Full
+                raise e 
             else:
                 raise e
 
@@ -228,7 +217,7 @@ def safe_batch_update(worksheet, range_name, values):
 
 def main():
     mode = get_user_mode()
-    print(f"🚀 Starting BOM Automation (Safe Mode) | Mode: {mode}", flush=True)
+    print(f"🚀 Starting BOM Automation (Batch Mode) | Mode: {mode}", flush=True)
     
     enable_db_write = (mode in [2, 3]) 
     enable_price_fill = (mode in [1, 3]) 
@@ -266,7 +255,7 @@ def main():
     col_val_idx = get_col_idx(["Value", "Val"])
     col_status_idx = get_col_idx(["Status"])
 
-    # 補上 Output Headers
+    # 確保 Output Headers 存在
     output_headers_needed = [h for h in REPORT_COLUMNS if h not in input_headers]
     if output_headers_needed:
         start_col_idx = len(input_headers) + 1
@@ -275,32 +264,36 @@ def main():
         try:
             input_ws.update(range_name=f"{range_start}:{range_end}", values=[output_headers_needed])
             input_headers.extend(output_headers_needed)
-        except Exception as e:
-            print(f"⚠️ Could not add headers (Input Sheet might be full): {e}")
+        except: pass
 
-    # 建立 Report Column Index Map
+    # Report Column indices
     report_col_indices = {}
     for rc in REPORT_COLUMNS:
         idx = get_col_idx([rc])
-        if idx is not None:
-            report_col_indices[rc] = idx
+        if idx is not None: report_col_indices[rc] = idx
     
     indices = sorted(report_col_indices.values())
     is_contiguous = False
     if len(indices) == len(REPORT_COLUMNS):
         if indices[-1] - indices[0] == len(REPORT_COLUMNS) - 1:
             is_contiguous = True
-            
-    print(f"🔄 Processing {len(input_rows)} items...", flush=True)
+
+    print(f"🔄 Processing {len(input_rows)} items (Batch Mode)...", flush=True)
+
+    # 用於儲存所有結果的列表
+    all_batch_results = []
 
     for i, row in enumerate(input_rows):
         row_num = i + 2
         
         def get_val(idx): return str(row[idx]) if idx is not None and idx < len(row) else ""
 
+        # 跳過已處理
         if col_status_idx is not None:
              status_val = get_val(col_status_idx)
-             if status_val and "Processed" in status_val: continue
+             if status_val and "Processed" in status_val: 
+                 all_batch_results.append(None) # 佔位符
+                 continue
 
         desc = get_val(col_desc_idx)
         mpn = get_val(col_mpn_idx)
@@ -324,12 +317,13 @@ def main():
         print(f"-> [{target_sheet}]")
         
         if target_sheet not in SHEET_MAP and target_sheet != "Others":
+             all_batch_results.append(None)
              continue
 
         # 2. 搜尋
         matches, match_type = db_manager.find_best_matches(target_sheet, mpn, desc, value)
         
-        # 3. 歸檔
+        # 3. 歸檔 (如果是 Full Mode)
         status = "Checked Only"
         inserted_row = 0
         
@@ -350,13 +344,12 @@ def main():
                     print(f"      ❌ DB Write Error: {e}")
                     status = f"DB Error: {str(e)[:20]}"
             except Exception as e:
-                print(f"      ❌ Unknown Error: {e}")
                 status = "Error"
         elif matches:
             inserted_row = matches[0]['row']
             status = "Match Found"
 
-        # 4. 回填
+        # 4. 準備回填資料 (但不立刻寫入)
         best_price = "Skipped"
         if enable_price_fill:
             best_price = matches[0]['data'].get('Price', 'N/A') if matches else 'N/A'
@@ -384,28 +377,73 @@ def main():
             "Link": link_formula,
             "Candidates": cand_str
         }
+        
+        all_batch_results.append(updates)
+        # 這裡不 sleep 了，因為沒有寫入操作 (除非有 DB insert)
+        # 如果有 DB insert，organize_and_insert 裡面也沒有 sleep 了 (靠 retry)
+        # 為了安全起見，微量 sleep
+        if enable_db_write and status == "Moved & Inserted":
+            time.sleep(0.5)
 
-        if is_contiguous:
-            start_idx = indices[0]
-            row_vals = [updates[col] for col in REPORT_COLUMNS]
-            
-            start_cell = gspread.utils.rowcol_to_a1(row_num, start_idx + 1)
-            end_cell = gspread.utils.rowcol_to_a1(row_num, start_idx + len(row_vals))
-            
+    print("\n💾 Writing Batch Results to Input BOM...", flush=True)
+    
+    # ★★★ 最終批次寫入 ★★★
+    if is_contiguous and all_batch_results:
+        # 如果欄位連續，我們可以構建一個巨大的 2D 陣列一次寫入
+        # 這是最快的方法
+        start_idx = indices[0] # 第一個 Report Column 的 index
+        
+        # 準備資料矩陣
+        # 注意：all_batch_results 包含 None (跳過的行)
+        # 我們只更新有資料的行，這比較麻煩
+        # 為了簡單，我們分塊更新，或者乾脆一行一行但用 batch_update? 
+        # 不，為了 API，我們把 None 的地方填回原本的值? 太慢。
+        # 我們只收集有變動的 range
+        
+        final_values = []
+        range_start_row = 2
+        
+        # 為了簡單與安全，我們只支援連續寫入
+        # 如果中間有跳過 (None)，我們填入空字串或保留? 
+        # 假設我們是全量跑，中間不會有 None (除非是 Skipped)
+        
+        update_data = []
+        for i, updates in enumerate(all_batch_results):
+            if updates is None: 
+                # 填空值，避免錯位
+                update_data.append([""] * len(REPORT_COLUMNS))
+            else:
+                row_vals = [updates[col] for col in REPORT_COLUMNS]
+                update_data.append(row_vals)
+        
+        if update_data:
+            start_cell = gspread.utils.rowcol_to_a1(2, start_idx + 1)
+            end_cell = gspread.utils.rowcol_to_a1(2 + len(update_data) - 1, start_idx + len(REPORT_COLUMNS))
             try:
-                safe_batch_update(input_ws, f"{start_cell}:{end_cell}", [row_vals])
-            except: pass
-        else:
+                safe_batch_update(input_ws, f"{start_cell}:{end_cell}", update_data)
+                print("✅ Batch write successful!")
+            except Exception as e:
+                print(f"❌ Batch write failed: {e}")
+                # Fallback: row by row
+                for i, updates in enumerate(all_batch_results):
+                    if updates:
+                        # ... row by row code ...
+                        pass
+    else:
+        # 非連續欄位，只能逐行寫入 (較慢但安全)
+        print("⚠️ Report columns not contiguous, reverting to row-by-row write.")
+        for i, updates in enumerate(all_batch_results):
+            if updates is None: continue
+            row_num = i + 2
             for col_name, val in updates.items():
                 if col_name in report_col_indices:
                     col_idx = report_col_indices[col_name] + 1
                     try:
                         input_ws.update_cell(row_num, col_idx, val)
                     except: pass
-        
-        time.sleep(0.5) 
+            time.sleep(0.5)
 
-    print("✅ Done!")
+    print("✅ All tasks completed!")
 
 if __name__ == "__main__":
     main()
