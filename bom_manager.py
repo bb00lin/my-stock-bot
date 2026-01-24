@@ -215,9 +215,51 @@ def get_user_mode():
 def safe_batch_update(worksheet, range_name, values):
     worksheet.update(range_name=range_name, values=values, value_input_option="USER_ENTERED")
 
+def ensure_input_headers(input_ws, input_headers):
+    """確保 Input_BOM 具有報表欄位，若無則自動擴充"""
+    print("🔍 Checking Input BOM headers...", flush=True)
+    
+    # 找出缺少的欄位
+    output_headers_needed = [h for h in REPORT_COLUMNS if h not in input_headers]
+    
+    if not output_headers_needed:
+        return input_headers # 都已經有了
+
+    print(f"🆕 Adding missing headers: {output_headers_needed}")
+    
+    # 計算需要的新總寬度
+    current_cols = len(input_headers)
+    needed_cols = current_cols + len(output_headers_needed)
+    
+    # ★★★ 關鍵修正：檢查 Input BOM 是否夠寬，不夠就擴充 ★★★
+    try:
+        if needed_cols > input_ws.col_count:
+            print(f"   ↔️ Resizing Input Sheet to {needed_cols + 2} columns...")
+            input_ws.resize(cols=needed_cols + 2)
+            time.sleep(1) # 等待生效
+    except Exception as e:
+        print(f"   ⚠️ Resize failed (might be full): {e}")
+
+    # 寫入標題
+    try:
+        start_col_idx = current_cols + 1
+        range_start = gspread.utils.rowcol_to_a1(1, start_col_idx)
+        range_end = gspread.utils.rowcol_to_a1(1, start_col_idx + len(output_headers_needed) - 1)
+        
+        input_ws.update(range_name=f"{range_start}:{range_end}", values=[output_headers_needed])
+        
+        # 更新記憶體中的 headers
+        input_headers.extend(output_headers_needed)
+        print("   ✅ Headers added successfully.")
+        
+    except Exception as e:
+        print(f"   ❌ Failed to add headers: {e}")
+
+    return input_headers
+
 def main():
     mode = get_user_mode()
-    print(f"🚀 Starting BOM Automation (Batch Mode) | Mode: {mode}", flush=True)
+    print(f"🚀 Starting BOM Automation (Header Fix) | Mode: {mode}", flush=True)
     
     enable_db_write = (mode in [2, 3]) 
     enable_price_fill = (mode in [1, 3]) 
@@ -244,6 +286,9 @@ def main():
         print(f"❌ Read Input Error: {e}")
         return
 
+    # ★★★ 強制執行標題檢查與擴充 ★★★
+    input_headers = ensure_input_headers(input_ws, input_headers)
+
     def get_col_idx(names):
         for n in names:
             for i, h in enumerate(input_headers):
@@ -254,17 +299,6 @@ def main():
     col_mpn_idx = get_col_idx(["MPN", "Part No", "P/N"])
     col_val_idx = get_col_idx(["Value", "Val"])
     col_status_idx = get_col_idx(["Status"])
-
-    # 確保 Output Headers 存在
-    output_headers_needed = [h for h in REPORT_COLUMNS if h not in input_headers]
-    if output_headers_needed:
-        start_col_idx = len(input_headers) + 1
-        range_start = gspread.utils.rowcol_to_a1(1, start_col_idx)
-        range_end = gspread.utils.rowcol_to_a1(1, start_col_idx + len(output_headers_needed) - 1)
-        try:
-            input_ws.update(range_name=f"{range_start}:{range_end}", values=[output_headers_needed])
-            input_headers.extend(output_headers_needed)
-        except: pass
 
     # Report Column indices
     report_col_indices = {}
@@ -280,7 +314,6 @@ def main():
 
     print(f"🔄 Processing {len(input_rows)} items (Batch Mode)...", flush=True)
 
-    # 用於儲存所有結果的列表
     all_batch_results = []
 
     for i, row in enumerate(input_rows):
@@ -288,11 +321,10 @@ def main():
         
         def get_val(idx): return str(row[idx]) if idx is not None and idx < len(row) else ""
 
-        # 跳過已處理
         if col_status_idx is not None:
              status_val = get_val(col_status_idx)
              if status_val and "Processed" in status_val: 
-                 all_batch_results.append(None) # 佔位符
+                 all_batch_results.append(None) 
                  continue
 
         desc = get_val(col_desc_idx)
@@ -323,7 +355,7 @@ def main():
         # 2. 搜尋
         matches, match_type = db_manager.find_best_matches(target_sheet, mpn, desc, value)
         
-        # 3. 歸檔 (如果是 Full Mode)
+        # 3. 歸檔
         status = "Checked Only"
         inserted_row = 0
         
@@ -349,7 +381,7 @@ def main():
             inserted_row = matches[0]['row']
             status = "Match Found"
 
-        # 4. 準備回填資料 (但不立刻寫入)
+        # 4. 準備回填資料
         best_price = "Skipped"
         if enable_price_fill:
             best_price = matches[0]['data'].get('Price', 'N/A') if matches else 'N/A'
@@ -379,38 +411,16 @@ def main():
         }
         
         all_batch_results.append(updates)
-        # 這裡不 sleep 了，因為沒有寫入操作 (除非有 DB insert)
-        # 如果有 DB insert，organize_and_insert 裡面也沒有 sleep 了 (靠 retry)
-        # 為了安全起見，微量 sleep
         if enable_db_write and status == "Moved & Inserted":
             time.sleep(0.5)
 
     print("\n💾 Writing Batch Results to Input BOM...", flush=True)
     
-    # ★★★ 最終批次寫入 ★★★
     if is_contiguous and all_batch_results:
-        # 如果欄位連續，我們可以構建一個巨大的 2D 陣列一次寫入
-        # 這是最快的方法
-        start_idx = indices[0] # 第一個 Report Column 的 index
-        
-        # 準備資料矩陣
-        # 注意：all_batch_results 包含 None (跳過的行)
-        # 我們只更新有資料的行，這比較麻煩
-        # 為了簡單，我們分塊更新，或者乾脆一行一行但用 batch_update? 
-        # 不，為了 API，我們把 None 的地方填回原本的值? 太慢。
-        # 我們只收集有變動的 range
-        
-        final_values = []
-        range_start_row = 2
-        
-        # 為了簡單與安全，我們只支援連續寫入
-        # 如果中間有跳過 (None)，我們填入空字串或保留? 
-        # 假設我們是全量跑，中間不會有 None (除非是 Skipped)
-        
+        start_idx = indices[0]
         update_data = []
         for i, updates in enumerate(all_batch_results):
             if updates is None: 
-                # 填空值，避免錯位
                 update_data.append([""] * len(REPORT_COLUMNS))
             else:
                 row_vals = [updates[col] for col in REPORT_COLUMNS]
@@ -424,13 +434,11 @@ def main():
                 print("✅ Batch write successful!")
             except Exception as e:
                 print(f"❌ Batch write failed: {e}")
-                # Fallback: row by row
                 for i, updates in enumerate(all_batch_results):
                     if updates:
-                        # ... row by row code ...
+                        # Fallback logic here if needed
                         pass
     else:
-        # 非連續欄位，只能逐行寫入 (較慢但安全)
         print("⚠️ Report columns not contiguous, reverting to row-by-row write.")
         for i, updates in enumerate(all_batch_results):
             if updates is None: continue
