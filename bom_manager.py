@@ -14,11 +14,10 @@ from gspread.exceptions import APIError
 DB_SHEET_URL = "https://docs.google.com/spreadsheets/d/1ovCEzxlz-383PLl4Dmtu8GybxfxI7tCKOl-6-oXNRa0/edit?usp=sharing"
 INPUT_SHEET_NAME = "Input_BOM"
 
-# ★★★ 核心優化：只允許寫入這些欄位到資料庫 ★★★
-# 這能避免因為 Input BOM 有一堆雜項欄位 (ITEM NO, Qty...) 導致程式一直嘗試新增欄位而報錯
+# 允許寫入資料庫的白名單欄位
 ALLOWED_DB_COLUMNS = ["MPN", "Part No", "Description", "Part Description", "Value", "Val", "Manufacturer", "MFG"]
 
-# 報表專用欄位 (不會被寫入資料庫)
+# 報表欄位
 REPORT_COLUMNS = ["Status", "Est. Price", "Ref Source", "Match Type", "Link", "Candidates"]
 
 SHEET_MAP = {
@@ -35,14 +34,20 @@ SHEET_MAP = {
 
 # ================= 輔助工具 =================
 
-def retry_with_backoff(retries=5, delay=1): # Delay 縮短為 1
+def retry_with_backoff(retries=5, delay=1):
     def decorator(func):
         def wrapper(*args, **kwargs):
             for i in range(retries):
                 try:
                     return func(*args, **kwargs)
                 except APIError as e:
-                    if "429" in str(e) or "Quota exceeded" in str(e):
+                    err_msg = str(e)
+                    # 如果是格子滿了 (400 Limit)，不要重試，直接拋出讓外層處理
+                    if "limit of 10000000 cells" in err_msg:
+                        raise e
+                    
+                    # 如果是配額限制 (429 Quota)，則重試
+                    if "429" in err_msg or "Quota exceeded" in err_msg:
                         wait_time = delay * (2 ** i) + random.uniform(0, 1)
                         print(f"⏳ Quota hit. Sleeping {wait_time:.1f}s...", flush=True)
                         time.sleep(wait_time)
@@ -147,17 +152,13 @@ class DatabaseManager:
     def organize_and_insert(self, sheet_name, existing_rows, input_row_dict):
         ws = self.workbook.worksheet(sheet_name)
         
-        # ★★★ 核心優化 1: 白名單過濾 ★★★
-        # 只保留真正重要的欄位，忽略 ITEM NO, Quantity 等雜訊
         db_input_data = {}
         for k, v in input_row_dict.items():
             is_allowed = any(allowed in k for allowed in ALLOWED_DB_COLUMNS)
             if is_allowed and k not in REPORT_COLUMNS:
                 db_input_data[k] = v
         
-        # 如果過濾後沒東西 (例如這行根本沒填 MPN/Desc/Val)，就跳過
-        if not db_input_data: 
-             return 0
+        if not db_input_data: return 0
 
         current_headers = self.headers_cache.get(sheet_name, [])
         if not current_headers:
@@ -167,51 +168,47 @@ class DatabaseManager:
                 if h: clean_headers.append(str(h).strip())
             current_headers = clean_headers
 
-        # 欄位對應
         header_map = {} 
         db_header_index = {h.upper(): i for i, h in enumerate(current_headers)}
         
         for key in db_input_data.keys():
             if not key: continue
             u_key = key.upper()
-            # 模糊比對 Header (例如 Input: "Part Description" -> DB: "Description")
             match_idx = -1
             if u_key in db_header_index:
                 match_idx = db_header_index[u_key]
             else:
-                # 嘗試部分匹配
                 for db_h, idx in db_header_index.items():
                     if u_key in db_h or db_h in u_key:
                         match_idx = idx
                         break
-            
             if match_idx != -1:
                 header_map[key] = match_idx
 
-        # 準備資料
         row_data_list = [""] * len(current_headers)
         for key, value in db_input_data.items():
             if key in header_map:
                 col_idx = header_map[key]
                 row_data_list[col_idx] = value
         
-        # ★★★ 核心優化 2: 移除搬移 (Move Rows) 與 上色 (Coloring) ★★★
-        # 直接插入到目標位置
-        
         final_insert_pos = 0
-        if existing_rows:
-            # 如果有相似零件，插在它下面 (但不搬移其他人)
-            target_index = min(existing_rows) + 1
-            ws.insert_row(row_data_list, target_index)
-            final_insert_pos = target_index
-        else:
-            # 如果沒有相似零件，直接 Append 到最後
-            ws.append_row(row_data_list)
-            # 這裡不呼叫 col_values 以省 API，直接用大概位置
-            final_insert_pos = ws.row_count 
-
-        # 這裡不執行上色，大幅節省時間
         
+        # ★★★ 嘗試寫入，若滿了則捕捉錯誤 ★★★
+        try:
+            if existing_rows:
+                target_index = min(existing_rows) + 1
+                ws.insert_row(row_data_list, target_index)
+                final_insert_pos = target_index
+            else:
+                ws.append_row(row_data_list)
+                final_insert_pos = ws.row_count 
+        except APIError as e:
+            if "limit of 10000000 cells" in str(e):
+                print(f"      ❌ DB FULL: Sheet '{sheet_name}' hit cell limit. Skipping write.")
+                raise e # 拋出讓上層知道是 DB Full
+            else:
+                raise e
+
         return final_insert_pos
 
 # ================= 主程式 =================
@@ -225,9 +222,13 @@ def get_user_mode():
         except: pass
     return 3
 
+@retry_with_backoff(retries=5, delay=2)
+def safe_batch_update(worksheet, range_name, values):
+    worksheet.update(range_name=range_name, values=values, value_input_option="USER_ENTERED")
+
 def main():
     mode = get_user_mode()
-    print(f"🚀 Starting BOM Automation (Fast Mode) | Mode: {mode}", flush=True)
+    print(f"🚀 Starting BOM Automation (Safe Mode) | Mode: {mode}", flush=True)
     
     enable_db_write = (mode in [2, 3]) 
     enable_price_fill = (mode in [1, 3]) 
@@ -265,18 +266,31 @@ def main():
     col_val_idx = get_col_idx(["Value", "Val"])
     col_status_idx = get_col_idx(["Status"])
 
-    header_map = {h: i for i, h in enumerate(input_headers)}
-    
     # 補上 Output Headers
     output_headers_needed = [h for h in REPORT_COLUMNS if h not in input_headers]
     if output_headers_needed:
         start_col_idx = len(input_headers) + 1
         range_start = gspread.utils.rowcol_to_a1(1, start_col_idx)
         range_end = gspread.utils.rowcol_to_a1(1, start_col_idx + len(output_headers_needed) - 1)
-        input_ws.update(range_name=f"{range_start}:{range_end}", values=[output_headers_needed])
-        for h in output_headers_needed:
-            header_map[h] = len(header_map) # 更新 map
+        try:
+            input_ws.update(range_name=f"{range_start}:{range_end}", values=[output_headers_needed])
+            input_headers.extend(output_headers_needed)
+        except Exception as e:
+            print(f"⚠️ Could not add headers (Input Sheet might be full): {e}")
 
+    # 建立 Report Column Index Map
+    report_col_indices = {}
+    for rc in REPORT_COLUMNS:
+        idx = get_col_idx([rc])
+        if idx is not None:
+            report_col_indices[rc] = idx
+    
+    indices = sorted(report_col_indices.values())
+    is_contiguous = False
+    if len(indices) == len(REPORT_COLUMNS):
+        if indices[-1] - indices[0] == len(REPORT_COLUMNS) - 1:
+            is_contiguous = True
+            
     print(f"🔄 Processing {len(input_rows)} items...", flush=True)
 
     for i, row in enumerate(input_rows):
@@ -329,9 +343,15 @@ def main():
                 existing_indices = [m['row'] for m in matches]
                 inserted_row = db_manager.organize_and_insert(target_sheet, existing_indices, input_row_dict)
                 status = "Moved & Inserted"
+            except APIError as e:
+                if "limit of 10000000 cells" in str(e):
+                    status = "DB Full (Read Only)"
+                else:
+                    print(f"      ❌ DB Write Error: {e}")
+                    status = f"DB Error: {str(e)[:20]}"
             except Exception as e:
-                print(f"      ❌ DB Write Error: {e}")
-                status = f"DB Error: {str(e)[:20]}"
+                print(f"      ❌ Unknown Error: {e}")
+                status = "Error"
         elif matches:
             inserted_row = matches[0]['row']
             status = "Match Found"
@@ -364,15 +384,26 @@ def main():
             "Link": link_formula,
             "Candidates": cand_str
         }
+
+        if is_contiguous:
+            start_idx = indices[0]
+            row_vals = [updates[col] for col in REPORT_COLUMNS]
+            
+            start_cell = gspread.utils.rowcol_to_a1(row_num, start_idx + 1)
+            end_cell = gspread.utils.rowcol_to_a1(row_num, start_idx + len(row_vals))
+            
+            try:
+                safe_batch_update(input_ws, f"{start_cell}:{end_cell}", [row_vals])
+            except: pass
+        else:
+            for col_name, val in updates.items():
+                if col_name in report_col_indices:
+                    col_idx = report_col_indices[col_name] + 1
+                    try:
+                        input_ws.update_cell(row_num, col_idx, val)
+                    except: pass
         
-        for col_name, val in updates.items():
-            if col_name in header_map:
-                col_idx = header_map[col_name] + 1
-                try:
-                    input_ws.update_cell(row_num, col_idx, val)
-                except: pass
-        
-        time.sleep(0.5) # 大幅縮短等待時間
+        time.sleep(0.5) 
 
     print("✅ Done!")
 
