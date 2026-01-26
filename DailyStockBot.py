@@ -47,7 +47,13 @@ def sync_to_sheets(data_list):
         print(f"⚠️ '法人精選監測' 同步失敗: {e}")
 
 def update_watch_list_sheet(recommended_stocks):
-    """將推薦標的匯入 'WATCH_LIST' (包含股票名稱與精確時間)"""
+    """
+    將推薦標的匯入 'WATCH_LIST'
+    功能更新:
+    1. 檢查並更新股票名稱 (B欄)
+    2. A欄代碼無超連結
+    3. 時間獨立至最後一欄 (G欄)
+    """
     if not recommended_stocks: return
 
     try:
@@ -59,31 +65,60 @@ def update_watch_list_sheet(recommended_stocks):
         except:
             sheet = client.open("WATCH_LIST").get_worksheet(0)
 
-        existing_records = sheet.get_all_records()
-        existing_ids = set(str(row.get('股票代號', '')).strip() for row in existing_records)
+        # 1. 獲取所有現有資料以比對 ID 與 名稱
+        all_values = sheet.get_all_values()
+        
+        # 建立 ID 對應列號與名稱的 Map (假設第一列是標題，從第二列開始)
+        existing_map = {}
+        for idx, row in enumerate(all_values):
+            if idx == 0: continue # 跳過標題列
+            if not row: continue
+            
+            # 確保 ID 是字串且去除空白
+            curr_id = str(row[0]).strip()
+            # 確保名稱存在，若該列長度不足則為空字串
+            curr_name = str(row[1]).strip() if len(row) > 1 else ""
+            
+            # 記錄列號 (Excel 列號從 1 開始，idx 是 0 開始，所以是 idx + 1)
+            existing_map[curr_id] = {'row': idx + 1, 'name': curr_name}
         
         new_rows = []
         
-        # [修正] 強制使用 UTC+8 (台灣時間)
+        # 強制使用 UTC+8 (台灣時間)
         tw_time = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         now_str = tw_time.strftime('%Y-%m-%d %H:%M')
 
         print(f"📋 準備將 {len(recommended_stocks)} 檔潛力股匯入 WATCH_LIST...")
 
         for stock in recommended_stocks:
-            sid = stock['id']
+            sid = str(stock['id']).strip()
             name = stock['name']
+            reason = stock['reason']
             
-            if sid not in existing_ids:
-                # [修改] reason_note 加入精確的台灣時間
-                reason_note = f"[{now_str}] {stock['reason']}"
+            # 功能 1: 檢查 B 欄位名稱 (針對現有或即將新增的股票)
+            if sid in existing_map:
+                # 若已存在，檢查名稱是否相符
+                record = existing_map[sid]
+                if not record['name'] or record['name'] != name:
+                    try:
+                        # 更新 B 欄 (第 2 欄)
+                        sheet.update_cell(record['row'], 2, name)
+                        print(f"🔄 更新股票名稱: {sid} -> {name}")
+                    except Exception as e:
+                        print(f"⚠️ 更新名稱失敗 ({sid}): {e}")
+            else:
+                # 若不存在，準備新增至清單
+                # 功能 2: A 欄位純文字 (透過 append_rows 的 RAW 選項達成)
+                # 功能 3: 日期時間獨立到最後一欄 (G欄)
+                # 欄位順序: A:代號, B:名稱, C:空, D:空, E:空, F:理由, G:時間
+                new_rows.append([sid, name, "", "", "", reason, now_str])
                 
-                # 寫入格式: A欄=代號, B欄=名稱, CDE欄空, F欄=推薦理由(含時間)
-                new_rows.append([sid, name, "", "", "", reason_note])
-                existing_ids.add(sid)
+                # 更新本地 map 防止同批次重複判斷
+                existing_map[sid] = {'row': -1, 'name': name}
 
         if new_rows:
-            sheet.append_rows(new_rows, value_input_option='USER_ENTERED')
+            # 使用 RAW 模式寫入，避免 Google Sheet 自動將代碼轉為超連結或公式
+            sheet.append_rows(new_rows, value_input_option='RAW')
             print(f"✅ 已將 {len(new_rows)} 檔新標的加入 'WATCH_LIST'")
         else:
             print("ℹ️ 推薦標的已存在於 WATCH_LIST，無新增項目。")
