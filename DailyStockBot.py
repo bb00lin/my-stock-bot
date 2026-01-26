@@ -265,7 +265,34 @@ def analyze_v14(ticker, name):
 
 def main():
     dl = DataLoader()
-    stock_df = dl.taiwan_stock_info()
+    
+    # --- [新增] 重試機制與錯誤攔截 ---
+    stock_df = None
+    max_retries = 3  # 最大重試次數
+    
+    print("📥 正在下載台股清單 (FinMind)...")
+    
+    for attempt in range(max_retries):
+        try:
+            stock_df = dl.taiwan_stock_info()
+            if stock_df is not None and not stock_df.empty:
+                print("✅ 台股清單下載成功")
+                break
+        except Exception as e:
+            print(f"⚠️ FinMind連線失敗 (第 {attempt+1}/{max_retries} 次): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5)  # 失敗後休息 5 秒再試
+            else:
+                print("❌ 達到最大重試次數，無法獲取台股清單。")
+                print("💡 可能原因: FinMind 伺服器維護中或暫時不穩定，請稍後再試。")
+                return # 結束程式，避免後續崩潰
+
+    # 確保 stock_df 存在才能繼續
+    if stock_df is None or stock_df.empty:
+        print("❌ 錯誤: 獲取到的台股清單為空。")
+        return
+    # -----------------------------------
+
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
     
     targets = stock_df[stock_df['stock_id'].str.len() == 4].head(1000) 
@@ -277,6 +304,7 @@ def main():
     seen_ids = set()
     print(f"啟動雙軌策略掃描 (1000檔)...")
     
+    # ... (以下原本的迴圈邏輯保持不變) ...
     for _, row in targets.iterrows():
         sid = row['stock_id']
         if sid in seen_ids: continue
@@ -312,6 +340,3 @@ def main():
         send_line(msg)
     else:
         print("今日無符合標的。")
-
-if __name__ == "__main__":
-    main()
