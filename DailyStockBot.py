@@ -50,12 +50,12 @@ def update_watch_list_sheet(recommended_stocks):
     """
     將推薦標的匯入 'WATCH_LIST'
     功能更新:
-    1. 檢查並更新股票名稱 (B欄)
-    2. A欄代碼無超連結
-    3. 時間獨立至最後一欄 (G欄)
+    1. [新增] 每次執行都會檢查並更新清單內「所有」股票的名稱 (以 FinMind 中文名稱為準)
+    2. 新增推薦股時，A欄代碼無超連結
+    3. 新增推薦股時，時間獨立至最後一欄 (G欄)
     """
-    if not recommended_stocks: return
-
+    # 移除原本的 if not recommended_stocks: return，因為即使沒有推薦股也要檢查舊股名稱
+    
     try:
         client = get_gspread_client()
         if not client: return
@@ -65,63 +65,76 @@ def update_watch_list_sheet(recommended_stocks):
         except:
             sheet = client.open("WATCH_LIST").get_worksheet(0)
 
-        # 1. 獲取所有現有資料以比對 ID 與 名稱
+        # --- 步驟 1: 獲取正確的股票名稱對照表 (FinMind) ---
+        print("📥 正在下載最新股票名稱資料庫...")
+        try:
+            dl = DataLoader()
+            stock_df = dl.taiwan_stock_info()
+            # 建立 id -> name 的字典 (例如: '2330' -> '台積電')
+            name_map = dict(zip(stock_df['stock_id'], stock_df['stock_name']))
+        except Exception as e:
+            print(f"⚠️ 無法獲取名稱對照表，跳過名稱檢查: {e}")
+            name_map = {}
+
+        # --- 步驟 2: 讀取現有資料並檢查名稱 ---
         all_values = sheet.get_all_values()
         
-        # 建立 ID 對應列號與名稱的 Map (假設第一列是標題，從第二列開始)
-        existing_map = {}
+        # 記錄現有 ID 以避免重複新增 (同時記錄列號以便更新名稱)
+        existing_ids = set()
+        
+        print(f"🔍 正在檢查 {len(all_values)-1} 筆現有庫存名稱...")
+        
         for idx, row in enumerate(all_values):
-            if idx == 0: continue # 跳過標題列
+            if idx == 0: continue # 跳過標題
             if not row: continue
             
-            # 確保 ID 是字串且去除空白
-            curr_id = str(row[0]).strip()
-            # 確保名稱存在，若該列長度不足則為空字串
-            curr_name = str(row[1]).strip() if len(row) > 1 else ""
+            # 取得該行的 ID 與 名稱
+            sid = str(row[0]).strip()
+            current_name = str(row[1]).strip() if len(row) > 1 else ""
             
-            # 記錄列號 (Excel 列號從 1 開始，idx 是 0 開始，所以是 idx + 1)
-            existing_map[curr_id] = {'row': idx + 1, 'name': curr_name}
-        
-        new_rows = []
-        
-        # 強制使用 UTC+8 (台灣時間)
-        tw_time = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-        now_str = tw_time.strftime('%Y-%m-%d %H:%M')
-
-        print(f"📋 準備將 {len(recommended_stocks)} 檔潛力股匯入 WATCH_LIST...")
-
-        for stock in recommended_stocks:
-            sid = str(stock['id']).strip()
-            name = stock['name']
-            reason = stock['reason']
+            existing_ids.add(sid)
             
-            # 功能 1: 檢查 B 欄位名稱 (針對現有或即將新增的股票)
-            if sid in existing_map:
-                # 若已存在，檢查名稱是否相符
-                record = existing_map[sid]
-                if not record['name'] or record['name'] != name:
+            # 檢查是否需要更新名稱
+            if sid in name_map:
+                correct_name = name_map[sid]
+                # 如果名稱是空的，或是名稱不符 (且正確名稱存在)
+                if not current_name or current_name != correct_name:
                     try:
-                        # 更新 B 欄 (第 2 欄)
-                        sheet.update_cell(record['row'], 2, name)
-                        print(f"🔄 更新股票名稱: {sid} -> {name}")
+                        # 更新 B 欄 (第 2 欄)，列號是 idx + 1
+                        sheet.update_cell(idx + 1, 2, correct_name)
+                        print(f"🔄 更新股票名稱 ({sid}): '{current_name}' -> '{correct_name}'")
                     except Exception as e:
                         print(f"⚠️ 更新名稱失敗 ({sid}): {e}")
-            else:
-                # 若不存在，準備新增至清單
-                # 功能 2: A 欄位純文字 (透過 append_rows 的 RAW 選項達成)
-                # 功能 3: 日期時間獨立到最後一欄 (G欄)
-                # 欄位順序: A:代號, B:名稱, C:空, D:空, E:空, F:理由, G:時間
-                new_rows.append([sid, name, "", "", "", reason, now_str])
-                
-                # 更新本地 map 防止同批次重複判斷
-                existing_map[sid] = {'row': -1, 'name': name}
 
-        if new_rows:
-            # 使用 RAW 模式寫入，避免 Google Sheet 自動將代碼轉為超連結或公式
-            sheet.append_rows(new_rows, value_input_option='RAW')
-            print(f"✅ 已將 {len(new_rows)} 檔新標的加入 'WATCH_LIST'")
+        # --- 步驟 3: 新增推薦股 (如果有) ---
+        if recommended_stocks:
+            new_rows = []
+            
+            # 強制使用 UTC+8 (台灣時間)
+            tw_time = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+            now_str = tw_time.strftime('%Y-%m-%d %H:%M')
+
+            print(f"📋 準備將 {len(recommended_stocks)} 檔潛力股匯入 WATCH_LIST...")
+
+            for stock in recommended_stocks:
+                sid = str(stock['id']).strip()
+                # 優先使用 map 中的正確名稱，若無則用傳入的名稱
+                name = name_map.get(sid, stock['name']) 
+                reason = stock['reason']
+                
+                if sid not in existing_ids:
+                    # 寫入格式: A:代號, B:名稱, C-E:空, F:理由, G:時間
+                    new_rows.append([sid, name, "", "", "", reason, now_str])
+                    existing_ids.add(sid) # 避免同批次重複
+
+            if new_rows:
+                # 使用 RAW 模式寫入，確保 A 欄不會變成超連結
+                sheet.append_rows(new_rows, value_input_option='RAW')
+                print(f"✅ 已將 {len(new_rows)} 檔新標的加入 'WATCH_LIST'")
+            else:
+                print("ℹ️ 推薦標的已存在於 WATCH_LIST，無新增項目。")
         else:
-            print("ℹ️ 推薦標的已存在於 WATCH_LIST，無新增項目。")
+            print("ℹ️ 今日無新推薦標的。")
 
     except Exception as e:
         print(f"⚠️ 更新 WATCH_LIST 失敗: {e}")
@@ -289,8 +302,8 @@ def main():
     if sheet_results:
         sync_to_sheets(sheet_results)
 
-    if watch_list_candidates:
-        update_watch_list_sheet(watch_list_candidates)
+    # [修正] 移除 if 判斷，改為無條件執行以觸發名稱檢查與更新
+    update_watch_list_sheet(watch_list_candidates)
 
     if line_results:
         # 使用台灣時間顯示標題
