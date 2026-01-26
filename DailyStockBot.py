@@ -46,16 +46,13 @@ def sync_to_sheets(data_list):
     except Exception as e:
         print(f"⚠️ '法人精選監測' 同步失敗: {e}")
 
-def update_watch_list_sheet(recommended_stocks):
+def update_watch_list_sheet(recommended_stocks, name_map):
     """
-    將推薦標的匯入 'WATCH_LIST'
-    功能更新:
-    1. [新增] 每次執行都會檢查並更新清單內「所有」股票的名稱 (以 FinMind 中文名稱為準)
-    2. 新增推薦股時，A欄代碼無超連結
-    3. 新增推薦股時，時間獨立至最後一欄 (G欄)
+    將推薦標的匯入 'WATCH_LIST' 並檢查所有現有持股名稱
+    Args:
+        recommended_stocks: 今日推薦的股票列表
+        name_map: 股票代號對應名稱的字典 (從 FinMind 獲取)
     """
-    # 移除原本的 if not recommended_stocks: return，因為即使沒有推薦股也要檢查舊股名稱
-    
     try:
         client = get_gspread_client()
         if not client: return
@@ -65,21 +62,8 @@ def update_watch_list_sheet(recommended_stocks):
         except:
             sheet = client.open("WATCH_LIST").get_worksheet(0)
 
-        # --- 步驟 1: 獲取正確的股票名稱對照表 (FinMind) ---
-        print("📥 正在下載最新股票名稱資料庫...")
-        try:
-            dl = DataLoader()
-            stock_df = dl.taiwan_stock_info()
-            # 建立 id -> name 的字典 (例如: '2330' -> '台積電')
-            name_map = dict(zip(stock_df['stock_id'], stock_df['stock_name']))
-        except Exception as e:
-            print(f"⚠️ 無法獲取名稱對照表，跳過名稱檢查: {e}")
-            name_map = {}
-
-        # --- 步驟 2: 讀取現有資料並檢查名稱 ---
+        # 1. 讀取現有資料並檢查名稱
         all_values = sheet.get_all_values()
-        
-        # 記錄現有 ID 以避免重複新增 (同時記錄列號以便更新名稱)
         existing_ids = set()
         
         print(f"🔍 正在檢查 {len(all_values)-1} 筆現有庫存名稱...")
@@ -88,25 +72,22 @@ def update_watch_list_sheet(recommended_stocks):
             if idx == 0: continue # 跳過標題
             if not row: continue
             
-            # 取得該行的 ID 與 名稱
             sid = str(row[0]).strip()
             current_name = str(row[1]).strip() if len(row) > 1 else ""
             
             existing_ids.add(sid)
             
-            # 檢查是否需要更新名稱
+            # 檢查是否需要更新名稱 (使用傳入的 name_map)
             if sid in name_map:
                 correct_name = name_map[sid]
-                # 如果名稱是空的，或是名稱不符 (且正確名稱存在)
                 if not current_name or current_name != correct_name:
                     try:
-                        # 更新 B 欄 (第 2 欄)，列號是 idx + 1
                         sheet.update_cell(idx + 1, 2, correct_name)
                         print(f"🔄 更新股票名稱 ({sid}): '{current_name}' -> '{correct_name}'")
                     except Exception as e:
                         print(f"⚠️ 更新名稱失敗 ({sid}): {e}")
 
-        # --- 步驟 3: 新增推薦股 (如果有) ---
+        # 2. 新增推薦股 (如果有)
         if recommended_stocks:
             new_rows = []
             
@@ -118,7 +99,7 @@ def update_watch_list_sheet(recommended_stocks):
 
             for stock in recommended_stocks:
                 sid = str(stock['id']).strip()
-                # 優先使用 map 中的正確名稱，若無則用傳入的名稱
+                # 優先使用 map 中的正確名稱
                 name = name_map.get(sid, stock['name']) 
                 reason = stock['reason']
                 
@@ -266,10 +247,9 @@ def analyze_v14(ticker, name):
 def main():
     dl = DataLoader()
     
-    # --- [新增] 重試機制與錯誤攔截 ---
+    # [修正] 1. 加入 FinMind 連線重試機制，解決 JSONDecodeError
     stock_df = None
-    max_retries = 3  # 最大重試次數
-    
+    max_retries = 3
     print("📥 正在下載台股清單 (FinMind)...")
     
     for attempt in range(max_retries):
@@ -279,19 +259,18 @@ def main():
                 print("✅ 台股清單下載成功")
                 break
         except Exception as e:
-            print(f"⚠️ FinMind連線失敗 (第 {attempt+1}/{max_retries} 次): {e}")
+            print(f"⚠️ FinMind 連線失敗 (第 {attempt+1}/{max_retries} 次): {e}")
             if attempt < max_retries - 1:
-                time.sleep(5)  # 失敗後休息 5 秒再試
+                print("⏳ 等待 5 秒後重試...")
+                time.sleep(5) # 失敗後等待 5 秒
             else:
-                print("❌ 達到最大重試次數，無法獲取台股清單。")
-                print("💡 可能原因: FinMind 伺服器維護中或暫時不穩定，請稍後再試。")
-                return # 結束程式，避免後續崩潰
+                print("❌ 無法獲取台股清單，可能是 FinMind 伺服器維護中。程式終止。")
+                return
 
-    # 確保 stock_df 存在才能繼續
-    if stock_df is None or stock_df.empty:
-        print("❌ 錯誤: 獲取到的台股清單為空。")
-        return
-    # -----------------------------------
+    if stock_df is None: return
+
+    # [修正] 2. 建立代號對應名稱的字典 (用於更新 Watch List)
+    name_map = dict(zip(stock_df['stock_id'], stock_df['stock_name']))
 
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
     
@@ -304,7 +283,6 @@ def main():
     seen_ids = set()
     print(f"啟動雙軌策略掃描 (1000檔)...")
     
-    # ... (以下原本的迴圈邏輯保持不變) ...
     for _, row in targets.iterrows():
         sid = row['stock_id']
         if sid in seen_ids: continue
@@ -330,8 +308,8 @@ def main():
     if sheet_results:
         sync_to_sheets(sheet_results)
 
-    # [修正] 移除 if 判斷，改為無條件執行以觸發名稱檢查與更新
-    update_watch_list_sheet(watch_list_candidates)
+    # [修正] 3. 無條件執行 Watch List 更新 (傳入 name_map 進行全表檢查)
+    update_watch_list_sheet(watch_list_candidates, name_map)
 
     if line_results:
         # 使用台灣時間顯示標題
@@ -340,3 +318,6 @@ def main():
         send_line(msg)
     else:
         print("今日無符合標的。")
+
+if __name__ == "__main__":
+    main()
