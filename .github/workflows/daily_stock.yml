@@ -2,7 +2,7 @@ name: DailyStockPush
 
 on:
   schedule:
-        - cron: '30 8 * * 1-5' # 台北 16:30 (UTC 08:30)
+    - cron: '30 09 * * 1-5' # 台北時間 17:30 執行 (UTC 09:30)
   workflow_dispatch:
 
 permissions:
