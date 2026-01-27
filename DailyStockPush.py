@@ -2,6 +2,9 @@ import os, yfinance as yf, pandas as pd, requests, time, datetime, sys
 import gspread
 import logging
 import json
+import smtplib 
+from email.mime.text import MIMEText 
+from email.mime.multipart import MIMEMultipart 
 from google import genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
@@ -15,6 +18,11 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Email 設定
+MAIL_RECEIVERS = ['bb00lin@gmail.com'] 
+MAIL_USER = os.environ.get('MAIL_USERNAME') 
+MAIL_PASS = os.environ.get('MAIL_PASSWORD') 
+
 # 初始化 Gemini Client
 ai_client = None
 if GEMINI_API_KEY:
@@ -24,7 +32,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"❌ Gemini Client 初始化失敗: {e}")
 
-# 模型清單 (優先順序：免費且快 -> 強大但慢 -> 舊版)
+# 模型清單
 MODEL_CANDIDATES = [
     "gemini-1.5-flash",
     "gemini-1.5-flash-latest",
@@ -70,7 +78,6 @@ def get_streak_only(sid_clean):
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
         clean_id = ''.join(filter(str.isdigit, str(sid_clean)))
-        # FinMind 會印出 download log，這是正常的
         df = dl.taiwan_stock_institutional_investors(stock_id=clean_id, start_date=start)
         
         if df is None or df.empty: return 0, 0
@@ -128,13 +135,14 @@ def get_gemini_strategy(data):
         roi = ((data['p'] - data['cost']) / data['cost']) * 100
         profit_info = f"🔴庫存持有中 (成本:{data['cost']} | 現價:{data['p']} | 損益:{roi:+.2f}%)"
 
+    # [修改點] 在 prompt 中加入 MA10 數據，並新增第 4 點指令
     prompt = f"""
     角色：頂尖台股操盤手。
     任務：針對個股 {data['name']} ({data['id']}) 進行全方位診斷，並給出下一步具體操作建議。
     
     【關鍵訊號】
     - 均線警示：{data['ma_alert']}
-    - 5日:{data['ma5']} | 20日:{data['ma20']} | 60日:{data['ma60']}
+    - 均線價格：5日({data['ma5']}) | 10日({data['ma10']}) | 20日({data['ma20']}) | 60日({data['ma60']})
     
     【技術數據】
     - 價格：{data['p']} (日漲跌 {data['d1']:.2%}) | 乖離率：{data['bias_str']}
@@ -150,6 +158,7 @@ def get_gemini_strategy(data):
     1. 若有均線警示，請指出價格並給出對策(如:守穩可接/跌破停損)。
     2. 給出明確指令：續抱/減碼/止損/觀望/佈局。
     3. 結合損益與技術面給出防守價。
+    4. (重要) 若文中提到均線(5日/10日/20日/月線)，請務必在括號內標註該均線價格，例如：「回測5日線(105.2)」、「跌破月線(100.5)」。
     """
 
     for model_name in MODEL_CANDIDATES:
@@ -170,15 +179,13 @@ def generate_and_save_summary(data_rows, report_time_str):
     
     if not ai_client:
         print("❌ AI 未啟動，跳過總結報告")
-        return
+        return ""
 
     inventory_txt = ""
     watchlist_txt = ""
     
-    # 資料整理
     for row in data_rows:
         try:
-            # 確保欄位足夠 (避免 Index Error)
             if len(row) < 22: continue
             
             name, sid, status, score = row[2], row[1], row[3], row[4]
@@ -194,7 +201,7 @@ def generate_and_save_summary(data_rows, report_time_str):
 
     if not inventory_txt and not watchlist_txt:
         print("⚠️ 無有效數據可供總結")
-        return
+        return ""
 
     prompt = f"""
     角色：你是專業的台股投資總監。
@@ -220,7 +227,6 @@ def generate_and_save_summary(data_rows, report_time_str):
 
     summary_result = ""
     
-    # 迴圈嘗試所有模型，修復 404 Error
     for model_name in MODEL_CANDIDATES:
         try:
             print(f"   ...嘗試使用模型: {model_name}")
@@ -237,12 +243,11 @@ def generate_and_save_summary(data_rows, report_time_str):
 
     if not summary_result:
         print("❌ 所有模型皆嘗試失敗，無法生成總結報告")
-        return
+        return ""
 
-    # 寫入新工作表
     try:
         client = get_gspread_client()
-        if not client: return
+        if not client: return summary_result
         
         spreadsheet = client.open("全能金流診斷報表")
         sheet_title = report_time_str
@@ -257,7 +262,7 @@ def generate_and_save_summary(data_rows, report_time_str):
                 print(f"🆕 建立新工作表: {sheet_title}")
             except: 
                 print("⚠️ 建立分頁失敗，可能名稱重複或格式錯誤")
-                return
+                return summary_result
             
         lines = summary_result.split('\n')
         cell_data = [[line] for line in lines]
@@ -269,6 +274,8 @@ def generate_and_save_summary(data_rows, report_time_str):
         
     except Exception as e:
         print(f"⚠️ 寫入總結工作表失敗: {e}")
+
+    return summary_result 
 
 # ==========================================
 # 4. 核心邏輯
@@ -383,12 +390,14 @@ def fetch_pro_metrics(stock_data):
         rsi_series = calculate_rsi(df_hist['Close'])
         clean_rsi = 0.0 if pd.isna(rsi_series.iloc[-1]) else round(rsi_series.iloc[-1], 1)
         
+        # [修改點] 新增計算 MA10
         ma5 = df_hist['Close'].rolling(5).mean().iloc[-1]
+        ma10 = df_hist['Close'].rolling(10).mean().iloc[-1]
         ma20 = df_hist['Close'].rolling(20).mean().iloc[-1]
         ma60 = df_hist['Close'].rolling(60).mean().iloc[-1]
         
         bias_60 = ((curr_p - ma60) / ma60) * 100
-        ma_alert_str = check_ma_status(curr_p, ma5, 0, ma20, ma60)
+        ma_alert_str = check_ma_status(curr_p, ma5, ma10, ma20, ma60)
         
         raw_yield = info.get('dividendYield', 0) or 0
         d1 = (curr_p / df_hist['Close'].iloc[-2]) - 1
@@ -415,6 +424,7 @@ def fetch_pro_metrics(stock_data):
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
         market_label = '櫃' if '.TWO' in full_id else '市'
 
+        # [修改點] 將 ma10 加入回傳字典
         res = {
             "id": f"{sid}{market_label}", "name": stock_name, 
             "score": score, "rsi": clean_rsi, "industry": industry,
@@ -425,14 +435,14 @@ def fetch_pro_metrics(stock_data):
             "bias_str": f"{bias_60:+.1f}%",
             "vol_str": vol_str,
             "fs": fs, "ss": ss,
-            "ma5": round(ma5, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2),
+            "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2),
             "ma_alert": ma_alert_str
         }
 
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         
-        # 3. 個股 AI 分析 (自動換模型)
+        # 3. 個股 AI 分析
         res['ai_strategy'] = get_gemini_strategy(res)
         
         return res
@@ -451,7 +461,32 @@ def sync_to_sheets(data_list):
         print(f"⚠️ Google Sheets 同步失敗: {e}")
 
 # ==========================================
-# 5. 主程式入口
+# 5. 發送 Email 
+# ==========================================
+def send_email(subject, body):
+    if not MAIL_USER or not MAIL_PASS:
+        print("⚠️ 未設定 Email 帳密 (MAIL_USERNAME / MAIL_PASSWORD)，跳過寄信")
+        return
+
+    print(f"📧 正在發送郵件: {subject}")
+    msg = MIMEMultipart()
+    msg['From'] = MAIL_USER
+    msg['To'] = ", ".join(MAIL_RECEIVERS)
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'html')) 
+
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(MAIL_USER, MAIL_PASS)
+        server.send_message(msg)
+        server.quit()
+        print("✅ 郵件發送成功")
+    except Exception as e:
+        print(f"❌ 郵件發送失敗: {e}")
+
+# ==========================================
+# 6. 主程式入口
 # ==========================================
 def main():
     # 台灣時間修正
@@ -498,6 +533,7 @@ def main():
             time.sleep(15.0) 
     
     # 報告與總結
+    summary_text = ""
     if results_line:
         results_line.sort(key=lambda x: x['score'], reverse=True)
         
@@ -527,7 +563,41 @@ def main():
         sync_to_sheets(results_sheet)
         
         # 2. 生成並寫入 AI 總結報告 (新功能)
-        generate_and_save_summary(results_sheet, current_time)
+        summary_text = generate_and_save_summary(results_sheet, current_time)
+        
+        # 3. 發送 Email 
+        email_body = f"""
+        <html><body>
+            <h2>📊 {current_time} 全能金流診斷日報</h2>
+            <h3>🤖 AI 戰略總結</h3>
+            <pre style="font-family: sans-serif; white-space: pre-wrap;">{summary_text}</pre>
+            <hr>
+            <h3>📈 重點個股數據 (Top 5 評分)</h3>
+            <table border="1" cellpadding="5" cellspacing="0">
+                <tr>
+                    <th>股名</th><th>狀態</th><th>評分</th><th>RSI</th><th>AI建議</th>
+                </tr>
+        """
+        for r in results_line[:10]: 
+             hold_str = "🔴庫存" if r['is_hold'] else "⚪觀察"
+             email_body += f"""
+                <tr>
+                    <td>{r['name']} ({r['id']})</td>
+                    <td>{hold_str}</td>
+                    <td>{r['score']}</td>
+                    <td>{r['rsi']}</td>
+                    <td>{r['ai_strategy'][:50]}...</td>
+                </tr>
+             """
+        
+        email_body += """
+            </table>
+            <p>詳細數據請查看 Google Sheets 報表。</p>
+        </body></html>
+        """
+        
+        send_email(f"[{current_time}] 台股 AI 診斷日報", email_body)
+        
     else:
         print("❌ 本次執行沒有產生任何有效數據，無法更新報表。")
 
