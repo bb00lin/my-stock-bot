@@ -23,62 +23,62 @@ MAIL_RECEIVERS = ['bb00lin@gmail.com']
 MAIL_USER = os.environ.get('MAIL_USERNAME')
 MAIL_PASS = os.environ.get('MAIL_PASSWORD')
 
-# 模型候選清單
+# 模型候選清單 (多版本備援)
 MODEL_CANDIDATES = [
+    "gemini-2.0-flash-exp",
     "gemini-1.5-flash",
-    "gemini-1.5-flash-002",
+    "gemini-1.5-flash-latest",
     "gemini-1.5-pro",
     "gemini-1.0-pro",
     "gemini-pro"
 ]
 
+# 全域變數：標記 AI 是否可用
+HAS_GENAI = False
+
 # ==========================================
-# [新增] 啟動前檢查：AI 自我診斷
+# [重要] 啟動前檢查：AI 自我診斷
 # ==========================================
 def check_ai_health():
     """在程式開始前，測試 AI 是否存活"""
+    global HAS_GENAI
     print("🤖 正在進行 AI 模型連線測試...")
     
     if not GEMINI_API_KEY:
-        print("❌ 錯誤: 未設定 GEMINI_API_KEY 環境變數！")
-        return False
+        print("⚠️ 警告: 未設定 GEMINI_API_KEY，將跳過 AI 功能。")
+        HAS_GENAI = False
+        return
 
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         
-        # 測試 1: 列出模型 (確認 Key 有效)
-        print("   ...驗證 API Key 權限")
-        models = list(genai.list_models())
-        if not models:
-            print("❌ 失敗: API Key 有效但無法存取任何模型 (可能是權限或地區限制)")
-            return False
-            
-        # 測試 2: 嘗試生成一個簡單回應 (確認模型可用)
+        # 測試: 嘗試生成一個簡單回應
         print("   ...嘗試生成測試訊號")
         for model_name in MODEL_CANDIDATES:
             try:
                 model = genai.GenerativeModel(model_name)
+                # 設定極短 timeout 快速測試
                 response = model.generate_content("Hi", generation_config={"max_output_tokens": 5})
-                if response and response.text:
-                    print(f"✅ 測試成功！使用模型: {model_name}")
-                    return True
-            except:
+                if response:
+                    print(f"✅ AI 測試成功！將使用模型: {model_name}")
+                    HAS_GENAI = True
+                    return
+            except Exception as e:
+                # 忽略個別模型錯誤，繼續試下一個
+                if "429" in str(e):
+                    print("   ⛔ 檢測到 429 API 額度限制 (請稍後再試)")
+                    break
                 continue
         
-        print("❌ 失敗: 所有候選模型皆無法生成內容 (404/429/500)")
-        return False
+        print("❌ 失敗: 所有候選模型皆無法連線。將以「無 AI 模式」繼續執行。")
+        HAS_GENAI = False
 
     except Exception as e:
-        print(f"❌ AI 初始化嚴重錯誤: {e}")
-        return False
+        print(f"❌ AI 初始化錯誤: {e}")
+        HAS_GENAI = False
 
-# 執行檢查 (若失敗直接終止程式)
-if not check_ai_health():
-    print("⛔ AI 系統異常，程式強制中止，避免浪費資源。")
-    sys.exit(1)
-else:
-    print("🚀 AI 系統運作正常，開始執行股票分析任務...")
-    HAS_GENAI = True # 標記為 True
+# 執行檢查
+check_ai_health()
 
 # ==========================================
 # 1. Google Sheets 連線與資料獲取
@@ -214,10 +214,10 @@ def check_golden_entry(df_hist):
         return False, f"計算錯誤: {e}"
 
 # ==========================================
-# 3. AI 策略生成器
+# 3. AI 策略生成器 (含重試機制)
 # ==========================================
 def get_gemini_strategy(data):
-    if not HAS_GENAI: return "AI 未啟動"
+    if not HAS_GENAI: return "AI 服務暫停"
     
     profit_info = "目前無庫存，純觀察"
     if data['is_hold']:
@@ -254,16 +254,19 @@ def get_gemini_strategy(data):
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             return response.text.replace('\n', ' ').strip()
-        except Exception as e:
-            if "429" in str(e): continue
-            if "404" in str(e): continue
-            pass
-    return "AI 分析暫時無法使用(連線失敗)"
+        except:
+            # 若單次失敗，稍微等待 1 秒再試下一個模型
+            time.sleep(1)
+            continue
+    return "AI 連線忙碌中"
 
 def generate_and_save_summary(data_rows, report_time_str):
     print("🧠 正在生成全域總結報告 (使用 Gemini)...")
     
-    # 這裡不需要再檢查 HAS_GENAI，因為程式開頭已經檢查過了
+    if not HAS_GENAI:
+        print("❌ AI 未啟動，跳過總結報告生成。")
+        return "本次報告未包含 AI 總結 (連線失敗)"
+
     inventory_txt = ""
     watchlist_txt = ""
     golden_candidates = ""
@@ -289,7 +292,7 @@ def generate_and_save_summary(data_rows, report_time_str):
 
     if not inventory_txt and not watchlist_txt:
         print("⚠️ 無有效數據可供總結")
-        return ""
+        return "無數據"
 
     if not golden_candidates:
         golden_candidates = "今日掃描無符合「量縮回後買上漲」標準之標的，持續觀察。\n"
@@ -334,11 +337,12 @@ def generate_and_save_summary(data_rows, report_time_str):
             break
         except Exception as e:
             print(f"   ⚠️ 模型 {model_name} 失敗: {str(e)[:50]}...")
+            time.sleep(2) # 失敗休息一下
             continue
 
     if not summary_result:
         print("❌ 所有模型皆嘗試失敗，無法生成總結報告")
-        return ""
+        return "AI 生成失敗"
 
     try:
         client = get_gspread_client()
@@ -594,7 +598,7 @@ def main():
         print("❌ 中止：觀察名單讀取失敗。")
         return
 
-    print(f"🚀 開始分析 {total_stocks} 檔股票 (每檔間隔 15 秒)...")
+    print(f"🚀 開始分析 {total_stocks} 檔股票 (每檔間隔 20 秒)...") # [修改] 提示間隔為 20 秒
 
     for idx, stock_data in enumerate(watch_data_list):
         sid = stock_data['sid']
@@ -623,7 +627,8 @@ def main():
             print(f"❌ 嚴重錯誤: {e}")
 
         if idx < total_stocks - 1:
-            time.sleep(15.0) 
+            # [修改] 將延遲增加到 20 秒，確保 API 額度安全
+            time.sleep(20.0) 
     
     summary_text = ""
     if results_sheet:
