@@ -23,38 +23,62 @@ MAIL_RECEIVERS = ['bb00lin@gmail.com']
 MAIL_USER = os.environ.get('MAIL_USERNAME')
 MAIL_PASS = os.environ.get('MAIL_PASSWORD')
 
-# [修改] 初始化 Gemini Client 並列出可用模型
-HAS_GENAI = False
-if GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        HAS_GENAI = True
-        print("✅ Gemini AI 初始化成功")
-        
-        # [新增] debug: 列出這個 Key 能用的所有模型
-        print("🔍 正在檢測 API Key 可用的模型清單...")
-        available_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                print(f"   - {m.name}")
-                available_models.append(m.name)
-        
-        if not available_models:
-            print("⚠️ 警告: 您的 API Key 似乎無法存取任何生成模型，請檢查 Google Cloud/AI Studio 設定。")
-            
-    except Exception as e:
-        print(f"❌ Gemini 初始化或連線失敗: {e}")
-
-# [修改] 模型候選清單 (加入具體版本號，增加成功率)
+# 模型候選清單
 MODEL_CANDIDATES = [
     "gemini-1.5-flash",
-    "gemini-1.5-flash-002", # 穩定版
-    "gemini-1.5-flash-001",
+    "gemini-1.5-flash-002",
     "gemini-1.5-pro",
-    "gemini-1.5-pro-002",
     "gemini-1.0-pro",
     "gemini-pro"
 ]
+
+# ==========================================
+# [新增] 啟動前檢查：AI 自我診斷
+# ==========================================
+def check_ai_health():
+    """在程式開始前，測試 AI 是否存活"""
+    print("🤖 正在進行 AI 模型連線測試...")
+    
+    if not GEMINI_API_KEY:
+        print("❌ 錯誤: 未設定 GEMINI_API_KEY 環境變數！")
+        return False
+
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        
+        # 測試 1: 列出模型 (確認 Key 有效)
+        print("   ...驗證 API Key 權限")
+        models = list(genai.list_models())
+        if not models:
+            print("❌ 失敗: API Key 有效但無法存取任何模型 (可能是權限或地區限制)")
+            return False
+            
+        # 測試 2: 嘗試生成一個簡單回應 (確認模型可用)
+        print("   ...嘗試生成測試訊號")
+        for model_name in MODEL_CANDIDATES:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content("Hi", generation_config={"max_output_tokens": 5})
+                if response and response.text:
+                    print(f"✅ 測試成功！使用模型: {model_name}")
+                    return True
+            except:
+                continue
+        
+        print("❌ 失敗: 所有候選模型皆無法生成內容 (404/429/500)")
+        return False
+
+    except Exception as e:
+        print(f"❌ AI 初始化嚴重錯誤: {e}")
+        return False
+
+# 執行檢查 (若失敗直接終止程式)
+if not check_ai_health():
+    print("⛔ AI 系統異常，程式強制中止，避免浪費資源。")
+    sys.exit(1)
+else:
+    print("🚀 AI 系統運作正常，開始執行股票分析任務...")
+    HAS_GENAI = True # 標記為 True
 
 # ==========================================
 # 1. Google Sheets 連線與資料獲取
@@ -190,7 +214,7 @@ def check_golden_entry(df_hist):
         return False, f"計算錯誤: {e}"
 
 # ==========================================
-# 3. AI 策略生成器 (增加錯誤處理與重試)
+# 3. AI 策略生成器
 # ==========================================
 def get_gemini_strategy(data):
     if not HAS_GENAI: return "AI 未啟動"
@@ -232,18 +256,14 @@ def get_gemini_strategy(data):
             return response.text.replace('\n', ' ').strip()
         except Exception as e:
             if "429" in str(e): continue
-            # 404 表示此 Key 找不到該模型，繼續試下一個
             if "404" in str(e): continue
             pass
-    return "AI 分析暫時無法使用(模型連線失敗)"
+    return "AI 分析暫時無法使用(連線失敗)"
 
 def generate_and_save_summary(data_rows, report_time_str):
     print("🧠 正在生成全域總結報告 (使用 Gemini)...")
     
-    if not HAS_GENAI:
-        print("❌ AI 未啟動，跳過總結報告")
-        return ""
-
+    # 這裡不需要再檢查 HAS_GENAI，因為程式開頭已經檢查過了
     inventory_txt = ""
     watchlist_txt = ""
     golden_candidates = ""
@@ -313,7 +333,7 @@ def generate_and_save_summary(data_rows, report_time_str):
             print("   ✅ 總結報告生成成功！")
             break
         except Exception as e:
-            print(f"   ⚠️ 模型 {model_name} 失敗: {str(e)[:100]}") # 只印前100字避免刷屏
+            print(f"   ⚠️ 模型 {model_name} 失敗: {str(e)[:50]}...")
             continue
 
     if not summary_result:
