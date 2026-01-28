@@ -2,7 +2,7 @@ name: DailyStockPush
 
 on:
   schedule:
-    - cron: '30 09 * * 1-5' # 台北時間 17:30 執行
+    - cron: '30 09 * * 1-5' # 台北時間 17:30
   workflow_dispatch:
 
 permissions:
@@ -24,8 +24,8 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          # [修改] 改回使用穩定版套件 google-generativeai
-          pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-generativeai
+          # [修改] 移除 google-generativeai，改裝 google-genai
+          pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-genai
 
       - name: Run DailyStockPush
         env:
@@ -33,7 +33,6 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
-          # Email 設定 (必填，否則程式會跳過寄信)
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
         run: python DailyStockPush.py
