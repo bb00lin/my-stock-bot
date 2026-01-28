@@ -5,7 +5,7 @@ import json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import google.generativeai as genai
+from google import genai # [修改] 使用新版 SDK
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
@@ -23,26 +23,25 @@ MAIL_RECEIVERS = ['bb00lin@gmail.com']
 MAIL_USER = os.environ.get('MAIL_USERNAME')
 MAIL_PASS = os.environ.get('MAIL_PASSWORD')
 
-# 模型候選清單 (多版本備援)
+# 模型候選清單 (針對新版 SDK 調整)
 MODEL_CANDIDATES = [
-    "gemini-2.0-flash-exp",
+    "gemini-2.0-flash", 
     "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
     "gemini-1.5-pro",
-    "gemini-1.0-pro",
-    "gemini-pro"
+    "gemini-2.0-flash-exp",
 ]
 
 # 全域變數：標記 AI 是否可用
 HAS_GENAI = False
+AI_CLIENT = None
 
 # ==========================================
-# [重要] 啟動前檢查：AI 自我診斷
+# [重要] 啟動前檢查：AI 自我診斷 (新版寫法)
 # ==========================================
 def check_ai_health():
     """在程式開始前，測試 AI 是否存活"""
-    global HAS_GENAI
-    print("🤖 正在進行 AI 模型連線測試...")
+    global HAS_GENAI, AI_CLIENT
+    print("🤖 正在進行 AI 模型連線測試 (使用 google-genai SDK)...")
     
     if not GEMINI_API_KEY:
         print("⚠️ 警告: 未設定 GEMINI_API_KEY，將跳過 AI 功能。")
@@ -50,23 +49,28 @@ def check_ai_health():
         return
 
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
+        # [修改] 新版 Client 初始化
+        client = genai.Client(api_key=GEMINI_API_KEY)
         
         # 測試: 嘗試生成一個簡單回應
         print("   ...嘗試生成測試訊號")
         for model_name in MODEL_CANDIDATES:
             try:
-                model = genai.GenerativeModel(model_name)
-                # 設定極短 timeout 快速測試
-                response = model.generate_content("Hi", generation_config={"max_output_tokens": 5})
-                if response:
+                # [修改] 新版生成寫法
+                response = client.models.generate_content(
+                    model=model_name, 
+                    contents="Hi"
+                )
+                if response and response.text:
                     print(f"✅ AI 測試成功！將使用模型: {model_name}")
                     HAS_GENAI = True
+                    AI_CLIENT = client # 保存 client 供後續使用
                     return
             except Exception as e:
-                # 忽略個別模型錯誤，繼續試下一個
-                if "429" in str(e):
-                    print("   ⛔ 檢測到 429 API 額度限制 (請稍後再試)")
+                err_msg = str(e)
+                print(f"   ⚠️ 模型 {model_name} 失敗: {err_msg.split('(')[0][:100]}...")
+                if "429" in err_msg:
+                    print("   ⛔ 檢測到 429 API 額度限制")
                     break
                 continue
         
@@ -214,10 +218,10 @@ def check_golden_entry(df_hist):
         return False, f"計算錯誤: {e}"
 
 # ==========================================
-# 3. AI 策略生成器 (含重試機制)
+# 3. AI 策略生成器 (新版寫法)
 # ==========================================
 def get_gemini_strategy(data):
-    if not HAS_GENAI: return "AI 服務暫停"
+    if not HAS_GENAI or not AI_CLIENT: return "AI 服務暫停"
     
     profit_info = "目前無庫存，純觀察"
     if data['is_hold']:
@@ -251,11 +255,13 @@ def get_gemini_strategy(data):
 
     for model_name in MODEL_CANDIDATES:
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            # [修改] 使用全局 client
+            response = AI_CLIENT.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
             return response.text.replace('\n', ' ').strip()
         except:
-            # 若單次失敗，稍微等待 1 秒再試下一個模型
             time.sleep(1)
             continue
     return "AI 連線忙碌中"
@@ -263,7 +269,7 @@ def get_gemini_strategy(data):
 def generate_and_save_summary(data_rows, report_time_str):
     print("🧠 正在生成全域總結報告 (使用 Gemini)...")
     
-    if not HAS_GENAI:
+    if not HAS_GENAI or not AI_CLIENT:
         print("❌ AI 未啟動，跳過總結報告生成。")
         return "本次報告未包含 AI 總結 (連線失敗)"
 
@@ -330,14 +336,16 @@ def generate_and_save_summary(data_rows, report_time_str):
     for model_name in MODEL_CANDIDATES:
         try:
             print(f"   ...嘗試使用模型: {model_name}")
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            response = AI_CLIENT.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
             summary_result = response.text
             print("   ✅ 總結報告生成成功！")
             break
         except Exception as e:
             print(f"   ⚠️ 模型 {model_name} 失敗: {str(e)[:50]}...")
-            time.sleep(2) # 失敗休息一下
+            time.sleep(2)
             continue
 
     if not summary_result:
@@ -598,7 +606,7 @@ def main():
         print("❌ 中止：觀察名單讀取失敗。")
         return
 
-    print(f"🚀 開始分析 {total_stocks} 檔股票 (每檔間隔 20 秒)...") # [修改] 提示間隔為 20 秒
+    print(f"🚀 開始分析 {total_stocks} 檔股票 (每檔間隔 20 秒)...")
 
     for idx, stock_data in enumerate(watch_data_list):
         sid = stock_data['sid']
@@ -627,7 +635,6 @@ def main():
             print(f"❌ 嚴重錯誤: {e}")
 
         if idx < total_stocks - 1:
-            # [修改] 將延遲增加到 20 秒，確保 API 額度安全
             time.sleep(20.0) 
     
     summary_text = ""
