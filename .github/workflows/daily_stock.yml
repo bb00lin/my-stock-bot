@@ -2,7 +2,7 @@ name: DailyStockPush
 
 on:
   schedule:
-    - cron: '30 09 * * 1-5' # 台北時間 17:30 執行 (UTC 09:30)
+    - cron: '30 09 * * 1-5' # 台北時間 17:30 執行
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   run_job:
     runs-on: ubuntu-latest
-    timeout-minutes: 45 # 拉長超時時間，以容納 AI 等待
+    timeout-minutes: 45
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -24,20 +24,16 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          # [重要] 安裝 google-genai 以支援新版 Gemini Client
-          # 若安裝失敗，可嘗試改為 google-generativeai，但您的程式碼是用新版寫法
-          pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-genai
+          # [修改] 改回使用穩定版套件 google-generativeai
+          pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-generativeai
 
       - name: Run DailyStockPush
         env:
-          # Line 設定
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          # Gemini AI 設定
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Google Sheets 金鑰
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
-          # [新增] Email 寄信設定 (必須與 GitHub Secrets 對應)
+          # Email 設定 (必填，否則程式會跳過寄信)
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
         run: python DailyStockPush.py
