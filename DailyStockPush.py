@@ -5,7 +5,7 @@ import json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import google.generativeai as genai # [修改] 改用穩定版 SDK
+import google.generativeai as genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
@@ -23,20 +23,36 @@ MAIL_RECEIVERS = ['bb00lin@gmail.com']
 MAIL_USER = os.environ.get('MAIL_USERNAME')
 MAIL_PASS = os.environ.get('MAIL_PASSWORD')
 
-# [修改] 初始化 Gemini Client (使用穩定版寫法)
+# [修改] 初始化 Gemini Client 並列出可用模型
 HAS_GENAI = False
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         HAS_GENAI = True
-        print("✅ Gemini AI (google-generativeai) 初始化成功")
+        print("✅ Gemini AI 初始化成功")
+        
+        # [新增] debug: 列出這個 Key 能用的所有模型
+        print("🔍 正在檢測 API Key 可用的模型清單...")
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                print(f"   - {m.name}")
+                available_models.append(m.name)
+        
+        if not available_models:
+            print("⚠️ 警告: 您的 API Key 似乎無法存取任何生成模型，請檢查 Google Cloud/AI Studio 設定。")
+            
     except Exception as e:
-        print(f"❌ Gemini 初始化失敗: {e}")
+        print(f"❌ Gemini 初始化或連線失敗: {e}")
 
-# [修改] 模型清單 (移除不穩定的實驗模型，優先使用穩定版)
+# [修改] 模型候選清單 (加入具體版本號，增加成功率)
 MODEL_CANDIDATES = [
     "gemini-1.5-flash",
+    "gemini-1.5-flash-002", # 穩定版
+    "gemini-1.5-flash-001",
     "gemini-1.5-pro",
+    "gemini-1.5-pro-002",
+    "gemini-1.0-pro",
     "gemini-pro"
 ]
 
@@ -70,7 +86,7 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. 輔助數據獲取 (FinMind & yfinance)
+# 2. 輔助數據獲取
 # ==========================================
 def get_streak_only(sid_clean):
     try:
@@ -127,6 +143,7 @@ def check_ma_status(p, ma5, ma10, ma20, ma60):
 # [功能] 黃金進場公式檢測器
 # ==========================================
 def check_golden_entry(df_hist):
+    """黃金進場公式：量縮回後買上漲"""
     try:
         if len(df_hist) < 65: return False, ""
         
@@ -173,7 +190,7 @@ def check_golden_entry(df_hist):
         return False, f"計算錯誤: {e}"
 
 # ==========================================
-# 3. AI 策略生成器 (使用 stable SDK)
+# 3. AI 策略生成器 (增加錯誤處理與重試)
 # ==========================================
 def get_gemini_strategy(data):
     if not HAS_GENAI: return "AI 未啟動"
@@ -210,15 +227,15 @@ def get_gemini_strategy(data):
 
     for model_name in MODEL_CANDIDATES:
         try:
-            # [修改] 使用 GenerativeModel 物件
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             return response.text.replace('\n', ' ').strip()
         except Exception as e:
-            # 429 Resource Exhausted 不印錯誤，直接換下一個
             if "429" in str(e): continue
+            # 404 表示此 Key 找不到該模型，繼續試下一個
+            if "404" in str(e): continue
             pass
-    return "AI 分析暫時無法使用"
+    return "AI 分析暫時無法使用(模型連線失敗)"
 
 def generate_and_save_summary(data_rows, report_time_str):
     print("🧠 正在生成全域總結報告 (使用 Gemini)...")
@@ -290,14 +307,13 @@ def generate_and_save_summary(data_rows, report_time_str):
     for model_name in MODEL_CANDIDATES:
         try:
             print(f"   ...嘗試使用模型: {model_name}")
-            # [修改] 使用 GenerativeModel 物件
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             summary_result = response.text
             print("   ✅ 總結報告生成成功！")
             break
         except Exception as e:
-            print(f"   ⚠️ 模型 {model_name} 失敗: {e}")
+            print(f"   ⚠️ 模型 {model_name} 失敗: {str(e)[:100]}") # 只印前100字避免刷屏
             continue
 
     if not summary_result:
