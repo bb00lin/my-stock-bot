@@ -5,7 +5,7 @@ import json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from google import genai
+import google.generativeai as genai # [修改] 改用穩定版 SDK
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
@@ -23,20 +23,20 @@ MAIL_RECEIVERS = ['bb00lin@gmail.com']
 MAIL_USER = os.environ.get('MAIL_USERNAME')
 MAIL_PASS = os.environ.get('MAIL_PASSWORD')
 
-# 初始化 Gemini Client
-ai_client = None
+# [修改] 初始化 Gemini Client (使用穩定版寫法)
+HAS_GENAI = False
 if GEMINI_API_KEY:
     try:
-        ai_client = genai.Client(api_key=GEMINI_API_KEY)
-        print("✅ Gemini AI Client 初始化成功")
+        genai.configure(api_key=GEMINI_API_KEY)
+        HAS_GENAI = True
+        print("✅ Gemini AI (google-generativeai) 初始化成功")
     except Exception as e:
-        print(f"❌ Gemini Client 初始化失敗: {e}")
+        print(f"❌ Gemini 初始化失敗: {e}")
 
-# 模型清單
+# [修改] 模型清單 (移除不穩定的實驗模型，優先使用穩定版)
 MODEL_CANDIDATES = [
     "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-2.0-flash-exp",
+    "gemini-1.5-pro",
     "gemini-pro"
 ]
 
@@ -73,7 +73,6 @@ STOCK_INFO_MAP = get_global_stock_info()
 # 2. 輔助數據獲取 (FinMind & yfinance)
 # ==========================================
 def get_streak_only(sid_clean):
-    """獲取外資與投信連買天數"""
     try:
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
@@ -125,62 +124,46 @@ def check_ma_status(p, ma5, ma10, ma20, ma60):
     return " | ".join(alerts) if alerts else ""
 
 # ==========================================
-# [新增] 黃金進場公式檢測器
+# [功能] 黃金進場公式檢測器
 # ==========================================
 def check_golden_entry(df_hist):
-    """
-    黃金進場公式邏輯：
-    1. 趨勢多頭: 股價 > 20MA > 60MA
-    2. 等待回檔: 過去 5 天內有至少 2-3 天下跌 (黑K)
-    3. 確認止穩: 昨日量縮 (比前日小) 且今日紅K吃掉昨日高點或收盤價 (吞噬/貫穿)
-    4. 支撐: 最低價沒有跌破 20MA 或 10MA 太多
-    """
     try:
         if len(df_hist) < 65: return False, ""
         
-        # 取得近幾日數據
-        latest = df_hist.iloc[-1]      # 今天 (假設收盤或盤中)
-        prev = df_hist.iloc[-2]        # 昨天
-        prev2 = df_hist.iloc[-3]       # 前天
+        latest = df_hist.iloc[-1]
+        prev = df_hist.iloc[-2]
         
         close = latest['Close']
-        ma10 = df_hist['Close'].rolling(10).mean().iloc[-1]
         ma20 = df_hist['Close'].rolling(20).mean().iloc[-1]
         ma60 = df_hist['Close'].rolling(60).mean().iloc[-1]
         
-        # 1. 確認趨勢 (多頭排列)
+        # 1. 確認趨勢
         if not (close > ma20 and ma20 > ma60):
             return False, "非多頭趨勢"
 
-        # 2. 確認回檔 (過去 3-5 天是否曾下跌)
-        # 檢查過去 4 天 (不含今天) 的漲跌
+        # 2. 確認回檔 (過去 4 天內有下跌)
         past_4_days = df_hist.iloc[-5:-1]
         drop_days = 0
         for i in range(len(past_4_days)):
-            if past_4_days.iloc[i]['Close'] < past_4_days.iloc[i]['Open']: # 黑K
+            if past_4_days.iloc[i]['Close'] < past_4_days.iloc[i]['Open']:
                 drop_days += 1
-            elif past_4_days.iloc[i]['Close'] < past_4_days.iloc[i-1]['Close']: # 跌
+            elif past_4_days.iloc[i]['Close'] < past_4_days.iloc[i-1]['Close']:
                 drop_days += 1
         
         if drop_days < 2:
             return False, "無明顯回檔"
 
-        # 3. 進場信號 (今日紅K 且 強勢)
-        # 紅K: 收 > 開
+        # 3. 進場信號 (紅K + 轉強)
         is_red = close > latest['Open']
-        # 吞噬/轉強: 收盤價 > 昨日最高 或 收盤價 > 昨日收盤 + (昨日跌幅的一半)
         is_strong = close > prev['Close']
-        
         if not (is_red and is_strong):
             return False, "今日未轉強"
 
-        # 4. 量能確認 (昨日量縮，或今日出量)
-        # 回檔量縮: 昨天成交量 < 5日均量
+        # 4. 量能 (昨日量縮 或 今日補量)
         vol_ma5 = df_hist['Volume'].iloc[-6:-1].mean()
         is_vol_shrink_yesterday = prev['Volume'] < vol_ma5
         
         if not is_vol_shrink_yesterday:
-             # 如果昨天沒縮，看今天有沒有補量
              if latest['Volume'] < prev['Volume']:
                  return False, "攻擊量不足"
 
@@ -190,10 +173,10 @@ def check_golden_entry(df_hist):
         return False, f"計算錯誤: {e}"
 
 # ==========================================
-# 3. AI 策略生成器 (個股與總結)
+# 3. AI 策略生成器 (使用 stable SDK)
 # ==========================================
 def get_gemini_strategy(data):
-    if not ai_client: return "AI 未啟動"
+    if not HAS_GENAI: return "AI 未啟動"
     
     profit_info = "目前無庫存，純觀察"
     if data['is_hold']:
@@ -214,13 +197,12 @@ def get_gemini_strategy(data):
     - 籌碼：外資連買 {data['fs']} 天 | 投信連買 {data['ss']} 天
     - 量能：{data['vol_str']}
     - RSI：{data['rsi']}
-    - 風險評級：{data['risk']}
     
     【資產狀態】
     - {profit_info}
 
     【請給出約 80 字的操作建議】
-    1. 若有均線警示，請指出價格並給出對策(如:守穩可接/跌破停損)。
+    1. 若有均線警示，請指出價格並給出對策。
     2. 給出明確指令：續抱/減碼/止損/觀望/佈局。
     3. 結合損益與技術面給出防守價。
     4. 若符合「黃金進場訊號」，請強力建議進場並說明防守點。
@@ -228,27 +210,26 @@ def get_gemini_strategy(data):
 
     for model_name in MODEL_CANDIDATES:
         try:
-            response = ai_client.models.generate_content(
-                model=model_name, 
-                contents=prompt
-            )
+            # [修改] 使用 GenerativeModel 物件
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
             return response.text.replace('\n', ' ').strip()
         except Exception as e:
-            if "429" in str(e): # 額度滿了換下一個模型
-                continue
+            # 429 Resource Exhausted 不印錯誤，直接換下一個
+            if "429" in str(e): continue
             pass
     return "AI 分析暫時無法使用"
 
 def generate_and_save_summary(data_rows, report_time_str):
     print("🧠 正在生成全域總結報告 (使用 Gemini)...")
     
-    if not ai_client:
+    if not HAS_GENAI:
         print("❌ AI 未啟動，跳過總結報告")
         return ""
 
     inventory_txt = ""
     watchlist_txt = ""
-    golden_candidates = "" # [新增] 收集符合黃金公式的股票
+    golden_candidates = ""
     
     for row in data_rows:
         try:
@@ -264,7 +245,6 @@ def generate_and_save_summary(data_rows, report_time_str):
             else:
                 watchlist_txt += stock_info
                 
-            # [新增] 檢查 AI 簡評中是否有提到 "黃金買點" 或 "量縮回後買上漲"
             if "黃金買點" in ai_advice or "量縮回後" in ai_advice:
                 golden_candidates += f"- {name}({sid}): 符合條件！{ai_advice[:30]}...\n"
                 
@@ -274,7 +254,6 @@ def generate_and_save_summary(data_rows, report_time_str):
         print("⚠️ 無有效數據可供總結")
         return ""
 
-    # [新增] 若無符合者，標示無
     if not golden_candidates:
         golden_candidates = "今日掃描無符合「量縮回後買上漲」標準之標的，持續觀察。\n"
 
@@ -294,16 +273,16 @@ def generate_and_save_summary(data_rows, report_time_str):
     請針對以上資訊，使用繁體中文，撰寫以下四個章節（請條理分明，語氣專業）：
     
     ### 1. 庫存持股總體檢
-    (請分析目前持股的整體強弱、是否有出現危險訊號(如跌破均線/過熱)需要立刻處理的股票，並評估整體曝險狀況)
+    (分析持股強弱、是否有危險訊號、評估曝險)
     
     ### 2. 觀察名單潛力股
-    (從觀察名單中挑選出評分最高、或籌碼/型態最值得關注的 3-5 檔潛力股進行點評，說明為何值得關注)
+    (挑選 3-5 檔評分最高或型態最好的個股點評)
     
     ### 3. 總結操作建議
-    (給出明日或未來一週的整體操作策略，例如：積極做多、防守為主、現金為王或是調節持股)
+    (給出未來一週的整體策略：積極/保守/現金為王)
     
     ### 4. 黃金進場公式 (每日必檢)
-    (請針對【黃金進場公式篩選結果】中的股票進行最終確認。若有標的達標，請給出「買進指令」與「停損價位」；若無達標，請鼓勵持續觀察，並重申選股口訣「量縮回後買上漲」的重要性)
+    (針對篩選結果確認。若達標給出買進/停損價；若無達標請重申選股口訣「量縮回後買上漲」)
     """
 
     summary_result = ""
@@ -311,10 +290,9 @@ def generate_and_save_summary(data_rows, report_time_str):
     for model_name in MODEL_CANDIDATES:
         try:
             print(f"   ...嘗試使用模型: {model_name}")
-            response = ai_client.models.generate_content(
-                model=model_name, 
-                contents=prompt
-            )
+            # [修改] 使用 GenerativeModel 物件
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
             summary_result = response.text
             print("   ✅ 總結報告生成成功！")
             break
@@ -342,7 +320,7 @@ def generate_and_save_summary(data_rows, report_time_str):
                 target_sheet = spreadsheet.add_worksheet(title=sheet_title, rows=100, cols=10)
                 print(f"🆕 建立新工作表: {sheet_title}")
             except: 
-                print("⚠️ 建立分頁失敗，可能名稱重複或格式錯誤")
+                print("⚠️ 建立分頁失敗")
                 return summary_result
             
         lines = summary_result.split('\n')
@@ -350,7 +328,6 @@ def generate_and_save_summary(data_rows, report_time_str):
         target_sheet.update(range_name='A1', values=cell_data)
         target_sheet.format("A1:A100", {"wrapStrategy": "WRAP"})
         target_sheet.columns_auto_resize(0, 0)
-        
         print(f"✅ 戰略總結報告已寫入工作表: [{sheet_title}]")
         
     except Exception as e:
@@ -369,7 +346,6 @@ def get_watch_list_from_sheet():
         try:
             sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
         except:
-            print("⚠️ 找不到 'WATCH_LIST' 分頁，自動切換讀取『第一個分頁』...")
             sheet = client.open("WATCH_LIST").get_worksheet(0)
             
         records = sheet.get_all_records()
@@ -442,7 +418,7 @@ def generate_auto_analysis(r, is_hold, cost):
         elif r['d1'] <= -0.04: hint = f"📢急跌守5日線 {profit_str}"
         else: hint = f"📦持股觀察 {profit_str}"
     else:
-        if r['is_golden']: # [優先] 黃金買點
+        if r['is_golden']: # 黃金買點優先顯示
             hint = "💰黃金買點浮現"
         elif r['score'] >= 9: hint = "⭐⭐優先佈局"
         elif r['score'] >= 8 and r['vol_r'] > 1.5: hint = "🚀放量轉強"
@@ -480,7 +456,6 @@ def fetch_pro_metrics(stock_data):
         bias_60 = ((curr_p - ma60) / ma60) * 100
         ma_alert_str = check_ma_status(curr_p, ma5, ma10, ma20, ma60)
         
-        # [新增] 執行黃金進場公式檢查
         is_golden, golden_msg = check_golden_entry(df_hist)
         
         raw_yield = info.get('dividendYield', 0) or 0
@@ -503,7 +478,7 @@ def fetch_pro_metrics(stock_data):
         if vol_ratio > 1.5: score += 1
         if fs >= 3 or ss >= 2: score += 1.5
         if is_hold: score += 0.5 
-        if is_golden: score += 3 # 符合黃金公式大加分
+        if is_golden: score += 3
 
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
         market_label = '櫃' if '.TWO' in full_id else '市'
@@ -520,8 +495,8 @@ def fetch_pro_metrics(stock_data):
             "fs": fs, "ss": ss,
             "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2),
             "ma_alert": ma_alert_str,
-            "is_golden": is_golden, # 新增欄位
-            "golden_msg": golden_msg # 新增欄位
+            "is_golden": is_golden,
+            "golden_msg": golden_msg
         }
 
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
@@ -549,7 +524,7 @@ def sync_to_sheets(data_list):
 # ==========================================
 def send_email(subject, body):
     if not MAIL_USER or not MAIL_PASS:
-        print("⚠️ 未設定 Email 帳密 (MAIL_USERNAME / MAIL_PASSWORD)，跳過寄信")
+        print("⚠️ 未設定 Email 帳密，跳過寄信")
         return
 
     print(f"📧 正在發送郵件: {subject}")
@@ -619,7 +594,6 @@ def main():
         sync_to_sheets(results_sheet)
         summary_text = generate_and_save_summary(results_sheet, current_time)
         
-        # Email 內容生成
         email_body = f"""
         <html><body>
             <h2>📊 {current_time} 全能金流診斷日報</h2>
@@ -634,7 +608,6 @@ def main():
         """
         for r in results_line[:10]: 
              hold_str = "🔴庫存" if r['is_hold'] else "⚪觀察"
-             # [新增] 若符合黃金公式，特別標註
              golden_mark = "🔥" if r.get('is_golden') else ""
              
              email_body += f"""
@@ -655,12 +628,10 @@ def main():
         
         send_email(f"[{current_time}] 台股 AI 診斷日報", email_body)
         
-        # LINE 推播 (同時包含摘要與黃金買點通知)
         if results_line:
             results_line.sort(key=lambda x: x['score'], reverse=True)
             msg = f"📊 【{current_time} 庫存與 AI 診斷】\n"
             
-            # [新增] 黃金買點快訊
             golden_hits = [r for r in results_line if r.get('is_golden')]
             if golden_hits:
                 msg += "\n🔥【黃金買點達標快訊】🔥\n"
