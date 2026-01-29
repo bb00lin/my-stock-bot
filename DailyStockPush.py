@@ -25,7 +25,7 @@ MAIL_PASS = os.environ.get('MAIL_PASSWORD')
 
 # [付費版優化] 優先使用高額度正式版模型
 MODEL_CANDIDATES = [
-    "gemini-2.0-flash",      # 🚀 首選：RPM 2000+
+    "gemini-2.0-flash",      # 🚀 首選
     "gemini-1.5-flash",      
     "gemini-1.5-pro",
 ]
@@ -106,7 +106,46 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. 輔助數據獲取
+# 2. 核心邏輯 (補回遺失的函式)
+# ==========================================
+def get_watch_list_from_sheet():
+    try:
+        client = get_gspread_client()
+        if not client: return []
+
+        try:
+            sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
+        except:
+            # 若找不到指定分頁，嘗試讀取第一個
+            sheet = client.open("WATCH_LIST").get_worksheet(0)
+            
+        records = sheet.get_all_records()
+        watch_data = []
+        print(f"📋 正在讀取雲端觀察名單，共 {len(records)} 筆...")
+        
+        for row in records:
+            raw_sid = str(row.get('股票代號', '')).strip()
+            if not raw_sid: continue
+            
+            if raw_sid.isdigit():
+                if len(raw_sid) == 3: sid = "00" + raw_sid
+                elif len(raw_sid) < 4: sid = raw_sid.zfill(4)
+                else: sid = raw_sid
+            else:
+                sid = raw_sid
+            
+            is_hold = str(row.get('我的庫存倉位', '')).strip().upper() == 'Y'
+            cost = row.get('平均成本', 0)
+            if cost == '': cost = 0
+            
+            watch_data.append({'sid': sid, 'is_hold': is_hold, 'cost': float(cost)})
+        return watch_data
+    except Exception as e:
+        print(f"❌ 讀取 WATCH_LIST 失敗: {e}")
+        return []
+
+# ==========================================
+# 3. 輔助數據獲取
 # ==========================================
 def get_streak_only(sid_clean):
     try:
@@ -235,7 +274,7 @@ def get_limit_up_potential(r):
     return score, " | ".join(reasons)
 
 # ==========================================
-# 3. AI 策略生成器 (單檔)
+# 4. AI 策略生成器 (單檔)
 # ==========================================
 def get_gemini_strategy(data):
     if not HAS_GENAI or not AI_CLIENT: return "AI 服務暫停"
@@ -285,7 +324,7 @@ def get_gemini_strategy(data):
     return "AI 連線忙碌中"
 
 # ==========================================
-# 4. 全域戰略報告生成器 (核心升級)
+# 5. 全域戰略報告生成器 (核心升級)
 # ==========================================
 def generate_and_save_summary(data_list, report_time_str):
     print("🧠 正在生成全域總結報告 (使用 Gemini)...")
@@ -377,7 +416,7 @@ def generate_and_save_summary(data_list, report_time_str):
     return "AI 生成失敗"
 
 # ==========================================
-# 5. 抓取數據與計算
+# 6. 抓取數據與計算
 # ==========================================
 def fetch_pro_metrics(stock_data):
     sid = stock_data['sid']
@@ -513,12 +552,17 @@ def generate_auto_analysis(r, is_hold, cost):
     return risk, trend_status, hint
 
 # ==========================================
-# 6. 主程式
+# 7. 主程式
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
+    
+    # 這裡就是剛才報錯的行，現在函式已經補回去了，可以正常執行
     watch_data_list = get_watch_list_from_sheet()
-    if not watch_data_list: return
+    
+    if not watch_data_list:
+        print("❌ 觀察名單為空，程式結束。")
+        return
 
     # 使用字典列表來儲存完整結果，以便傳遞給 summary 函式
     results_line = [] 
@@ -553,10 +597,9 @@ def main():
     
     # 生成報告
     if results_line:
-        # [修改] 將完整數據結構傳入 summary 函式
         summary_text = generate_and_save_summary(results_line, current_time)
         
-        # 同步與寄信 (略為簡化，保留核心功能)
+        # 同步與寄信
         try:
             client = get_gspread_client()
             if client:
@@ -598,7 +641,7 @@ def main():
                 print("✅ Email 已發送")
             except: print("❌ Email 發送失敗")
 
-        # LINE 推播 (略)
+        # LINE 推播
         if LINE_ACCESS_TOKEN:
             msg = f"📊 {current_time} 戰略報告已生成，請查收 Email 或 Google Sheets。"
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
