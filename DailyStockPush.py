@@ -23,13 +23,11 @@ MAIL_RECEIVERS = ['bb00lin@gmail.com']
 MAIL_USER = os.environ.get('MAIL_USERNAME')
 MAIL_PASS = os.environ.get('MAIL_PASSWORD')
 
-# [關鍵修改] 針對付費帳號優化的模型清單
-# 說明：exp 結尾的模型即使付費也有 RPM 10 的限制，必須優先使用無 exp 的正式版
+# [付費版優化] 優先使用高額度正式版模型
 MODEL_CANDIDATES = [
-    "gemini-2.0-flash",      # 🚀 首選：速度快且額度高 (RPM 2000+)
-    "gemini-1.5-flash",      # 備援 1
-    "gemini-1.5-pro",        # 備援 2
-    # "gemini-2.0-flash-exp" # 建議註解掉，因為額度太低容易卡住
+    "gemini-2.0-flash",      # 🚀 首選：RPM 2000+
+    "gemini-1.5-flash",      
+    "gemini-1.5-pro",
 ]
 
 # 全域變數
@@ -55,7 +53,6 @@ def check_ai_health():
         print("   ...嘗試生成測試訊號")
         for model_name in MODEL_CANDIDATES:
             try:
-                # 測試生成
                 response = client.models.generate_content(
                     model=model_name, 
                     contents="Hi"
@@ -67,10 +64,7 @@ def check_ai_health():
                     return
             except Exception as e:
                 err_msg = str(e)
-                # 只顯示關鍵錯誤訊息
                 print(f"   ⚠️ 模型 {model_name} 失敗: {err_msg.split('(')[0][:80]}...")
-                if "429" in err_msg:
-                    print(f"   ⛔ {model_name} 額度已滿 (若是 exp 版本這是正常的)")
                 continue
         
         print("❌ 失敗: 所有候選模型皆無法連線。將以「無 AI 模式」繼續執行。")
@@ -166,7 +160,7 @@ def check_ma_status(p, ma5, ma10, ma20, ma60):
     return " | ".join(alerts) if alerts else ""
 
 # ==========================================
-# [功能] 黃金進場公式檢測器
+# [功能] 黃金進場公式檢測
 # ==========================================
 def check_golden_entry(df_hist):
     """黃金進場公式：量縮回後買上漲"""
@@ -175,48 +169,73 @@ def check_golden_entry(df_hist):
         
         latest = df_hist.iloc[-1]
         prev = df_hist.iloc[-2]
-        
         close = latest['Close']
         ma20 = df_hist['Close'].rolling(20).mean().iloc[-1]
         ma60 = df_hist['Close'].rolling(60).mean().iloc[-1]
         
         # 1. 確認趨勢
-        if not (close > ma20 and ma20 > ma60):
-            return False, "非多頭趨勢"
+        if not (close > ma20 and ma20 > ma60): return False, "非多頭趨勢"
 
-        # 2. 確認回檔 (過去 4 天內有下跌)
+        # 2. 確認回檔
         past_4_days = df_hist.iloc[-5:-1]
         drop_days = 0
         for i in range(len(past_4_days)):
-            if past_4_days.iloc[i]['Close'] < past_4_days.iloc[i]['Open']:
-                drop_days += 1
-            elif past_4_days.iloc[i]['Close'] < past_4_days.iloc[i-1]['Close']:
-                drop_days += 1
-        
-        if drop_days < 2:
-            return False, "無明顯回檔"
+            if past_4_days.iloc[i]['Close'] < past_4_days.iloc[i]['Open']: drop_days += 1
+            elif past_4_days.iloc[i]['Close'] < past_4_days.iloc[i-1]['Close']: drop_days += 1
+        if drop_days < 2: return False, "無明顯回檔"
 
         # 3. 進場信號 (紅K + 轉強)
         is_red = close > latest['Open']
         is_strong = close > prev['Close']
-        if not (is_red and is_strong):
-            return False, "今日未轉強"
+        if not (is_red and is_strong): return False, "今日未轉強"
 
-        # 4. 量能 (昨日量縮 或 今日補量)
+        # 4. 量能
         vol_ma5 = df_hist['Volume'].iloc[-6:-1].mean()
         is_vol_shrink_yesterday = prev['Volume'] < vol_ma5
-        
         if not is_vol_shrink_yesterday:
-             if latest['Volume'] < prev['Volume']:
-                 return False, "攻擊量不足"
+             if latest['Volume'] < prev['Volume']: return False, "攻擊量不足"
 
         return True, "🔥黃金買點:量縮回後買上漲"
-        
-    except Exception as e:
-        return False, f"計算錯誤: {e}"
+    except: return False, ""
 
 # ==========================================
-# 3. AI 策略生成器 (新版寫法)
+# [功能] 漲停潛力股篩選器
+# ==========================================
+def get_limit_up_potential(r):
+    """
+    綜合判斷是否有漲停相 (Momentum)
+    回傳: (分數 0-100, 原因字串)
+    """
+    score = 0
+    reasons = []
+    
+    # 1. 技術面：多頭強勢 (30分)
+    if r['p'] > r['ma5'] and r['ma5'] > r['ma10'] and r['ma10'] > r['ma20']:
+        score += 30
+        reasons.append("🔥均線多頭發散")
+    
+    # 2. 籌碼面：投信認養 (30分)
+    if r['ss'] > 0: # 投信連買
+        score += 30
+        reasons.append("🏦投信點火")
+    elif r['fs'] >= 3: # 外資連買
+        score += 20
+        reasons.append("💰外資連買")
+        
+    # 3. 動能面：爆量 (20分)
+    if r['vol_r'] >= 1.8:
+        score += 20
+        reasons.append("📈出量攻擊")
+        
+    # 4. K線：今日強勢 (20分)
+    if r['d1'] > 0.03: # 今日漲幅 > 3%
+        score += 20
+        reasons.append("🚀長紅棒")
+
+    return score, " | ".join(reasons)
+
+# ==========================================
+# 3. AI 策略生成器 (單檔)
 # ==========================================
 def get_gemini_strategy(data):
     if not HAS_GENAI or not AI_CLIENT: return "AI 服務暫停"
@@ -226,44 +245,49 @@ def get_gemini_strategy(data):
         roi = ((data['p'] - data['cost']) / data['cost']) * 100
         profit_info = f"🔴庫存持有中 (成本:{data['cost']} | 現價:{data['p']} | 損益:{roi:+.2f}%)"
 
+    # [修改] Prompt 增加具體均線要求
     prompt = f"""
     角色：頂尖台股操盤手。
-    任務：針對個股 {data['name']} ({data['id']}) 進行全方位診斷，並給出下一步具體操作建議。
+    任務：針對個股 {data['name']} ({data['id']}) 進行短線診斷。
     
-    【關鍵訊號】
-    - 均線警示：{data['ma_alert']}
-    - 均線價格：5日({data['ma5']}) | 10日({data['ma10']}) | 20日({data['ma20']}) | 60日({data['ma60']})
-    - 黃金進場訊號：{'✅符合' if data['is_golden'] else '❌未達標'} ({data['golden_msg']})
+    【關鍵均線價格】(重要參考)
+    - 5日線: {data['ma5']}
+    - 10日線: {data['ma10']}
+    - 20日線: {data['ma20']}
+    - 60日線: {data['ma60']}
     
     【技術數據】
-    - 價格：{data['p']} (日漲跌 {data['d1']:.2%}) | 乖離率：{data['bias_str']}
+    - 現價：{data['p']} (日漲跌 {data['d1']:.2%})
     - 籌碼：外資連買 {data['fs']} 天 | 投信連買 {data['ss']} 天
     - 量能：{data['vol_str']}
     - RSI：{data['rsi']}
     
+    【訊號】
+    - 均線警示：{data['ma_alert']}
+    - 黃金進場：{'✅是' if data['is_golden'] else '❌否'}
+    
     【資產狀態】
     - {profit_info}
 
-    【請給出約 80 字的操作建議】
-    1. 若有均線警示，請指出價格並給出對策。
+    【指令】請給出約 80 字的操作建議：
+    1. 若提到均線(如5日/10日線)，必須在括號內標註該均線價格。例如：「跌破5日線({data['ma5']})」。
     2. 給出明確指令：續抱/減碼/止損/觀望/佈局。
-    3. 結合損益與技術面給出防守價。
-    4. 若符合「黃金進場訊號」，請強力建議進場並說明防守點。
+    3. 結合損益與技術面給出具體數字的防守價。
     """
 
     for model_name in MODEL_CANDIDATES:
         try:
-            response = AI_CLIENT.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
+            response = AI_CLIENT.models.generate_content(model=model_name, contents=prompt)
             return response.text.replace('\n', ' ').strip()
         except:
             time.sleep(1)
             continue
     return "AI 連線忙碌中"
 
-def generate_and_save_summary(data_rows, report_time_str):
+# ==========================================
+# 4. 全域戰略報告生成器 (核心升級)
+# ==========================================
+def generate_and_save_summary(data_list, report_time_str):
     print("🧠 正在生成全域總結報告 (使用 Gemini)...")
     
     if not HAS_GENAI or not AI_CLIENT:
@@ -273,204 +297,88 @@ def generate_and_save_summary(data_rows, report_time_str):
     inventory_txt = ""
     watchlist_txt = ""
     golden_candidates = ""
+    limit_up_candidates_txt = ""
     
-    for row in data_rows:
+    # 遍歷所有數據，準備給 AI 的素材
+    for r in data_list:
         try:
-            if len(row) < 22: continue
+            # 格式化每檔股票的資訊 (包含具體均線價格)
+            stock_info = (
+                f"- {r['name']}({r['id']}) | 現價:{r['p']} | 分數:{r['score']} | "
+                f"MA5:{r['ma5']} | MA10:{r['ma10']} | MA20:{r['ma20']} | "
+                f"AI建議:{r['ai_strategy'][:50]}...\n"
+            )
             
-            name, sid, status, score = row[2], row[1], row[3], row[4]
-            signal, ai_advice = row[20], row[21]
-            
-            stock_info = f"- {name}({sid}) | 評分:{score} | 訊號:{signal} | AI簡評:{ai_advice[:60]}...\n"
-            
-            if "庫存" in status:
+            if r['is_hold']:
                 inventory_txt += stock_info
             else:
                 watchlist_txt += stock_info
                 
-            if "黃金買點" in ai_advice or "量縮回後" in ai_advice:
-                golden_candidates += f"- {name}({sid}): 符合條件！{ai_advice[:30]}...\n"
+            # 篩選黃金買點
+            if r['is_golden']:
+                golden_candidates += f"- {r['name']}: {r['golden_msg']} (防守MA20: {r['ma20']})\n"
+
+            # [新增] 篩選漲停潛力股 (分數 > 60)
+            limit_up_score, limit_up_reason = get_limit_up_potential(r)
+            if limit_up_score >= 60:
+                limit_up_candidates_txt += (
+                    f"- {r['name']}: 潛力分{limit_up_score} ({limit_up_reason}) | "
+                    f"籌碼:投{r['ss']}外{r['fs']} | 題材請AI補充\n"
+                )
                 
         except: continue
 
-    if not inventory_txt and not watchlist_txt:
-        print("⚠️ 無有效數據可供總結")
-        return "無數據"
+    if not golden_candidates: golden_candidates = "今日無符合標準之標的。"
+    if not limit_up_candidates_txt: limit_up_candidates_txt = "今日無明顯漲停特徵股。"
 
-    if not golden_candidates:
-        golden_candidates = "今日掃描無符合「量縮回後買上漲」標準之標的，持續觀察。\n"
-
+    # [關鍵修改] 總結報告 Prompt：要求具體數字與漲停預測
     prompt = f"""
     角色：你是專業的台股投資總監。
-    任務：根據今日的「全能金流診斷報表」數據，撰寫一份高層次的【戰略總結報告】。
+    任務：根據今日數據，撰寫一份【戰略總結報告】。
     
-    【庫存持股清單】
+    【庫存清單】(內含MA均線價格)
     {inventory_txt}
     
-    【觀察名單清單】
+    【觀察清單】
     {watchlist_txt}
     
-    【🔥 黃金進場公式篩選結果】
+    【🔥 黃金進場公式篩選】
     {golden_candidates}
     
-    請針對以上資訊，使用繁體中文，撰寫以下四個章節（請條理分明，語氣專業）：
+    【🚀 漲停潛力股獵殺名單】(基於技術+籌碼篩選)
+    {limit_up_candidates_txt}
+    
+    請撰寫以下五個章節 (繁體中文，語氣專業)：
     
     ### 1. 庫存持股總體檢
-    (分析持股強弱、是否有危險訊號、評估曝險)
+    (分析持股強弱。⚠️重要：若建議防守或減碼，必須寫出具體的均線價格，例如「防守10日線(123.5)」)
     
     ### 2. 觀察名單潛力股
-    (挑選 3-5 檔評分最高或型態最好的個股點評)
+    (挑選 3-5 檔評分最高個股點評。⚠️重要：給出建議進場價或防守價時，務必參考提供的MA數值寫出具體金額)
     
     ### 3. 總結操作建議
-    (給出未來一週的整體策略：積極/保守/現金為王)
+    (給出未來一週策略：積極/保守/現金為王)
     
     ### 4. 黃金進場公式 (每日必檢)
-    (針對篩選結果確認。若達標給出買進/停損價；若無達標請重申選股口訣「量縮回後買上漲」)
+    (針對篩選結果確認。若達標，請給出明確的「停損價格」；若無達標請重申口訣)
+    
+    ### 5. 🎯 漲停潛力股獵殺 (AI預測)
+    (針對【漲停潛力股獵殺名單】中的股票，請結合你內建的知識庫，分析其「熱門題材」(如CoWoS/重電/IP/AI PC等)，並預測短期爆發力。若名單為空，請說明目前盤面缺乏攻擊動能)
     """
 
-    summary_result = ""
-    
     for model_name in MODEL_CANDIDATES:
         try:
-            print(f"   ...嘗試使用模型: {model_name}")
-            response = AI_CLIENT.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            summary_result = response.text
-            print("   ✅ 總結報告生成成功！")
-            break
+            response = AI_CLIENT.models.generate_content(model=model_name, contents=prompt)
+            return response.text
         except Exception as e:
-            print(f"   ⚠️ 模型 {model_name} 失敗: {str(e)[:50]}...")
             time.sleep(2)
             continue
 
-    if not summary_result:
-        print("❌ 所有模型皆嘗試失敗，無法生成總結報告")
-        return "AI 生成失敗"
-
-    try:
-        client = get_gspread_client()
-        if not client: return summary_result
-        
-        spreadsheet = client.open("全能金流診斷報表")
-        sheet_title = report_time_str
-        
-        try:
-            target_sheet = spreadsheet.worksheet(sheet_title)
-            target_sheet.clear() 
-            print(f"🧹 清除舊工作表: {sheet_title}")
-        except gspread.WorksheetNotFound:
-            try:
-                target_sheet = spreadsheet.add_worksheet(title=sheet_title, rows=100, cols=10)
-                print(f"🆕 建立新工作表: {sheet_title}")
-            except: 
-                print("⚠️ 建立分頁失敗")
-                return summary_result
-            
-        lines = summary_result.split('\n')
-        cell_data = [[line] for line in lines]
-        target_sheet.update(range_name='A1', values=cell_data)
-        target_sheet.format("A1:A100", {"wrapStrategy": "WRAP"})
-        target_sheet.columns_auto_resize(0, 0)
-        print(f"✅ 戰略總結報告已寫入工作表: [{sheet_title}]")
-        
-    except Exception as e:
-        print(f"⚠️ 寫入總結工作表失敗: {e}")
-
-    return summary_result 
+    return "AI 生成失敗"
 
 # ==========================================
-# 4. 核心邏輯
+# 5. 抓取數據與計算
 # ==========================================
-def get_watch_list_from_sheet():
-    try:
-        client = get_gspread_client()
-        if not client: return []
-
-        try:
-            sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
-        except:
-            sheet = client.open("WATCH_LIST").get_worksheet(0)
-            
-        records = sheet.get_all_records()
-        watch_data = []
-        print(f"📋 正在讀取雲端觀察名單，共 {len(records)} 筆...")
-        
-        for row in records:
-            raw_sid = str(row.get('股票代號', '')).strip()
-            if not raw_sid: continue
-            
-            if raw_sid.isdigit():
-                if len(raw_sid) == 3: sid = "00" + raw_sid
-                elif len(raw_sid) < 4: sid = raw_sid.zfill(4)
-                else: sid = raw_sid
-            else:
-                sid = raw_sid
-            
-            is_hold = str(row.get('我的庫存倉位', '')).strip().upper() == 'Y'
-            cost = row.get('平均成本', 0)
-            if cost == '': cost = 0
-            
-            watch_data.append({'sid': sid, 'is_hold': is_hold, 'cost': float(cost)})
-        return watch_data
-    except Exception as e:
-        print(f"❌ 讀取 WATCH_LIST 失敗: {e}")
-        return []
-
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    if loss.empty or loss.iloc[-1] == 0: return pd.Series([100.0] * len(series))
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def get_tw_stock(sid):
-    clean_id = str(sid).strip().upper()
-    suffixes = [".TWO", ".TW"] if clean_id.startswith(('3', '4', '5', '6', '8')) else [".TW", ".TWO"]
-        
-    for suffix in suffixes:
-        target = f"{clean_id}{suffix}"
-        try:
-            stock = yf.Ticker(target)
-            hist = stock.history(period="5d")
-            if not hist.empty: return stock, target
-        except: continue
-    return None, None
-
-def generate_auto_analysis(r, is_hold, cost):
-    if r['rsi'] >= 80: risk = "🚨極度過熱"
-    elif r['rsi'] >= 70: risk = "🚩高檔警戒"
-    elif 40 <= r['rsi'] <= 60 and r['d1'] > 0: risk = "✅趨勢穩健"
-    elif r['rsi'] <= 30: risk = "🛡️超跌打底"
-    else: risk = "正常波動"
-
-    trends = []
-    if r['vol_r'] > 2.0 and r['d1'] > 0: trends.append("🔥主力強攻")
-    elif r['vol_r'] > 1.2: trends.append("📈有效放量")
-    elif r['vol_r'] < 0.7: trends.append("⚠️縮量")
-    trend_status = " | ".join(trends) if trends else "動能平淡"
-    
-    hint = ""
-    profit_pct = ((r['p'] - cost) / cost * 100) if (is_hold and cost > 0) else 0
-    profit_str = f"({profit_pct:+.1f}%)" if (is_hold and cost > 0) else ""
-
-    if r['ma_alert']:
-        hint = r['ma_alert']
-    elif is_hold:
-        if r['rsi'] >= 80: hint = f"❗分批止盈 {profit_str}"
-        elif r['d1'] <= -0.04: hint = f"📢急跌守5日線 {profit_str}"
-        else: hint = f"📦持股觀察 {profit_str}"
-    else:
-        if r['is_golden']: # 黃金買點優先顯示
-            hint = "💰黃金買點浮現"
-        elif r['score'] >= 9: hint = "⭐⭐優先佈局"
-        elif r['score'] >= 8 and r['vol_r'] > 1.5: hint = "🚀放量轉強"
-        else: hint = "持續追蹤"
-
-    return risk, trend_status, hint
-
 def fetch_pro_metrics(stock_data):
     sid = stock_data['sid']
     is_hold = stock_data['is_hold']
@@ -493,14 +401,14 @@ def fetch_pro_metrics(stock_data):
         rsi_series = calculate_rsi(df_hist['Close'])
         clean_rsi = 0.0 if pd.isna(rsi_series.iloc[-1]) else round(rsi_series.iloc[-1], 1)
         
-        ma5 = df_hist['Close'].rolling(5).mean().iloc[-1]
-        ma10 = df_hist['Close'].rolling(10).mean().iloc[-1]
-        ma20 = df_hist['Close'].rolling(20).mean().iloc[-1]
-        ma60 = df_hist['Close'].rolling(60).mean().iloc[-1]
+        # 計算均線 (保留小數點後2位)
+        ma5 = round(df_hist['Close'].rolling(5).mean().iloc[-1], 2)
+        ma10 = round(df_hist['Close'].rolling(10).mean().iloc[-1], 2)
+        ma20 = round(df_hist['Close'].rolling(20).mean().iloc[-1], 2)
+        ma60 = round(df_hist['Close'].rolling(60).mean().iloc[-1], 2)
         
         bias_60 = ((curr_p - ma60) / ma60) * 100
         ma_alert_str = check_ma_status(curr_p, ma5, ma10, ma20, ma60)
-        
         is_golden, golden_msg = check_golden_entry(df_hist)
         
         raw_yield = info.get('dividendYield', 0) or 0
@@ -538,7 +446,7 @@ def fetch_pro_metrics(stock_data):
             "bias_str": f"{bias_60:+.1f}%",
             "vol_str": vol_str,
             "fs": fs, "ss": ss,
-            "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2),
+            "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60,
             "ma_alert": ma_alert_str,
             "is_golden": is_golden,
             "golden_msg": golden_msg
@@ -546,7 +454,6 @@ def fetch_pro_metrics(stock_data):
 
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
-        
         res['ai_strategy'] = get_gemini_strategy(res)
         
         return res
@@ -554,70 +461,82 @@ def fetch_pro_metrics(stock_data):
         print(f"⚠️ 分析過程出錯 ({sid}): {e}")
         return None
 
-def sync_to_sheets(data_list):
-    try:
-        client = get_gspread_client()
-        if not client: return
-        sheet = client.open("全能金流診斷報表").get_worksheet(0)
-        sheet.append_rows(data_list, value_input_option='USER_ENTERED')
-        print(f"✅ 成功同步 {len(data_list)} 筆數據至主報表")
-    except Exception as e:
-        print(f"⚠️ Google Sheets 同步失敗: {e}")
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    if loss.empty or loss.iloc[-1] == 0: return pd.Series([100.0] * len(series))
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def get_tw_stock(sid):
+    clean_id = str(sid).strip().upper()
+    suffixes = [".TWO", ".TW"] if clean_id.startswith(('3', '4', '5', '6', '8')) else [".TW", ".TWO"]
+    for suffix in suffixes:
+        target = f"{clean_id}{suffix}"
+        try:
+            stock = yf.Ticker(target)
+            hist = stock.history(period="5d")
+            if not hist.empty: return stock, target
+        except: continue
+    return None, None
+
+def generate_auto_analysis(r, is_hold, cost):
+    if r['rsi'] >= 80: risk = "🚨極度過熱"
+    elif r['rsi'] >= 70: risk = "🚩高檔警戒"
+    elif 40 <= r['rsi'] <= 60 and r['d1'] > 0: risk = "✅趨勢穩健"
+    elif r['rsi'] <= 30: risk = "🛡️超跌打底"
+    else: risk = "正常波動"
+
+    trends = []
+    if r['vol_r'] > 2.0 and r['d1'] > 0: trends.append("🔥主力強攻")
+    elif r['vol_r'] > 1.2: trends.append("📈有效放量")
+    elif r['vol_r'] < 0.7: trends.append("⚠️縮量")
+    trend_status = " | ".join(trends) if trends else "動能平淡"
+    
+    hint = ""
+    profit_pct = ((r['p'] - cost) / cost * 100) if (is_hold and cost > 0) else 0
+    profit_str = f"({profit_pct:+.1f}%)" if (is_hold and cost > 0) else ""
+
+    if r['ma_alert']:
+        hint = r['ma_alert']
+    elif is_hold:
+        if r['rsi'] >= 80: hint = f"❗分批止盈 {profit_str}"
+        elif r['d1'] <= -0.04: hint = f"📢急跌守5日線 {profit_str}"
+        else: hint = f"📦持股觀察 {profit_str}"
+    else:
+        if r['is_golden']: hint = "💰黃金買點浮現"
+        elif r['score'] >= 9: hint = "⭐⭐優先佈局"
+        elif r['score'] >= 8 and r['vol_r'] > 1.5: hint = "🚀放量轉強"
+        else: hint = "持續追蹤"
+
+    return risk, trend_status, hint
 
 # ==========================================
-# 5. 發送 Email 
-# ==========================================
-def send_email(subject, body):
-    if not MAIL_USER or not MAIL_PASS:
-        print("⚠️ 未設定 Email 帳密，跳過寄信")
-        return
-
-    print(f"📧 正在發送郵件: {subject}")
-    msg = MIMEMultipart()
-    msg['From'] = MAIL_USER
-    msg['To'] = ", ".join(MAIL_RECEIVERS)
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'html')) 
-
-    try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(MAIL_USER, MAIL_PASS)
-        server.send_message(msg)
-        server.quit()
-        print("✅ 郵件發送成功")
-    except Exception as e:
-        print(f"❌ 郵件發送失敗: {e}")
-
-# ==========================================
-# 6. 主程式入口
+# 6. 主程式
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-    results_line, results_sheet = [], []
-
     watch_data_list = get_watch_list_from_sheet()
-    total_stocks = len(watch_data_list)
-    
-    if not watch_data_list:
-        print("❌ 中止：觀察名單讀取失敗。")
-        return
+    if not watch_data_list: return
 
-    # [修改] 因使用付費版高額度模型，可將間隔縮短回 2 秒以加快速度
-    print(f"🚀 開始分析 {total_stocks} 檔股票 (每檔間隔 2 秒)...")
+    # 使用字典列表來儲存完整結果，以便傳遞給 summary 函式
+    results_line = [] 
+    results_sheet = []
+
+    print(f"🚀 開始分析 {len(watch_data_list)} 檔股票 (每檔間隔 2 秒)...")
 
     for idx, stock_data in enumerate(watch_data_list):
         sid = stock_data['sid']
-        print(f"[{idx+1}/{total_stocks}] 正在分析: {sid} ... ", end="", flush=True)
+        print(f"[{idx+1}/{len(watch_data_list)}] 分析: {sid} ... ", end="", flush=True)
         
         try:
             res = fetch_pro_metrics(stock_data)
             if res:
-                print(f"✅ 完成 ({res['name']})")
+                print(f"✅ ({res['name']})")
                 results_line.append(res)
                 
                 hold_mark = "📦庫存" if res['is_hold'] else "👀觀察"
-                
                 results_sheet.append([
                     current_time, res['id'], res['name'], hold_mark, 
                     res['score'], res['rsi'], res['industry'], 
@@ -627,85 +546,64 @@ def main():
                     res['risk'], res['trend'], res['hint'],
                     res['ai_strategy']
                 ])
-            else:
-                print("⚠️ 失敗 (無數據)")
-        except Exception as e:
-            print(f"❌ 嚴重錯誤: {e}")
+            else: print("⚠️ 失敗")
+        except: print("❌ 錯誤")
 
-        if idx < total_stocks - 1:
-            time.sleep(2.0) # [修改] 縮短間隔
+        if idx < len(watch_data_list) - 1: time.sleep(2.0)
     
-    summary_text = ""
-    if results_sheet:
-        sync_to_sheets(results_sheet)
-        summary_text = generate_and_save_summary(results_sheet, current_time)
+    # 生成報告
+    if results_line:
+        # [修改] 將完整數據結構傳入 summary 函式
+        summary_text = generate_and_save_summary(results_line, current_time)
         
-        email_body = f"""
-        <html><body>
-            <h2>📊 {current_time} 全能金流診斷日報</h2>
-            <h3>🤖 AI 戰略總結</h3>
-            <pre style="font-family: sans-serif; white-space: pre-wrap;">{summary_text}</pre>
-            <hr>
-            <h3>📈 重點個股數據 (Top 5 評分)</h3>
-            <table border="1" cellpadding="5" cellspacing="0">
-                <tr>
-                    <th>股名</th><th>狀態</th><th>評分</th><th>RSI</th><th>AI建議</th>
-                </tr>
-        """
-        for r in results_line[:10]: 
-             hold_str = "🔴庫存" if r['is_hold'] else "⚪觀察"
-             golden_mark = "🔥" if r.get('is_golden') else ""
-             
-             email_body += f"""
-                <tr>
-                    <td>{golden_mark}{r['name']} ({r['id']})</td>
-                    <td>{hold_str}</td>
-                    <td>{r['score']}</td>
-                    <td>{r['rsi']}</td>
-                    <td>{r['ai_strategy'][:50]}...</td>
-                </tr>
-             """
-        
-        email_body += """
-            </table>
-            <p>詳細數據請查看 Google Sheets 報表。</p>
-        </body></html>
-        """
-        
-        send_email(f"[{current_time}] 台股 AI 診斷日報", email_body)
-        
-        if results_line:
-            results_line.sort(key=lambda x: x['score'], reverse=True)
-            msg = f"📊 【{current_time} 庫存與 AI 診斷】\n"
-            
-            golden_hits = [r for r in results_line if r.get('is_golden')]
-            if golden_hits:
-                msg += "\n🔥【黃金買點達標快訊】🔥\n"
-                for r in golden_hits:
-                    msg += f"✅ {r['name']}: {r['golden_msg']}\n"
-                msg += "--------------------\n"
+        # 同步與寄信 (略為簡化，保留核心功能)
+        try:
+            client = get_gspread_client()
+            if client:
+                sheet = client.open("全能金流診斷報表").get_worksheet(0)
+                sheet.append_rows(results_sheet, value_input_option='USER_ENTERED')
+                
+                # 寫入 Summary 分頁
+                try:
+                    s_sheet = client.open("全能金流診斷報表").worksheet(current_time)
+                    s_sheet.clear()
+                except:
+                    s_sheet = client.open("全能金流診斷報表").add_worksheet(title=current_time, rows=100, cols=10)
+                
+                s_sheet.update(range_name='A1', values=[[line] for line in summary_text.split('\n')])
+        except: pass
 
-            holdings = [r for r in results_line if r['is_hold']]
-            if holdings:
-                msg += "--- 📦 我的庫存 ---\n"
-                for r in holdings:
-                    msg += (f"{r['name']} ({r['p']}): {r['hint']}\n")
+        # 寄信
+        if MAIL_USER and MAIL_PASS:
+            email_body = f"""
+            <html><body>
+                <h2>📊 {current_time} 全能金流診斷</h2>
+                <pre style="font-family: sans-serif; white-space: pre-wrap;">{summary_text}</pre>
+                <hr>
+                <p>詳細數據請見 Google Sheets。</p>
+            </body></html>
+            """
+            msg = MIMEMultipart()
+            msg['From'] = MAIL_USER
+            msg['To'] = ", ".join(MAIL_RECEIVERS)
+            msg['Subject'] = f"[{current_time}] 台股 AI 戰略日報"
+            msg.attach(MIMEText(email_body, 'html'))
             
-            msg += "\n--- 🚀 重點關注 ---\n"
-            others = [r for r in results_line if not r['is_hold']][:5]
-            for r in others:
-                short_ai = r['ai_strategy'].split("。")[0]
-                msg += (f"{r['name']}: {short_ai[:25]}...\n")
+            try:
+                server = smtplib.SMTP('smtp.gmail.com', 587)
+                server.starttls()
+                server.login(MAIL_USER, MAIL_PASS)
+                server.send_message(msg)
+                server.quit()
+                print("✅ Email 已發送")
+            except: print("❌ Email 發送失敗")
 
+        # LINE 推播 (略)
+        if LINE_ACCESS_TOKEN:
+            msg = f"📊 {current_time} 戰略報告已生成，請查收 Email 或 Google Sheets。"
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
             payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg}]}
-            try:
-                requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
-                print("✅ LINE 推播已發送")
-            except: pass
-        
-    else:
-        print("❌ 本次執行沒有產生任何有效數據，無法更新報表。")
+            requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
 
 if __name__ == "__main__":
     main()
