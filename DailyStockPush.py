@@ -106,7 +106,7 @@ def get_global_stock_info():
 STOCK_INFO_MAP = get_global_stock_info()
 
 # ==========================================
-# 2. 核心邏輯 (補回遺失的函式)
+# 2. 核心邏輯
 # ==========================================
 def get_watch_list_from_sheet():
     try:
@@ -116,7 +116,6 @@ def get_watch_list_from_sheet():
         try:
             sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
         except:
-            # 若找不到指定分頁，嘗試讀取第一個
             sheet = client.open("WATCH_LIST").get_worksheet(0)
             
         records = sheet.get_all_records()
@@ -284,7 +283,6 @@ def get_gemini_strategy(data):
         roi = ((data['p'] - data['cost']) / data['cost']) * 100
         profit_info = f"🔴庫存持有中 (成本:{data['cost']} | 現價:{data['p']} | 損益:{roi:+.2f}%)"
 
-    # [修改] Prompt 增加具體均線要求
     prompt = f"""
     角色：頂尖台股操盤手。
     任務：針對個股 {data['name']} ({data['id']}) 進行短線診斷。
@@ -324,7 +322,7 @@ def get_gemini_strategy(data):
     return "AI 連線忙碌中"
 
 # ==========================================
-# 5. 全域戰略報告生成器 (核心升級)
+# 5. 全域戰略報告生成器
 # ==========================================
 def generate_and_save_summary(data_list, report_time_str):
     print("🧠 正在生成全域總結報告 (使用 Gemini)...")
@@ -338,10 +336,8 @@ def generate_and_save_summary(data_list, report_time_str):
     golden_candidates = ""
     limit_up_candidates_txt = ""
     
-    # 遍歷所有數據，準備給 AI 的素材
     for r in data_list:
         try:
-            # 格式化每檔股票的資訊 (包含具體均線價格)
             stock_info = (
                 f"- {r['name']}({r['id']}) | 現價:{r['p']} | 分數:{r['score']} | "
                 f"MA5:{r['ma5']} | MA10:{r['ma10']} | MA20:{r['ma20']} | "
@@ -353,11 +349,10 @@ def generate_and_save_summary(data_list, report_time_str):
             else:
                 watchlist_txt += stock_info
                 
-            # 篩選黃金買點
             if r['is_golden']:
                 golden_candidates += f"- {r['name']}: {r['golden_msg']} (防守MA20: {r['ma20']})\n"
 
-            # [新增] 篩選漲停潛力股 (分數 > 60)
+            # 漲停潛力篩選
             limit_up_score, limit_up_reason = get_limit_up_potential(r)
             if limit_up_score >= 60:
                 limit_up_candidates_txt += (
@@ -370,7 +365,6 @@ def generate_and_save_summary(data_list, report_time_str):
     if not golden_candidates: golden_candidates = "今日無符合標準之標的。"
     if not limit_up_candidates_txt: limit_up_candidates_txt = "今日無明顯漲停特徵股。"
 
-    # [關鍵修改] 總結報告 Prompt：要求具體數字與漲停預測
     prompt = f"""
     角色：你是專業的台股投資總監。
     任務：根據今日數據，撰寫一份【戰略總結報告】。
@@ -440,7 +434,6 @@ def fetch_pro_metrics(stock_data):
         rsi_series = calculate_rsi(df_hist['Close'])
         clean_rsi = 0.0 if pd.isna(rsi_series.iloc[-1]) else round(rsi_series.iloc[-1], 1)
         
-        # 計算均線 (保留小數點後2位)
         ma5 = round(df_hist['Close'].rolling(5).mean().iloc[-1], 2)
         ma10 = round(df_hist['Close'].rolling(10).mean().iloc[-1], 2)
         ma20 = round(df_hist['Close'].rolling(20).mean().iloc[-1], 2)
@@ -494,7 +487,6 @@ def fetch_pro_metrics(stock_data):
         risk, trend, hint = generate_auto_analysis(res, is_hold, cost)
         res.update({"risk": risk, "trend": trend, "hint": hint})
         res['ai_strategy'] = get_gemini_strategy(res)
-        
         return res
     except Exception as e:
         print(f"⚠️ 分析過程出錯 ({sid}): {e}")
@@ -552,19 +544,50 @@ def generate_auto_analysis(r, is_hold, cost):
     return risk, trend_status, hint
 
 # ==========================================
-# 7. 主程式
+# 7. 補回遺失的函式 (Sync & Email)
+# ==========================================
+def sync_to_sheets(data_list):
+    try:
+        client = get_gspread_client()
+        if not client: return
+        sheet = client.open("全能金流診斷報表").get_worksheet(0)
+        sheet.append_rows(data_list, value_input_option='USER_ENTERED')
+        print(f"✅ 成功同步 {len(data_list)} 筆數據至主報表")
+    except Exception as e:
+        print(f"⚠️ Google Sheets 同步失敗: {e}")
+
+def send_email(subject, body):
+    if not MAIL_USER or not MAIL_PASS:
+        print("⚠️ 未設定 Email 帳密，跳過寄信")
+        return
+
+    print(f"📧 正在發送郵件: {subject}")
+    msg = MIMEMultipart()
+    msg['From'] = MAIL_USER
+    msg['To'] = ", ".join(MAIL_RECEIVERS)
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'html')) 
+
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(MAIL_USER, MAIL_PASS)
+        server.send_message(msg)
+        server.quit()
+        print("✅ 郵件發送成功")
+    except Exception as e:
+        print(f"❌ 郵件發送失敗: {e}")
+
+# ==========================================
+# 8. 主程式
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-    
-    # 這裡就是剛才報錯的行，現在函式已經補回去了，可以正常執行
     watch_data_list = get_watch_list_from_sheet()
-    
-    if not watch_data_list:
+    if not watch_data_list: 
         print("❌ 觀察名單為空，程式結束。")
         return
 
-    # 使用字典列表來儲存完整結果，以便傳遞給 summary 函式
     results_line = [] 
     results_sheet = []
 
@@ -595,18 +618,16 @@ def main():
 
         if idx < len(watch_data_list) - 1: time.sleep(2.0)
     
-    # 生成報告
     if results_line:
         summary_text = generate_and_save_summary(results_line, current_time)
         
-        # 同步與寄信
         try:
+            # 1. 寫入 Raw Data
+            sync_to_sheets(results_sheet)
+            
+            # 2. 寫入 Summary
             client = get_gspread_client()
             if client:
-                sheet = client.open("全能金流診斷報表").get_worksheet(0)
-                sheet.append_rows(results_sheet, value_input_option='USER_ENTERED')
-                
-                # 寫入 Summary 分頁
                 try:
                     s_sheet = client.open("全能金流診斷報表").worksheet(current_time)
                     s_sheet.clear()
@@ -614,34 +635,21 @@ def main():
                     s_sheet = client.open("全能金流診斷報表").add_worksheet(title=current_time, rows=100, cols=10)
                 
                 s_sheet.update(range_name='A1', values=[[line] for line in summary_text.split('\n')])
-        except: pass
+                s_sheet.format("A1:A100", {"wrapStrategy": "WRAP"})
+                s_sheet.columns_auto_resize(0, 0)
+        except Exception as e:
+            print(f"⚠️ 報表寫入部分失敗: {e}")
 
-        # 寄信
-        if MAIL_USER and MAIL_PASS:
-            email_body = f"""
-            <html><body>
-                <h2>📊 {current_time} 全能金流診斷</h2>
-                <pre style="font-family: sans-serif; white-space: pre-wrap;">{summary_text}</pre>
-                <hr>
-                <p>詳細數據請見 Google Sheets。</p>
-            </body></html>
-            """
-            msg = MIMEMultipart()
-            msg['From'] = MAIL_USER
-            msg['To'] = ", ".join(MAIL_RECEIVERS)
-            msg['Subject'] = f"[{current_time}] 台股 AI 戰略日報"
-            msg.attach(MIMEText(email_body, 'html'))
-            
-            try:
-                server = smtplib.SMTP('smtp.gmail.com', 587)
-                server.starttls()
-                server.login(MAIL_USER, MAIL_PASS)
-                server.send_message(msg)
-                server.quit()
-                print("✅ Email 已發送")
-            except: print("❌ Email 發送失敗")
+        email_body = f"""
+        <html><body>
+            <h2>📊 {current_time} 全能金流診斷</h2>
+            <pre style="font-family: sans-serif; white-space: pre-wrap;">{summary_text}</pre>
+            <hr>
+            <p>詳細數據請見 Google Sheets。</p>
+        </body></html>
+        """
+        send_email(f"[{current_time}] 台股 AI 戰略日報", email_body)
 
-        # LINE 推播
         if LINE_ACCESS_TOKEN:
             msg = f"📊 {current_time} 戰略報告已生成，請查收 Email 或 Google Sheets。"
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
