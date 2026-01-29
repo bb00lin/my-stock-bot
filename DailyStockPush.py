@@ -240,33 +240,30 @@ def check_golden_entry(df_hist):
 # [功能] 漲停潛力股篩選器
 # ==========================================
 def get_limit_up_potential(r):
-    """
-    綜合判斷是否有漲停相 (Momentum)
-    回傳: (分數 0-100, 原因字串)
-    """
+    """綜合判斷是否有漲停相 (Momentum)"""
     score = 0
     reasons = []
     
-    # 1. 技術面：多頭強勢 (30分)
+    # 1. 技術面
     if r['p'] > r['ma5'] and r['ma5'] > r['ma10'] and r['ma10'] > r['ma20']:
         score += 30
         reasons.append("🔥均線多頭發散")
     
-    # 2. 籌碼面：投信認養 (30分)
-    if r['ss'] > 0: # 投信連買
+    # 2. 籌碼面
+    if r['ss'] > 0:
         score += 30
         reasons.append("🏦投信點火")
-    elif r['fs'] >= 3: # 外資連買
+    elif r['fs'] >= 3:
         score += 20
         reasons.append("💰外資連買")
         
-    # 3. 動能面：爆量 (20分)
+    # 3. 動能面
     if r['vol_r'] >= 1.8:
         score += 20
         reasons.append("📈出量攻擊")
         
-    # 4. K線：今日強勢 (20分)
-    if r['d1'] > 0.03: # 今日漲幅 > 3%
+    # 4. K線
+    if r['d1'] > 0.03:
         score += 20
         reasons.append("🚀長紅棒")
 
@@ -322,7 +319,7 @@ def get_gemini_strategy(data):
     return "AI 連線忙碌中"
 
 # ==========================================
-# 5. 全域戰略報告生成器
+# 5. 全域戰略報告生成器 (修復 Log 版本)
 # ==========================================
 def generate_and_save_summary(data_list, report_time_str):
     print("🧠 正在生成全域總結報告 (使用 Gemini)...")
@@ -352,14 +349,12 @@ def generate_and_save_summary(data_list, report_time_str):
             if r['is_golden']:
                 golden_candidates += f"- {r['name']}: {r['golden_msg']} (防守MA20: {r['ma20']})\n"
 
-            # 漲停潛力篩選
             limit_up_score, limit_up_reason = get_limit_up_potential(r)
             if limit_up_score >= 60:
                 limit_up_candidates_txt += (
                     f"- {r['name']}: 潛力分{limit_up_score} ({limit_up_reason}) | "
                     f"籌碼:投{r['ss']}外{r['fs']} | 題材請AI補充\n"
                 )
-                
         except: continue
 
     if not golden_candidates: golden_candidates = "今日無符合標準之標的。"
@@ -404,10 +399,12 @@ def generate_and_save_summary(data_list, report_time_str):
             response = AI_CLIENT.models.generate_content(model=model_name, contents=prompt)
             return response.text
         except Exception as e:
+            # [重要修正] 這裡要把錯誤印出來，之前漏掉了
+            print(f"   ⚠️ 總結報告生成失敗 ({model_name}): {str(e)[:100]}...")
             time.sleep(2)
             continue
 
-    return "AI 生成失敗"
+    return "AI 生成失敗 (請檢查 Log 詳細錯誤)"
 
 # ==========================================
 # 6. 抓取數據與計算
@@ -544,7 +541,7 @@ def generate_auto_analysis(r, is_hold, cost):
     return risk, trend_status, hint
 
 # ==========================================
-# 7. 補回遺失的函式 (Sync & Email)
+# 7. 資料同步與寄信
 # ==========================================
 def sync_to_sheets(data_list):
     try:
@@ -619,13 +616,15 @@ def main():
         if idx < len(watch_data_list) - 1: time.sleep(2.0)
     
     if results_line:
+        # [修改] 增加冷卻時間，避免觸發 429
+        print("⏳ 正在等待 API 冷卻 (10秒) 以確保總結報告生成...")
+        time.sleep(10) 
+        
         summary_text = generate_and_save_summary(results_line, current_time)
         
         try:
-            # 1. 寫入 Raw Data
             sync_to_sheets(results_sheet)
             
-            # 2. 寫入 Summary
             client = get_gspread_client()
             if client:
                 try:
