@@ -5,7 +5,7 @@ import json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from google import genai # [修改] 使用新版 SDK
+from google import genai
 from oauth2client.service_account import ServiceAccountCredentials
 from FinMind.data import DataLoader
 
@@ -23,20 +23,21 @@ MAIL_RECEIVERS = ['bb00lin@gmail.com']
 MAIL_USER = os.environ.get('MAIL_USERNAME')
 MAIL_PASS = os.environ.get('MAIL_PASSWORD')
 
-# 模型候選清單 (針對新版 SDK 調整)
+# [關鍵修改] 針對付費帳號優化的模型清單
+# 說明：exp 結尾的模型即使付費也有 RPM 10 的限制，必須優先使用無 exp 的正式版
 MODEL_CANDIDATES = [
-    "gemini-2.0-flash", 
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-2.0-flash-exp",
+    "gemini-2.0-flash",      # 🚀 首選：速度快且額度高 (RPM 2000+)
+    "gemini-1.5-flash",      # 備援 1
+    "gemini-1.5-pro",        # 備援 2
+    # "gemini-2.0-flash-exp" # 建議註解掉，因為額度太低容易卡住
 ]
 
-# 全域變數：標記 AI 是否可用
+# 全域變數
 HAS_GENAI = False
 AI_CLIENT = None
 
 # ==========================================
-# [重要] 啟動前檢查：AI 自我診斷 (新版寫法)
+# [啟動檢查] AI 自我診斷
 # ==========================================
 def check_ai_health():
     """在程式開始前，測試 AI 是否存活"""
@@ -49,14 +50,12 @@ def check_ai_health():
         return
 
     try:
-        # [修改] 新版 Client 初始化
         client = genai.Client(api_key=GEMINI_API_KEY)
         
-        # 測試: 嘗試生成一個簡單回應
         print("   ...嘗試生成測試訊號")
         for model_name in MODEL_CANDIDATES:
             try:
-                # [修改] 新版生成寫法
+                # 測試生成
                 response = client.models.generate_content(
                     model=model_name, 
                     contents="Hi"
@@ -64,14 +63,14 @@ def check_ai_health():
                 if response and response.text:
                     print(f"✅ AI 測試成功！將使用模型: {model_name}")
                     HAS_GENAI = True
-                    AI_CLIENT = client # 保存 client 供後續使用
+                    AI_CLIENT = client
                     return
             except Exception as e:
                 err_msg = str(e)
-                print(f"   ⚠️ 模型 {model_name} 失敗: {err_msg.split('(')[0][:100]}...")
+                # 只顯示關鍵錯誤訊息
+                print(f"   ⚠️ 模型 {model_name} 失敗: {err_msg.split('(')[0][:80]}...")
                 if "429" in err_msg:
-                    print("   ⛔ 檢測到 429 API 額度限制")
-                    break
+                    print(f"   ⛔ {model_name} 額度已滿 (若是 exp 版本這是正常的)")
                 continue
         
         print("❌ 失敗: 所有候選模型皆無法連線。將以「無 AI 模式」繼續執行。")
@@ -81,7 +80,6 @@ def check_ai_health():
         print(f"❌ AI 初始化錯誤: {e}")
         HAS_GENAI = False
 
-# 執行檢查
 check_ai_health()
 
 # ==========================================
@@ -255,7 +253,6 @@ def get_gemini_strategy(data):
 
     for model_name in MODEL_CANDIDATES:
         try:
-            # [修改] 使用全局 client
             response = AI_CLIENT.models.generate_content(
                 model=model_name,
                 contents=prompt
@@ -606,7 +603,8 @@ def main():
         print("❌ 中止：觀察名單讀取失敗。")
         return
 
-    print(f"🚀 開始分析 {total_stocks} 檔股票 (每檔間隔 20 秒)...")
+    # [修改] 因使用付費版高額度模型，可將間隔縮短回 2 秒以加快速度
+    print(f"🚀 開始分析 {total_stocks} 檔股票 (每檔間隔 2 秒)...")
 
     for idx, stock_data in enumerate(watch_data_list):
         sid = stock_data['sid']
@@ -635,7 +633,7 @@ def main():
             print(f"❌ 嚴重錯誤: {e}")
 
         if idx < total_stocks - 1:
-            time.sleep(20.0) 
+            time.sleep(2.0) # [修改] 縮短間隔
     
     summary_text = ""
     if results_sheet:
