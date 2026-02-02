@@ -1,0 +1,61 @@
+name: Run STM32 GPIO Planner
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'stm32_dashboard.py'  # 監聽這個特定檔案
+      - 'STM32MP133CAFx.xml'
+
+jobs:
+  run-planner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install gspread oauth2client
+
+      - name: Check Environment Files
+        env:
+          HAS_SECRET: ${{ secrets.GOOGLE_SHEETS_JSON != '' }}
+        run: |
+          echo "📂 檢查檔案列表:"
+          ls -l
+          
+          # 檢查 1: XML 是否存在
+          if [ ! -f "STM32MP133CAFx.xml" ]; then
+            echo "❌ 錯誤: 找不到 STM32MP133CAFx.xml，請確認已上傳！"
+            exit 1
+          fi
+          
+          # 檢查 2: 主程式是否存在 (檔名必須正確)
+          if [ ! -f "stm32_dashboard.py" ]; then
+            echo "❌ 錯誤: 找不到 stm32_dashboard.py！"
+            echo "   請確認您上傳的 Python 檔案名稱是否正確。"
+            exit 1
+          fi
+
+          # 檢查 3: Secret 是否設定
+          if [ "$HAS_SECRET" != "true" ]; then
+            echo "❌ 錯誤: GitHub Secret 'GOOGLE_SHEETS_JSON' 未設定！"
+            exit 1
+          fi
+          
+          echo "✅ 環境檢查通過，準備執行..."
+
+      - name: Run Planner Script
+        env:
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+        # 這裡會精確執行 stm32_dashboard.py
+        run: python stm32_dashboard.py
