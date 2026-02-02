@@ -1,0 +1,33 @@
+name: Auto GPIO Planner
+
+on:
+  workflow_dispatch: # 允許手動點擊按鈕執行
+  push:              # 當有程式碼更新時執行
+    paths:
+      - 'STM32MP133CAFx.xml' # 當 XML 變更時自動重算
+      - '*.py'
+
+jobs:
+  run-planner:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 下載程式碼 (Checkout)
+        uses: actions/checkout@v3
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 安裝套件
+        run: |
+          pip install gspread oauth2client
+
+      - name: 執行規劃器
+        env:
+          # 這裡會自動從 GitHub Secrets 讀取資料注入環境變數
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        run: python stm32_xml_planner.py
