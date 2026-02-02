@@ -1,33 +1,51 @@
-name: Auto GPIO Planner
+name: Run STM32 GPIO Planner
 
 on:
-  workflow_dispatch: # 允許手動點擊按鈕執行
-  push:              # 當有程式碼更新時執行
+  workflow_dispatch:  # 允許手動點擊按鈕執行
+  push:
     paths:
-      - 'STM32MP133CAFx.xml' # 當 XML 變更時自動重算
-      - '*.py'
+      - '**.py'       # 當任何 Python 檔案更新時自動執行
+      - '**.xml'      # 當 XML 檔案更新時自動執行
 
 jobs:
   run-planner:
     runs-on: ubuntu-latest
+    timeout-minutes: 5  # 設定超時，防止卡住超過 5 分鐘
 
     steps:
-      - name: 下載程式碼 (Checkout)
-        uses: actions/checkout@v3
+      # 1. 下載倉庫中的所有檔案到虛擬機
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: 設定 Python 環境
-        uses: actions/setup-python@v4
+      # 2. 設定 Python 環境 (3.9)
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
-      - name: 安裝套件
+      # 3. 安裝 Python 套件
+      - name: Install Dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install gspread oauth2client
 
-      - name: 執行規劃器
+      # 4. (除錯用) 檢查檔案是否真的存在
+      # 這一步會列出所有檔案，如果 XML 不見了會報錯停止
+      - name: Check Files Existence
+        run: |
+          echo "📂 Listing files in current directory:"
+          ls -l
+          if [ ! -f "STM32MP133CAFx.xml" ]; then
+            echo "❌ 錯誤: 找不到 STM32MP133CAFx.xml 檔案！請確認已上傳到 GitHub。"
+            exit 1
+          fi
+
+      # 5. 執行主程式
+      # ⚠️ 請確認您的 Python 檔名是否為 main.py
+      # 如果您的檔名是 stm32_dashboard_v4.py，請修改下方指令
+      - name: Run Planner Script
         env:
-          # 這裡會自動從 GitHub Secrets 讀取資料注入環境變數
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
-          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-        run: python stm32_xml_planner.py
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}  # 如果有寄信需求
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}  # 如果有寄信需求
+        run: stm32_dashboard_v4.py
