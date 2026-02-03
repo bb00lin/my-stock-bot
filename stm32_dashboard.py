@@ -6,11 +6,13 @@ import csv
 import io
 import gspread
 import hashlib
+import xml.etree.ElementTree as ET
 from oauth2client.service_account import ServiceAccountCredentials
 from collections import defaultdict
 from datetime import datetime
 
 # ================= 設定區 =================
+XML_FILENAME = "STM32MP133CAFx.xml" # 恢復 XML 作為核心資料源
 SPREADSHEET_NAME = 'STM32_GPIO_Planner'
 WORKSHEET_CONFIG = 'Config_Panel'
 WORKSHEET_RESULT = 'Pinout_View'
@@ -27,76 +29,125 @@ TIMER_METADATA = {
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ================= 配色引擎 (V27 重寫) =================
+# ================= 配色引擎 =================
 class ColorEngine:
     def __init__(self):
-        # 定義 "家族" 的基礎色系 (Base Color)
         self.family_palette = {
-            "SPI":    {"red": 1.0, "green": 0.85, "blue": 0.9}, # 粉紅基底
-            "ETH":    {"red": 0.8, "green": 1.0, "blue": 1.0},  # 青色基底
-            "SDMMC":  {"red": 0.8, "green": 0.9, "blue": 1.0},  # 藍色基底
-            "I2C":    {"red": 0.8, "green": 1.0, "blue": 0.8},  # 綠色基底
-            "UART":   {"red": 1.0, "green": 0.95, "blue": 0.8}, # 米黃基底
-            "USART":  {"red": 1.0, "green": 0.95, "blue": 0.8}, # 米黃基底
-            "TIM":    {"red": 0.95, "green": 0.95, "blue": 0.95}, # 灰色基底
-            "ADC":    {"red": 1.0, "green": 0.9, "blue": 0.8},  # 橘色基底
-            "FDCAN":  {"red": 1.0, "green": 0.8, "blue": 1.0},  # 紫色基底
-            "USB":    {"red": 0.8, "green": 0.8, "blue": 1.0},  # 深藍基底
+            "SPI":    {"red": 1.0, "green": 0.85, "blue": 0.9},
+            "ETH":    {"red": 0.8, "green": 1.0, "blue": 1.0},
+            "SDMMC":  {"red": 0.8, "green": 0.9, "blue": 1.0},
+            "I2C":    {"red": 0.8, "green": 1.0, "blue": 0.8},
+            "UART":   {"red": 1.0, "green": 0.95, "blue": 0.8},
+            "USART":  {"red": 1.0, "green": 0.95, "blue": 0.8},
+            "TIM":    {"red": 0.95, "green": 0.95, "blue": 0.95},
+            "ADC":    {"red": 1.0, "green": 0.9, "blue": 0.8},
+            "FDCAN":  {"red": 1.0, "green": 0.8, "blue": 1.0},
+            "USB":    {"red": 0.8, "green": 0.8, "blue": 1.0},
         }
-        
         self.special_palette = {
-            "Reserved": {"red": 0.9, "green": 0.9, "blue": 0.9}, # 灰色
-            "System":   {"red": 1.0, "green": 0.8, "blue": 0.8}, # 警告紅
+            "Reserved": {"red": 0.9, "green": 0.9, "blue": 0.9},
+            "System":   {"red": 1.0, "green": 0.8, "blue": 0.8},
         }
 
     def get_color(self, func_name):
         func_name = str(func_name).strip().upper()
-        
-        # 1. 特殊關鍵字優先
         if "RESERVED" in func_name: return self.special_palette["Reserved"]
         if "SYSTEM" in func_name: return self.special_palette["System"]
         
-        # 2. 智慧解析：分離 "類型" 與 "編號" (例如 SPI10 -> SPI, 10)
         match = re.match(r'^([A-Z]+)(\d+)?', func_name)
-        
         if match:
-            peri_type = match.group(1) # e.g. SPI
-            instance = match.group(2)  # e.g. 10 (可能為 None)
-            
-            # 如果這個類型在我們的色票庫中 (例如 SPI)
+            peri_type = match.group(1)
+            instance = match.group(2)
             if peri_type in self.family_palette:
                 base_color = self.family_palette[peri_type]
-                
-                # 如果有編號 (例如 1, 2, 10...)，根據編號進行顏色微調
-                if instance:
-                    return self._hash_tweak(base_color, int(instance))
-                else:
-                    return base_color
-        
-        # 3. 預設顏色 (白色)
+                if instance: return self._hash_tweak(base_color, int(instance))
+                else: return base_color
         return {"red": 1.0, "green": 1.0, "blue": 1.0}
 
     def _hash_tweak(self, base, seed):
-        # V27: 使用數學算法，確保不同編號有不同的偏移量，但保持在同色系
-        # seed 是編號 (1, 10, 11...)
-        
-        # 利用 sin/cos 產生 -0.15 ~ +0.15 的波動，讓顏色有深淺變化
         import math
         shift_r = math.sin(seed) * 0.15
         shift_g = math.cos(seed) * 0.15
         shift_b = math.sin(seed * 2) * 0.15
-        
         return {
             "red":   max(0.6, min(1.0, base["red"] + shift_r)),
             "green": max(0.6, min(1.0, base["green"] + shift_g)),
             "blue":  max(0.6, min(1.0, base["blue"] + shift_b))
         }
 
+# ================= XML 解析器 (回歸 V28) =================
+class STM32XMLParser:
+    def __init__(self, xml_path):
+        self.xml_path = xml_path
+        self.pin_map = defaultdict(list)
+        self.detected_peripherals = set()
+        # V28: 我們需要保留 AF 表格資料供 Pinout View 顯示
+        # 但 XML 結構比較複雜，為了簡化，Pinout View 的 AF 欄位
+        # 我們還是可以從 GPIO Sheet 讀取 (如果有的話)，或者留空。
+        # 為了完美，我們這裡只負責建立 pin_map (功能地圖)。
+        
+    def parse(self):
+        log(f"📖 讀取 XML (完整功能庫): {self.xml_path}")
+        if not os.path.exists(self.xml_path):
+            log(f"❌ 找不到 XML: {self.xml_path}")
+            sys.exit(1)
+
+        try:
+            tree = ET.parse(self.xml_path)
+            root = tree.getroot()
+            ns = {'ns': 'http://mcd.rou.st.com/modules.php?name=mcu'}
+            pins = root.findall("ns:Pin", ns)
+            
+            for pin in pins:
+                pin_name = pin.attrib.get('Name')
+                if pin_name.startswith("V") and len(pin_name) < 4: continue
+                
+                signals = pin.findall('ns:Signal', ns)
+                for sig in signals:
+                    sig_name = sig.attrib.get('Name')
+                    self.pin_map[pin_name].append(sig_name)
+                    
+                    if sig_name.startswith("GPIO"): continue
+
+                    raw_peri = sig_name.split('_')[0]
+                    peri_type = re.sub(r'\d+', '', raw_peri)
+                    if "OTG" in sig_name: peri_type = "USB_OTG"
+                    self.detected_peripherals.add(peri_type)
+            
+            for p in ["DDR", "FMC", "SDMMC", "QUADSPI", "ADC", "ETH"]:
+                self.detected_peripherals.add(p)
+            
+            for p in self.pin_map: self.pin_map[p].sort()
+            log(f"✅ XML 解析完成，可用 I/O 數: {len(self.pin_map)}")
+        except Exception as e:
+            log(f"❌ XML 解析失敗: {e}")
+            sys.exit(1)
+
+    def get_organized_menu_data(self):
+        categories = {
+            "System_Critical": ["DDR", "FMC", "SDMMC", "QUADSPI"],
+            "System_Core": ["GPIO", "NVIC", "RCC", "SYS", "PWR"],
+            "Connectivity": ["I2C", "SPI", "UART", "USART", "ETH", "USB", "FDCAN"],
+            "Timers": ["TIM", "LPTIM", "RTC"],
+            "Analog": ["ADC", "DAC"],
+            "Multimedia": ["SAI", "I2S", "LTDC"],
+            "Security": ["CRYP", "HASH"]
+        }
+        menu = defaultdict(list)
+        all_peris = sorted(list(self.detected_peripherals))
+        for peri in all_peris:
+            assigned = False
+            for cat, keywords in categories.items():
+                if peri in keywords: menu[cat].append(peri); assigned = True; break
+            if not assigned: menu["Other"].append(peri)
+        return menu, all_peris
+
 # ================= Google Sheet 控制器 =================
 class DashboardController:
     def __init__(self):
         self.client = None; self.sheet = None
         self.color_engine = ColorEngine()
+        self.gpio_af_data = {} # V28: 額外儲存從 Sheet 讀來的 AF 表，僅供顯示用
 
     def connect(self):
         log("🔌 連線 Google Sheet..."); json_content = os.environ.get('GOOGLE_SHEETS_JSON')
@@ -107,13 +158,17 @@ class DashboardController:
             return True
         except: return False
     
-    def get_gpio_sheet_data(self):
+    # V28: 只讀取 AF 表格資料供顯示，不參與邏輯判斷
+    def load_gpio_af_data(self):
         try:
             ws = self.sheet.worksheet(WORKSHEET_GPIO)
-            return ws.get_all_values()
-        except:
-            log(f"❌ 找不到工作表 '{WORKSHEET_GPIO}'，請確認名稱是否正確！")
-            sys.exit(1)
+            rows = ws.get_all_values()
+            for row in rows[1:]:
+                if len(row) < 1: continue
+                pin_name = row[0].strip().upper()
+                while len(row) < 20: row.append("")
+                self.gpio_af_data[pin_name] = row[4:20] # AF0~AF15
+        except: pass
 
     def sync_to_gpio(self, assignments):
         log("🔄 同步資料至 'GPIO' 工作表...")
@@ -136,18 +191,15 @@ class DashboardController:
                     data = assignments[pin]
                     if isinstance(data, dict):
                         raw_func = data.get('desc', '')
-                        if "]" in raw_func: 
-                            content = raw_func.split(']')[1].strip()
-                        else:
-                            content = raw_func
+                        if "]" in raw_func: content = raw_func.split(']')[1].strip()
+                        else: content = raw_func
+                        
                         if "(" in content and ")" in content:
                             start_index = content.find('(')
-                            if start_index != -1:
-                                gateway_val = content[start_index:].strip()
-                            else:
-                                gateway_val = content
-                        else:
-                            gateway_val = content
+                            if start_index != -1: gateway_val = content[start_index:].strip()
+                            else: gateway_val = content
+                        else: gateway_val = content
+                        
                         remark_val = data.get('note', '')
                     else:
                         gateway_val = str(data)
@@ -223,13 +275,13 @@ class DashboardController:
             ws.update(range_name=range_str, values=cell_list)
         except: pass
     
-    def generate_pinout_view(self, planner, parser):
+    def generate_pinout_view(self, planner, dashboard):
         try:
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="200", cols="30")
             ws.clear()
-            assignments = planner.assignments; used_count = len(assignments); free_count = len(parser.pin_map) - used_count
-            ws.update(values=[['Resource Summary', ''], ['Total GPIO', len(parser.pin_map)], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
+            assignments = planner.assignments; used_count = len(assignments); free_count = len(planner.pin_map) - used_count
+            ws.update(values=[['Resource Summary', ''], ['Total GPIO', len(planner.pin_map)], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
             ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
             
             af_headers = [f"AF{i}" for i in range(16)]
@@ -258,7 +310,8 @@ class DashboardController:
                     match = re.search(r'(TIM\d+)', usage)
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
                 
-                af_data = parser.pin_af_data.get(pin, [""] * 16)
+                # V28: 從 dashboard.gpio_af_data 取得 AF 資訊 (如果有)
+                af_data = dashboard.gpio_af_data.get(pin, [""] * 16)
                 rows.append([pin, usage, spec, mode, note] + af_data)
                 
                 func_key = usage
@@ -281,7 +334,6 @@ class DashboardController:
 
             if planner.failed_reports:
                 rows.append(["--- FAILED / MISSING ---", "", "", "", ""] + [""]*16)
-                
                 sep_row = start_row_idx + len(sorted_pins)
                 format_requests.append({
                     "repeatCell": {
@@ -296,16 +348,12 @@ class DashboardController:
                         "fields": "userEnteredFormat.backgroundColor"
                     }
                 })
-                
                 fail_start_row = sep_row + 1
                 for i, report in enumerate(planner.failed_reports):
                     rows.append([report['pin'], report['desc'], "-", report['mode'], ""] + [""]*16)
-                    
                     sig_name = report['desc']
                     func_key = sig_name.split('_')[0] if '_' in sig_name else sig_name
-                    
                     bg_color = self.color_engine.get_color(func_key)
-                    
                     format_requests.append({
                         "repeatCell": {
                             "range": {
@@ -325,57 +373,6 @@ class DashboardController:
             if format_requests: self.sheet.batch_update({"requests": format_requests})
                 
         except Exception as e: log(f"❌ 寫入結果失敗: {e}")
-
-# ================= Sheet 解析器 =================
-class STM32SheetParser:
-    def __init__(self, dashboard):
-        self.dashboard = dashboard
-        self.pin_map = defaultdict(list)
-        self.pin_af_data = {} 
-        self.detected_peripherals = set()
-
-    def parse(self):
-        log(f"📖 讀取 'GPIO' 工作表資料庫...")
-        rows = self.dashboard.get_gpio_sheet_data()
-        for row in rows[1:]: 
-            if len(row) < 1: continue
-            pin_name = row[0].strip().upper()
-            if not pin_name: continue
-            while len(row) < 20: row.append("")
-            af_data = row[4:20] 
-            self.pin_af_data[pin_name] = af_data
-            for cell in af_data:
-                if not cell.strip(): continue
-                signals = cell.split('/')
-                for sig in signals:
-                    sig = sig.strip()
-                    self.pin_map[pin_name].append(sig)
-                    raw_peri = sig.split('_')[0]
-                    peri_type = re.sub(r'\d+', '', raw_peri)
-                    if "OTG" in sig: peri_type = "USB_OTG"
-                    self.detected_peripherals.add(peri_type)
-        for p in ["DDR", "FMC", "SDMMC", "QUADSPI", "ADC", "ETH"]:
-            self.detected_peripherals.add(p)
-        log(f"✅ 資料庫解析完成，可用 I/O 數: {len(self.pin_map)}")
-
-    def get_organized_menu_data(self):
-        categories = {
-            "System_Critical": ["DDR", "FMC", "SDMMC", "QUADSPI"],
-            "System_Core": ["GPIO", "NVIC", "RCC", "SYS", "PWR"],
-            "Connectivity": ["I2C", "SPI", "UART", "USART", "ETH", "USB", "FDCAN"],
-            "Timers": ["TIM", "LPTIM", "RTC"],
-            "Analog": ["ADC", "DAC"],
-            "Multimedia": ["SAI", "I2S", "LTDC"],
-            "Security": ["CRYP", "HASH"]
-        }
-        menu = defaultdict(list)
-        all_peris = sorted(list(self.detected_peripherals))
-        for peri in all_peris:
-            assigned = False
-            for cat, keywords in categories.items():
-                if peri in keywords: menu[cat].append(peri); assigned = True; break
-            if not assigned: menu["Other"].append(peri)
-        return menu, all_peris
 
 # ================= 規劃核心 =================
 class GPIOPlanner:
@@ -525,6 +522,7 @@ class GPIOPlanner:
                     temp_assignment[pin] = f"{func} [{meta}]"
                 else: possible = False
             elif "ADC" in peri_type:
+                # regex: ADC\d+_IN(P)?\d+
                 pin, func = self.find_pin_for_signal(r"ADC\d+_IN(P)?\d+")
                 if pin: temp_assignment[pin] = func
                 else: possible = False
@@ -573,28 +571,39 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V27 - Smart Hash Color)...")
+    log("🚀 程式啟動 (V28 - Hybrid Ultimate)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
-    parser = STM32SheetParser(dashboard); parser.parse()
-    menu_data, all_peris = parser.get_organized_menu_data()
+    
+    # 1. XML Parser 負責讀取完整功能 (Capability)
+    xml_parser = STM32XMLParser(XML_FILENAME)
+    xml_parser.parse()
+    
+    # 2. Dashboard 負責讀取 AF 表格供顯示
+    dashboard.load_gpio_af_data()
+    
+    menu_data, all_peris = xml_parser.get_organized_menu_data()
+    
     log("⚙️ 初始化表單...")
     categories = dashboard.setup_reference_data(menu_data)
     dashboard.init_config_sheet(categories, all_peris)
     log("⚙️ 讀取設定..."); config_data = dashboard.read_config()
-    log("⚙️ 執行規劃..."); planner = GPIOPlanner(parser.pin_map); status_results = []
+    log("⚙️ 執行規劃..."); planner = GPIOPlanner(xml_parser.pin_map); status_results = []
     
     for row_idx, row in enumerate(config_data):
         peri = str(row.get('Peripheral', '')).strip()
         qty_str = str(row.get('Quantity (Groups)', '0'))
         option = str(row.get('Option / Fixed Pin', '')).strip().upper()
         pin_define = str(row.get('Pin Define', '')).strip()
-        if option in parser.pin_map:
+        
+        # 這裡改用 XML 的 pin_map 來檢查腳位存在與否
+        if option in xml_parser.pin_map:
             if not peri: peri = "Reserved" 
             result = planner.allocate_manual(peri, option, row_idx, pin_define)
             status_results.append(result)
             log(f"   🔹 Row {row_idx+2}: 腳位鎖定 {option} -> {result}")
             continue
+
         if not peri:
             if "RGMII" in option or "ETH" in option: peri = "ETH"
             elif "SDMMC" in option: peri = "SDMMC"
@@ -602,11 +611,16 @@ if __name__ == "__main__":
             else:
                 status_results.append("")
                 continue
+
         try: qty = int(qty_str)
         except: qty = 0
+        
         result = planner.allocate_group(peri, qty, option, row_idx, pin_define)
         status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
 
-    log("📝 寫回結果 (Pinout View)..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, parser)
+    # 傳入 dashboard (內含 gpio_af_data) 給 generate_pinout_view
+    log("📝 寫回結果 (Pinout View)..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, dashboard)
+    
     dashboard.sync_to_gpio(planner.assignments)
+    
     log("🎉 執行成功！")
