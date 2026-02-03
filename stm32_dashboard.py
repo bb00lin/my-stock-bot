@@ -60,7 +60,7 @@ class STM32XMLParser:
                     if "OTG" in sig_name: peri_type = "USB_OTG"
                     self.detected_peripherals.add(peri_type)
             
-            # 補充關鍵字
+            # 手動補充關鍵字
             for p in ["DDR", "FMC", "SDMMC", "QUADSPI", "ADC", "ETH"]:
                 self.detected_peripherals.add(p)
             
@@ -119,16 +119,35 @@ class GPIOPlanner:
                     return pin, func
         return None, None
 
-    def allocate_system_critical(self, peri_type, row_idx):
+    def allocate_system_critical(self, peri_type, row_idx, option_str=""):
+        """✨ V9 修正版：支援指定 SDMMC1/SDMMC2"""
         locked_count = 0
-        target_peris = [peri_type]
-        if "DDR" in peri_type: target_peris = ["DDR_", "DDRPHYC_"]
+        target_prefixes = []
+        opt_clean = self.normalize_option(option_str)
         
+        # 1. DDR: 全鎖
+        if "DDR" in peri_type: 
+            target_prefixes = ["DDR_", "DDRPHYC_"]
+        
+        # 2. SDMMC: 判斷 Option
+        elif "SDMMC" in peri_type:
+            if "SDMMC2" in opt_clean: target_prefixes = ["SDMMC2"]
+            elif "SDMMC3" in opt_clean: target_prefixes = ["SDMMC3"]
+            else: target_prefixes = ["SDMMC1"] # 預設只鎖 SDMMC1 (eMMC)
+            
+        # 3. QUADSPI: 預設全鎖 (因為腳位複雜)
+        elif "QUADSPI" in peri_type:
+             target_prefixes = ["QUADSPI"]
+             
+        # 4. FMC: 預設全鎖
+        elif "FMC" in peri_type:
+             target_prefixes = ["FMC"]
+
         for pin, funcs in self.pin_map.items():
             if not self.is_pin_free(pin): continue
             for func in funcs:
                 match = False
-                for t in target_peris:
+                for t in target_prefixes:
                     if func.startswith(t): match = True; break
                 if match:
                     self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical'}
@@ -139,8 +158,10 @@ class GPIOPlanner:
 
     def allocate_group(self, peri_type, count, option_str="", row_idx=0):
         if count == 0: return ""
+        
+        # 修正系統關鍵字進入點，傳入 option_str
         if peri_type in ["DDR", "FMC", "SDMMC", "QUADSPI"]:
-            return self.allocate_system_critical(peri_type, row_idx)
+            return self.allocate_system_critical(peri_type, row_idx, option_str)
 
         results = []
         success_groups = 0
@@ -158,28 +179,34 @@ class GPIOPlanner:
         
         # 搜尋範圍
         search_range = range(1, 15)
-        target_instances = None # 預設任意
+        target_instances = None 
         
         if "PWM" in peri_type:
             if force_32bit: target_instances = ["TIM2", "TIM5"]
             elif force_16bit: target_instances = ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
             
-        elif "ETH" in peri_type:
-            # 優先檢查 Option 是否指定了 ETH1 或 ETH2
+        # ✨ V9 修正: 讓 "RGMII" 或 "ETH" 都能觸發 Ethernet 邏輯
+        elif "ETH" in peri_type or "RGMII" in peri_type or "RMII" in peri_type:
             if "ETH1" in opt_clean: target_instances = ["ETH1"]
             elif "ETH2" in opt_clean: target_instances = ["ETH2"]
-            else: target_instances = ["ETH1", "ETH2"] # 兩者皆可
-            search_range = range(1, 3) # 只跑 1 和 2
+            else: target_instances = ["ETH1", "ETH2"]
+            search_range = range(1, 3) 
 
         for i in search_range:
             if success_groups >= count: break
             
-            inst_name = f"{peri_type}{i}"
+            # 定義 Instance 名稱
             if "PWM" in peri_type: inst_name = "PWM"
-            if "ADC" in peri_type: inst_name = "ADC"
+            elif "ADC" in peri_type: inst_name = "ADC"
+            elif "ETH" in peri_type or "RGMII" in peri_type or "RMII" in peri_type:
+                # 如果使用者在 Peripheral 填 RGMII，我們要把它正規化成 ETHx
+                # 這裡假設如果填 RGMII，i=1 就是 ETH1
+                inst_name = f"ETH{i}"
+            else: 
+                inst_name = f"{peri_type}{i}"
             
-            # 如果有限定 Instance (例如 ETH 指定 ETH2)，則跳過不符合的 i
-            if target_instances and "ETH" in peri_type:
+            # 檢查 Target Instance
+            if target_instances and ("ETH" in peri_type or "RGMII" in peri_type):
                 if inst_name not in target_instances: continue
 
             required_signals = {}
@@ -196,11 +223,16 @@ class GPIOPlanner:
                     required_signals["RTS"] = f"{inst_name}_RTS"
                     required_signals["CTS"] = f"{inst_name}_CTS"
             
-            # ✨ V8 新增: ETH 邏輯 (RMII / RGMII)
-            elif "ETH" in peri_type:
-                # 預設如果沒寫，就當作 RGMII (或是可以報錯)
-                # 這裡定義 RMII 介面
-                if is_rmii:
+            # ✨ V9 修正: 包含 "RGMII" 關鍵字
+            elif "ETH" in peri_type or "RGMII" in peri_type or "RMII" in peri_type:
+                # 優先使用 Option 判斷，如果沒有，再看 Peripheral Name
+                use_rmii = is_rmii or ("RMII" in peri_type)
+                use_rgmii = is_rgmii or ("RGMII" in peri_type)
+                
+                # 如果都沒指定，預設 RMII
+                if not use_rmii and not use_rgmii: use_rmii = True
+                
+                if use_rmii:
                     required_signals = {
                         "REF_CLK": f"{inst_name}_RMII_REF_CLK",
                         "CRS_DV": f"{inst_name}_RMII_CRS_DV",
@@ -209,11 +241,10 @@ class GPIOPlanner:
                         "TX_EN": f"{inst_name}_RMII_TX_EN",
                         "TXD0": f"{inst_name}_RMII_TXD0",
                         "TXD1": f"{inst_name}_RMII_TXD1",
-                        "MDC": f"{inst_name}_MDC",   # Management
+                        "MDC": f"{inst_name}_MDC",   
                         "MDIO": f"{inst_name}_MDIO"
                     }
-                # 定義 RGMII 介面 (1000M)
-                elif is_rgmii:
+                elif use_rgmii:
                     required_signals = {
                         "GTX_CLK": f"{inst_name}_RGMII_GTX_CLK",
                         "RX_CLK": f"{inst_name}_RGMII_RX_CLK",
@@ -230,10 +261,6 @@ class GPIOPlanner:
                         "MDC": f"{inst_name}_MDC",
                         "MDIO": f"{inst_name}_MDIO"
                     }
-                else:
-                    # 未指定，預設找 RMII (因為腳位少，比較容易成功)
-                    # 或是回傳警告，這裡先預設 RMII
-                    required_signals = {"REF_CLK": f"{inst_name}_RMII_REF_CLK"} # 簡化檢查
 
             # === 分配執行 ===
             temp_assignment = {}
@@ -348,7 +375,7 @@ class DashboardController:
         except: pass
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V8 - Ethernet Support)...")
+    log("🚀 程式啟動 (V9 - ETH & SDMMC Fix)...")
     parser = STM32XMLParser(XML_FILENAME); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     dashboard = DashboardController()
