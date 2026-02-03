@@ -133,23 +133,15 @@ class GPIOPlanner:
         locked_count = 0
         target_prefixes = []
         opt_clean = self.normalize_option(option_str)
-        
-        # ✨ V12 更新：SDMMC 匯流排寬度判斷
         is_4bit = "4BIT" in opt_clean
         is_1bit = "1BIT" in opt_clean
         
         if "DDR" in peri_type: target_prefixes = ["DDR_", "DDRPHYC_"]
         elif "SDMMC" in peri_type:
-            instance_prefix = "SDMMC1" # Default
+            instance_prefix = "SDMMC1"
             if "SDMMC2" in opt_clean: instance_prefix = "SDMMC2"
             elif "SDMMC3" in opt_clean: instance_prefix = "SDMMC3"
-            
-            # 定義該 instance 的所有基本訊號 (CK, CMD, D0)
-            # 因為 XML 裡的訊號名稱是完整的 (e.g. SDMMC1_D0), 我們可以用 startswith 鎖定
-            # 但如果選 4BIT，我們要排除 D4, D5, D6, D7
-            # 如果選 1BIT，我們要排除 D1~D7
-            
-            target_prefixes = [instance_prefix] # 預設全鎖 (為了方便，先用廣域，再過濾)
+            target_prefixes = [instance_prefix]
             
         elif "QUADSPI" in peri_type: target_prefixes = ["QUADSPI"]
         elif "FMC" in peri_type: target_prefixes = ["FMC"]
@@ -160,32 +152,22 @@ class GPIOPlanner:
                 match = False
                 for t in target_prefixes:
                     if func.startswith(t): 
-                        # ✨ V12: 針對 SDMMC 的過濾邏輯
                         if "SDMMC" in peri_type:
                             if is_1bit:
-                                # 1BIT: 只要 CK, CMD, D0 (即 CKIN, CK, CMD, D0)
-                                # 排除 D1, D2, D3, D4, D5, D6, D7
-                                if any(x in func for x in ["_D1", "_D2", "_D3", "_D4", "_D5", "_D6", "_D7"]):
-                                    continue # 跳過，不鎖定
+                                if any(x in func for x in ["_D1", "_D2", "_D3", "_D4", "_D5", "_D6", "_D7"]): continue 
                             elif is_4bit:
-                                # 4BIT: 只要 CK, CMD, D0-D3
-                                # 排除 D4, D5, D6, D7
-                                if any(x in func for x in ["_D4", "_D5", "_D6", "_D7"]):
-                                    continue # 跳過，不鎖定
-                        
+                                if any(x in func for x in ["_D4", "_D5", "_D6", "_D7"]): continue 
                         match = True; break
                 
                 if match:
                     self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical'}
                     locked_count += 1
                     break
-                    
         if locked_count > 0: return f"✅ Reserved {locked_count} pins"
         else: return "⚠️ No pins found/locked"
 
     def allocate_group(self, peri_type, count, option_str="", row_idx=0):
         if count == 0: return ""
-        # 傳入 option_str 以便判斷 4BIT
         if peri_type in ["DDR", "FMC", "SDMMC", "QUADSPI"]:
             return self.allocate_system_critical(peri_type, row_idx, option_str)
 
@@ -377,7 +359,7 @@ class DashboardController:
         except: pass
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V12 - Bus Width Support)...")
+    log("🚀 程式啟動 (V13 - Smart Lock)...")
     parser = STM32XMLParser(XML_FILENAME); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     dashboard = DashboardController()
@@ -392,9 +374,18 @@ if __name__ == "__main__":
         peri = str(row.get('Peripheral', '')).strip()
         qty_str = str(row.get('Quantity (Groups)', '0'))
         option = str(row.get('Option / Fixed Pin', '')).strip()
-        if not peri: status_results.append(""); continue
+        
+        # ✨ V13 新邏輯：如果 Peripheral 空白，但 Option 看起來像腳位，自動視為 "Reserved"
+        if not peri:
+            if re.match(r'^P[A-K]\d+$', option):
+                peri = "Reserved"
+            else:
+                status_results.append("")
+                continue
+
         try: qty = int(qty_str)
         except: qty = 0
+        
         is_fixed_pin = re.match(r'^P[A-K]\d+$', option)
         if is_fixed_pin: result = planner.allocate_manual(peri, option, row_idx)
         else: result = planner.allocate_group(peri, qty, option, row_idx)
