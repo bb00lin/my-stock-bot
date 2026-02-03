@@ -18,6 +18,7 @@ WORKSHEET_CONFIG = 'Config_Panel'
 WORKSHEET_RESULT = 'Pinout_View'
 WORKSHEET_GPIO = 'GPIO'
 WORKSHEET_VALIDATION = 'Data_Validation'
+WORKSHEET_REF = 'Reference_Data' # 補上漏掉的定義
 
 TIMER_METADATA = {
     "TIM1": "16-bit, Advanced", "TIM8": "16-bit, Advanced",
@@ -27,8 +28,52 @@ TIMER_METADATA = {
     "TIM6": "16-bit, Basic",    "TIM7": "16-bit, Basic"
 }
 
+# ✨ 新增：功能權重表 (分數越高代表該腳位越珍貴，分配普通 GPIO 時會盡量避開)
+AF_WEIGHTS = {
+    'ETH': 100,  # 網路最珍貴
+    'USB': 90,   # USB 次之
+    'CAN': 80,   # FDCAN
+    'FDCAN': 80,
+    'I2C': 60,
+    'SPI': 60,
+    'UART': 50,
+    'USART': 50,
+    'TIM': 20,   # Timer 較多，相對不珍貴
+    'ADC': 30,
+    'SDMMC': 70,
+    'FMC': 70,
+    'QUADSPI': 70
+}
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+# ✨ 新增：名稱展開工具
+def expand_pin_names(name_pattern, quantity):
+    """
+    解析 'BID 1-3' 或 'LED 1~3' 並展開名稱。
+    """
+    if not name_pattern:
+        return [f"GPIO_{i+1}" for i in range(quantity)]
+
+    # Regex: 抓取 "前綴 數字~數字" 或 "前綴 數字-數字"
+    match = re.search(r'^(.*?)\s*(\d+)\s*[~-]\s*(\d+)$', name_pattern)
+    
+    if match:
+        prefix = match.group(1).strip()
+        start = int(match.group(2))
+        end = int(match.group(3))
+        
+        # 校正數量：優先滿足 Quantity
+        current_count = end - start + 1
+        if current_count != quantity:
+            end = start + quantity - 1
+            
+        return [f"{prefix}{i}" for i in range(start, end + 1)]
+    
+    else:
+        # 如果沒有範圍符號，例如只寫 "LED"，則變成 LED1, LED2...
+        return [f"{name_pattern}{i+1}" for i in range(quantity)]
 
 # ================= 配色引擎 =================
 class ColorEngine:
@@ -44,6 +89,7 @@ class ColorEngine:
             "ADC":    {"red": 1.0, "green": 0.9, "blue": 0.8},
             "FDCAN":  {"red": 1.0, "green": 0.8, "blue": 1.0},
             "USB":    {"red": 0.8, "green": 0.8, "blue": 1.0},
+            "GPIO":   {"red": 0.9, "green": 0.9, "blue": 0.9}, # 一般 GPIO
         }
         self.special_palette = {
             "Reserved": {"red": 0.9, "green": 0.9, "blue": 0.9},
@@ -54,6 +100,7 @@ class ColorEngine:
         func_name = str(func_name).strip().upper()
         if "RESERVED" in func_name: return self.special_palette["Reserved"]
         if "SYSTEM" in func_name: return self.special_palette["System"]
+        if "GPIO" in func_name: return self.family_palette["GPIO"]
         
         match = re.match(r'^([A-Z]+)(\d+)?', func_name)
         if match:
@@ -147,7 +194,15 @@ class DashboardController:
 
     def connect(self):
         log("🔌 連線 Google Sheet..."); json_content = os.environ.get('GOOGLE_SHEETS_JSON')
-        if not json_content: return False
+        if not json_content:
+             # 本機除錯用
+             if os.path.exists('credentials.json'):
+                 log("⚠️ 使用本機 credentials.json")
+                 creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
+                 self.client = gspread.authorize(creds)
+                 self.sheet = self.client.open(SPREADSHEET_NAME)
+                 return True
+             return False
         try:
             creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_content), ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
             self.client = gspread.authorize(creds); self.sheet = self.client.open(SPREADSHEET_NAME)
@@ -202,11 +257,9 @@ class DashboardController:
                     continue
                 
                 if trust_mode == 'GPIO':
-                    # 如果信任 GPIO Sheet，這就是 "被過濾掉" 的功能 (Good)
                     report_rows.append([pin, "✅ Filtered (By Sheet)", original_name, "Validly removed because Sheet doesn't have it."])
                     bg_color = {"red": 0.9, "green": 1.0, "blue": 0.9} # Light Green
                 else:
-                    # 如果信任 XML，這就是 "表格漏寫" (Risk)
                     report_rows.append([pin, "⚠️ XML Only (Risk)", original_name, "XML claims it exists, but Sheet missing."])
                     bg_color = {"red": 1.0, "green": 0.8, "blue": 0.8} # Light Red
 
@@ -314,6 +367,7 @@ class DashboardController:
                 ws.update(range_name=range_str, values=col_values)
             return categories
         except: return []
+
     def init_config_sheet(self, categories, all_peris):
         try:
             try: ws = self.sheet.worksheet(WORKSHEET_CONFIG)
@@ -526,6 +580,75 @@ class GPIOPlanner:
     def normalize_option(self, text):
         if not text: return ""
         return re.sub(r'[\s_\-,/]+', '', str(text).upper())
+
+    # ✨ 新增：計算腳位成本 (權重演算法)
+    def calculate_pin_cost(self, pin, current_peripherals):
+        """
+        計算腳位的「機會成本」。分數越低代表越適合拿來當雜魚 GPIO。
+        """
+        funcs = self.pin_map.get(pin, [])
+        cost = 0
+        
+        # 基礎成本：功能越多越貴 (保留彈性)
+        cost += len(funcs) * 5
+        
+        for func in funcs:
+            # 解析功能類型 (例如 UART1_TX -> UART)
+            type_match = re.match(r'([A-Z]+)', func)
+            if type_match:
+                af_type = type_match.group(1)
+                weight = AF_WEIGHTS.get(af_type, 10)
+                
+                # 智慧避讓邏輯：
+                # 該腳位支援的功能 (af_type) 如果在現有 Config 中已經用到 (例如已用 UART1)，
+                # 系統應盡量保留其他 UART 腳位給未來擴充，所以加重成本。
+                if any(af_type in p for p in current_peripherals):
+                    cost += weight * 1.5
+                else:
+                    cost += weight
+
+        return cost
+
+    # ✨ 新增：智慧分配 GPIO
+    def allocate_smart_gpio(self, count, row_idx, pin_define, current_peripherals):
+        """
+        從剩餘腳位中找出 N 個成本最低的腳位
+        """
+        candidates = []
+        
+        for pin_name in self.pin_map.keys():
+            if not self.is_pin_free(pin_name):
+                continue
+            
+            # 排除純電源腳或其他不該被使用的腳 (如果有漏網之魚)
+            if pin_name.startswith("V") and len(pin_name) < 4: continue
+
+            cost = self.calculate_pin_cost(pin_name, current_peripherals)
+            candidates.append({'pin': pin_name, 'cost': cost})
+        
+        # 依照成本由低到高排序 (越低越好 -> 越閒置)
+        candidates.sort(key=lambda x: x['cost'])
+        
+        if len(candidates) < count:
+            return f"❌ Insufficient ({len(candidates)}/{count})"
+            
+        selected = candidates[:count]
+        
+        # 解析名稱 (例如 BID 1-3)
+        pin_names = expand_pin_names(pin_define, count)
+        
+        for i in range(count):
+            pin = selected[i]['pin']
+            name = pin_names[i]
+            # 寫入分配
+            self.assignments[pin] = {
+                'desc': f"[GPIO] {name}", 
+                'row': row_idx, 
+                'mode': 'Smart GPIO', 
+                'note': name
+            }
+            
+        return f"✅ Smart Allocated ({count})"
 
     def find_pin_for_signal(self, signal_regex, exclude_pins=[], preferred_instances=None, exclude_signals=[]):
         if preferred_instances:
@@ -754,7 +877,7 @@ def filter_map_by_sheet(xml_map, dashboard):
     return filtered_map
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V37 - Interactive Trust Mode)...")
+    log("🚀 程式啟動 (V37 - Smart GPIO & Manual Mode)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
@@ -797,12 +920,26 @@ if __name__ == "__main__":
     # 使用 active_pin_map (可能是過濾過的) 來進行規劃
     log("⚙️ 執行規劃..."); planner = GPIOPlanner(active_pin_map); status_results = []
     
+    # 收集整個計畫中用到的周邊類型 (給智慧權重計算使用)
+    all_peripherals_in_plan = [str(r.get('Peripheral', '')).upper() for r in config_data]
+
     for row_idx, row in enumerate(config_data):
-        peri = str(row.get('Peripheral', '')).strip()
+        peri = str(row.get('Peripheral', '')).strip().upper()
         qty_str = str(row.get('Quantity (Groups)', '0'))
         option = str(row.get('Option / Fixed Pin', '')).strip().upper()
         pin_define = str(row.get('Pin Define', '')).strip()
         
+        try: qty = int(qty_str)
+        except: qty = 0
+
+        # ✨ 優先檢查：如果是智慧 GPIO 模式
+        if peri == "GPIO":
+            log(f"   🔹 Row {row_idx+2}: 智慧分配 GPIO (x{qty})...")
+            result = planner.allocate_smart_gpio(qty, row_idx, pin_define, all_peripherals_in_plan)
+            status_results.append(result)
+            log(f"     -> {result}")
+            continue
+
         # 檢查是否存在時，也要查 active_pin_map
         if option in active_pin_map:
             if not peri: peri = "Reserved" 
@@ -818,9 +955,6 @@ if __name__ == "__main__":
             else:
                 status_results.append("")
                 continue
-
-        try: qty = int(qty_str)
-        except: qty = 0
         
         result = planner.allocate_group(peri, qty, option, row_idx, pin_define)
         status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
