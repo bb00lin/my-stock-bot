@@ -278,31 +278,30 @@ class DashboardController:
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="200", cols="30")
             
+            # ✨ V33: 強制備份 Remark，不依賴 Header 名稱
             try:
                 existing_data = ws.get_all_values()
                 if len(existing_data) > 0:
-                    headers = existing_data[0]
-                    if "Remark" in headers:
-                        rem_col_idx = headers.index("Remark")
-                        name_col_idx = 0 
-                        for row in existing_data[1:]:
-                            if len(row) > rem_col_idx and row[name_col_idx]:
-                                pin_name = row[name_col_idx].strip().upper()
-                                remark_val = row[rem_col_idx]
-                                if remark_val:
-                                    preserved_remarks[pin_name] = remark_val
+                    # 預設 A 欄是 Pin Name (Index 0), F 欄是 Remark (Index 5)
+                    name_col_idx = 0 
+                    rem_col_idx = 5 
+                    
+                    for row in existing_data[1:]: # Skip header
+                        if len(row) > rem_col_idx and row[name_col_idx]:
+                            pin_name = row[name_col_idx].strip().upper()
+                            remark_val = row[rem_col_idx]
+                            if remark_val:
+                                preserved_remarks[pin_name] = remark_val
             except Exception as e:
                 log(f"⚠️ 讀取舊 Remark 失敗: {e}")
 
             ws.clear()
             
-            # ✨ V32.1 Fix: 正確定義 assignments 變數
             assignments = planner.assignments 
             
             xml_total = len(planner.pin_map)
-            xml_used = len(assignments) # 這裡用到 assignments
+            xml_used = len(assignments) 
             xml_free = xml_total - xml_used
-            
             sheet_total = len(dashboard.gpio_af_data)
             sheet_used = len([p for p in assignments if p in dashboard.gpio_af_data])
             sheet_free = sheet_total - sheet_used
@@ -323,6 +322,7 @@ class DashboardController:
             sheet_id = ws.id
             start_row_idx = 6 
             
+            # ✨ V33: 在上色前，先強制將背景色重置為白色
             format_requests.append({
                 "repeatCell": {
                     "range": {
@@ -356,6 +356,8 @@ class DashboardController:
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
                 
                 af_data = dashboard.gpio_af_data.get(pin, [""] * 16)
+                
+                # ✨ V33: 填回保留的 Remark
                 user_remark = preserved_remarks.get(pin, "")
                 
                 rows.append([pin, usage, spec, mode, note, user_remark] + af_data)
@@ -639,7 +641,7 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V32.1 - Hotfix Assignments)...")
+    log("🚀 程式啟動 (V33 - Safe Remark Protection)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
