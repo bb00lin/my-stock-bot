@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime
 
 # ================= 設定區 =================
-XML_FILENAME = "STM32MP133CAFx.xml" # 恢復 XML 作為核心資料源
+XML_FILENAME = "STM32MP133CAFx.xml"
 SPREADSHEET_NAME = 'STM32_GPIO_Planner'
 WORKSHEET_CONFIG = 'Config_Panel'
 WORKSHEET_RESULT = 'Pinout_View'
@@ -75,16 +75,12 @@ class ColorEngine:
             "blue":  max(0.6, min(1.0, base["blue"] + shift_b))
         }
 
-# ================= XML 解析器 (回歸 V28) =================
+# ================= XML 解析器 =================
 class STM32XMLParser:
     def __init__(self, xml_path):
         self.xml_path = xml_path
         self.pin_map = defaultdict(list)
         self.detected_peripherals = set()
-        # V28: 我們需要保留 AF 表格資料供 Pinout View 顯示
-        # 但 XML 結構比較複雜，為了簡化，Pinout View 的 AF 欄位
-        # 我們還是可以從 GPIO Sheet 讀取 (如果有的話)，或者留空。
-        # 為了完美，我們這裡只負責建立 pin_map (功能地圖)。
         
     def parse(self):
         log(f"📖 讀取 XML (完整功能庫): {self.xml_path}")
@@ -106,9 +102,7 @@ class STM32XMLParser:
                 for sig in signals:
                     sig_name = sig.attrib.get('Name')
                     self.pin_map[pin_name].append(sig_name)
-                    
                     if sig_name.startswith("GPIO"): continue
-
                     raw_peri = sig_name.split('_')[0]
                     peri_type = re.sub(r'\d+', '', raw_peri)
                     if "OTG" in sig_name: peri_type = "USB_OTG"
@@ -147,7 +141,7 @@ class DashboardController:
     def __init__(self):
         self.client = None; self.sheet = None
         self.color_engine = ColorEngine()
-        self.gpio_af_data = {} # V28: 額外儲存從 Sheet 讀來的 AF 表，僅供顯示用
+        self.gpio_af_data = {}
 
     def connect(self):
         log("🔌 連線 Google Sheet..."); json_content = os.environ.get('GOOGLE_SHEETS_JSON')
@@ -158,7 +152,6 @@ class DashboardController:
             return True
         except: return False
     
-    # V28: 只讀取 AF 表格資料供顯示，不參與邏輯判斷
     def load_gpio_af_data(self):
         try:
             ws = self.sheet.worksheet(WORKSHEET_GPIO)
@@ -167,7 +160,7 @@ class DashboardController:
                 if len(row) < 1: continue
                 pin_name = row[0].strip().upper()
                 while len(row) < 20: row.append("")
-                self.gpio_af_data[pin_name] = row[4:20] # AF0~AF15
+                self.gpio_af_data[pin_name] = row[4:20] 
         except: pass
 
     def sync_to_gpio(self, assignments):
@@ -279,18 +272,57 @@ class DashboardController:
         try:
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="200", cols="30")
+            
+            # ✨ V29: 在清除之前，先讀取並備份 Remark 欄位 (F欄)
+            preserved_remarks = {}
+            try:
+                existing_data = ws.get_all_values()
+                if len(existing_data) > 0:
+                    headers = existing_data[0]
+                    # 尋找 Remark 欄位 (假設標題叫 "Remark")
+                    if "Remark" in headers:
+                        rem_col_idx = headers.index("Remark")
+                        name_col_idx = 0 # 假設 A 欄是 Name
+                        for row in existing_data[1:]:
+                            if len(row) > rem_col_idx and row[name_col_idx]:
+                                pin_name = row[name_col_idx].strip().upper()
+                                remark_val = row[rem_col_idx]
+                                if remark_val:
+                                    preserved_remarks[pin_name] = remark_val
+            except Exception as e:
+                log(f"⚠️ 讀取舊 Remark 失敗 (可能為首次執行): {e}")
+
             ws.clear()
+            
             assignments = planner.assignments; used_count = len(assignments); free_count = len(planner.pin_map) - used_count
             ws.update(values=[['Resource Summary', ''], ['Total GPIO', len(planner.pin_map)], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
             ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
             
+            # ✨ V29: 插入 Remark 到欄位 5 (F欄)
+            # A=0, B=1, C=2, D=3, E=4, F=5, G=6...
             af_headers = [f"AF{i}" for i in range(16)]
-            headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define"] + af_headers
+            headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define", "Remark"] + af_headers
             rows = [headers]
             
             format_requests = []
             sheet_id = ws.id
             start_row_idx = 6 
+            
+            # ✨ V29: 先清除所有背景顏色 (全白)
+            # 清除 A6 到 V500 的背景色
+            format_requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 5, # Row 6 (Header)
+                        "endRowIndex": 500,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 22 # A to V
+                    },
+                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}}},
+                    "fields": "userEnteredFormat.backgroundColor"
+                }
+            })
             
             sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p].get('row', 999) if isinstance(assignments[p], dict) else 999, p))
             
@@ -310,9 +342,12 @@ class DashboardController:
                     match = re.search(r'(TIM\d+)', usage)
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
                 
-                # V28: 從 dashboard.gpio_af_data 取得 AF 資訊 (如果有)
                 af_data = dashboard.gpio_af_data.get(pin, [""] * 16)
-                rows.append([pin, usage, spec, mode, note] + af_data)
+                
+                # ✨ V29: 填回保留的 Remark
+                user_remark = preserved_remarks.get(pin, "")
+                
+                rows.append([pin, usage, spec, mode, note, user_remark] + af_data)
                 
                 func_key = usage
                 if "]" in usage: func_key = usage.split(']')[1].strip().split('(')[0].strip()
@@ -325,7 +360,7 @@ class DashboardController:
                             "startRowIndex": start_row_idx + i,
                             "endRowIndex": start_row_idx + i + 1,
                             "startColumnIndex": 0,
-                            "endColumnIndex": 21
+                            "endColumnIndex": 22
                         },
                         "cell": {"userEnteredFormat": {"backgroundColor": bg_color}},
                         "fields": "userEnteredFormat.backgroundColor"
@@ -333,7 +368,8 @@ class DashboardController:
                 })
 
             if planner.failed_reports:
-                rows.append(["--- FAILED / MISSING ---", "", "", "", ""] + [""]*16)
+                rows.append(["--- FAILED / MISSING ---", "", "", "", "", ""] + [""]*16)
+                
                 sep_row = start_row_idx + len(sorted_pins)
                 format_requests.append({
                     "repeatCell": {
@@ -342,18 +378,21 @@ class DashboardController:
                             "startRowIndex": sep_row,
                             "endRowIndex": sep_row + 1,
                             "startColumnIndex": 0,
-                            "endColumnIndex": 21
+                            "endColumnIndex": 22
                         },
                         "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1.0, "green": 0.8, "blue": 0.8}}},
                         "fields": "userEnteredFormat.backgroundColor"
                     }
                 })
+                
                 fail_start_row = sep_row + 1
                 for i, report in enumerate(planner.failed_reports):
-                    rows.append([report['pin'], report['desc'], "-", report['mode'], ""] + [""]*16)
+                    rows.append([report['pin'], report['desc'], "-", report['mode'], "", ""] + [""]*16)
+                    
                     sig_name = report['desc']
                     func_key = sig_name.split('_')[0] if '_' in sig_name else sig_name
                     bg_color = self.color_engine.get_color(func_key)
+                    
                     format_requests.append({
                         "repeatCell": {
                             "range": {
@@ -361,7 +400,7 @@ class DashboardController:
                                 "startRowIndex": fail_start_row + i,
                                 "endRowIndex": fail_start_row + i + 1,
                                 "startColumnIndex": 0,
-                                "endColumnIndex": 21
+                                "endColumnIndex": 22
                             },
                             "cell": {"userEnteredFormat": {"backgroundColor": bg_color}},
                             "fields": "userEnteredFormat.backgroundColor"
@@ -369,7 +408,7 @@ class DashboardController:
                     })
             
             ws.update(values=rows, range_name='A6')
-            ws.format('A6:U6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
+            ws.format('A6:V6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
             if format_requests: self.sheet.batch_update({"requests": format_requests})
                 
         except Exception as e: log(f"❌ 寫入結果失敗: {e}")
@@ -522,7 +561,6 @@ class GPIOPlanner:
                     temp_assignment[pin] = f"{func} [{meta}]"
                 else: possible = False
             elif "ADC" in peri_type:
-                # regex: ADC\d+_IN(P)?\d+
                 pin, func = self.find_pin_for_signal(r"ADC\d+_IN(P)?\d+")
                 if pin: temp_assignment[pin] = func
                 else: possible = False
@@ -571,11 +609,11 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V28 - Hybrid Ultimate)...")
+    log("🚀 程式啟動 (V29 - Remark Preservation & Color Reset)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
-    # 1. XML Parser 負責讀取完整功能 (Capability)
+    # 1. XML Parser 負責讀取完整功能
     xml_parser = STM32XMLParser(XML_FILENAME)
     xml_parser.parse()
     
@@ -596,7 +634,6 @@ if __name__ == "__main__":
         option = str(row.get('Option / Fixed Pin', '')).strip().upper()
         pin_define = str(row.get('Pin Define', '')).strip()
         
-        # 這裡改用 XML 的 pin_map 來檢查腳位存在與否
         if option in xml_parser.pin_map:
             if not peri: peri = "Reserved" 
             result = planner.allocate_manual(peri, option, row_idx, pin_define)
@@ -618,7 +655,6 @@ if __name__ == "__main__":
         result = planner.allocate_group(peri, qty, option, row_idx, pin_define)
         status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
 
-    # 傳入 dashboard (內含 gpio_af_data) 給 generate_pinout_view
     log("📝 寫回結果 (Pinout View)..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, dashboard)
     
     dashboard.sync_to_gpio(planner.assignments)
