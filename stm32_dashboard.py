@@ -68,8 +68,6 @@ class DashboardController:
                 
                 if pin in assignments:
                     data = assignments[pin]
-                    
-                    # ✨ V21 安全檢查：確保 data 是字典
                     if isinstance(data, dict):
                         raw_func = data.get('desc', '')
                         if "]" in raw_func: 
@@ -77,7 +75,6 @@ class DashboardController:
                             if "(" in gateway_val: gateway_val = gateway_val.split('(')[0].strip()
                         else:
                             gateway_val = raw_func
-                        
                         remark_val = data.get('note', '')
                     else:
                         gateway_val = str(data)
@@ -88,7 +85,14 @@ class DashboardController:
                 updates.append({'range': f'D{sheet_row}', 'values': [[remark_val]]})
 
             if updates:
-                ws.batch_update({'data': updates, 'valueInputOption': 'RAW'})
+                # ✨ V22: 修正 batch_update 參數傳遞方式
+                try:
+                    # 嘗試新版 gspread 語法
+                    ws.batch_update(updates, value_input_option='RAW')
+                except TypeError:
+                    # 相容舊版 gspread (若有需要)
+                    ws.batch_update(updates)
+                    
                 log("✅ GPIO 表格同步完成！")
             
         except Exception as e:
@@ -467,7 +471,7 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V21 - SPI Fix & Type Safe)...")
+    log("🚀 程式啟動 (V22 - Batch Update Fix)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
