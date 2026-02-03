@@ -52,9 +52,7 @@ class STM32XMLParser:
                 signals = pin.findall('ns:Signal', ns)
                 for sig in signals:
                     sig_name = sig.attrib.get('Name')
-                    # 記錄所有功能
                     self.pin_map[pin_name].append(sig_name)
-                    
                     if sig_name.startswith("GPIO"): continue
 
                     raw_peri = sig_name.split('_')[0]
@@ -67,6 +65,7 @@ class STM32XMLParser:
             self.detected_peripherals.add("FMC")
             self.detected_peripherals.add("SDMMC")
             self.detected_peripherals.add("QUADSPI")
+            self.detected_peripherals.add("ADC") # 確保 ADC 有被列入
             
             for p in self.pin_map: self.pin_map[p].sort()
             log(f"✅ XML 解析完成，可用 I/O 數: {len(self.pin_map)}")
@@ -86,14 +85,10 @@ class STM32XMLParser:
         }
         menu = defaultdict(list)
         all_peris = sorted(list(self.detected_peripherals))
-        
         for peri in all_peris:
             assigned = False
             for cat, keywords in categories.items():
-                if peri in keywords:
-                    menu[cat].append(peri)
-                    assigned = True
-                    break
+                if peri in keywords: menu[cat].append(peri); assigned = True; break
             if not assigned: menu["Other"].append(peri)
         return menu, all_peris
 
@@ -111,7 +106,6 @@ class GPIOPlanner:
         return re.sub(r'[\s_\-,/]+', '', str(text).upper())
 
     def find_pin_for_signal(self, signal_regex, exclude_pins=[], preferred_instances=None):
-        # 1. 優先搜尋
         if preferred_instances:
             for pin, funcs in self.pin_map.items():
                 if not self.is_pin_free(pin) or pin in exclude_pins: continue
@@ -121,7 +115,6 @@ class GPIOPlanner:
                             if func.startswith(pref): return pin, func
             return None, None
 
-        # 2. 一般搜尋
         for pin, funcs in self.pin_map.items():
             if not self.is_pin_free(pin) or pin in exclude_pins: continue
             for func in funcs:
@@ -130,32 +123,25 @@ class GPIOPlanner:
         return None, None
 
     def allocate_system_critical(self, peri_type, row_idx):
-        """鎖定系統關鍵腳位"""
         locked_count = 0
-        if "DDR" in peri_type:
-            for pin, funcs in self.pin_map.items():
-                if not self.is_pin_free(pin): continue
-                for func in funcs:
-                    if func.startswith("DDR_") or func.startswith("DDRPHYC_"):
-                        self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical'}
-                        locked_count += 1
-                        break
-        else:
-            target_peri = peri_type 
-            for pin, funcs in self.pin_map.items():
-                if not self.is_pin_free(pin): continue
-                for func in funcs:
-                    if func.startswith(target_peri):
-                         self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical'}
-                         locked_count += 1
-                         break
+        target_peris = [peri_type]
+        if "DDR" in peri_type: target_peris = ["DDR_", "DDRPHYC_"]
+        
+        for pin, funcs in self.pin_map.items():
+            if not self.is_pin_free(pin): continue
+            for func in funcs:
+                match = False
+                for t in target_peris:
+                    if func.startswith(t): match = True; break
+                if match:
+                    self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical'}
+                    locked_count += 1
+                    break
         if locked_count > 0: return f"✅ Reserved {locked_count} pins"
         else: return "⚠️ No pins found/locked"
 
     def allocate_group(self, peri_type, count, option_str="", row_idx=0):
         if count == 0: return ""
-        
-        # 攔截系統關鍵字
         if peri_type in ["DDR", "FMC", "SDMMC", "QUADSPI"]:
             return self.allocate_system_critical(peri_type, row_idx)
 
@@ -175,9 +161,14 @@ class GPIOPlanner:
 
         for i in search_range:
             if success_groups >= count: break
-            inst_name = "PWM" if "PWM" in peri_type else f"{peri_type}{i}"
+            
+            # 定義 Instance 名稱
+            if "PWM" in peri_type: inst_name = "PWM"
+            elif "ADC" in peri_type: inst_name = "ADC" # ADC 不強制區分 ADC1/ADC2，視為資源池
+            else: inst_name = f"{peri_type}{i}"
             
             required_signals = {}
+            # 依據週邊類型定義需求
             if "I2C" in peri_type:
                 required_signals = {"SCL": f"{inst_name}_SCL", "SDA": f"{inst_name}_SDA"}
             elif "SPI" in peri_type:
@@ -186,13 +177,14 @@ class GPIOPlanner:
             elif "UART" in peri_type or "USART" in peri_type:
                 required_signals = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
                 if needs_rts_cts:
-                    # 修正處：將賦值分開寫
                     required_signals["RTS"] = f"{inst_name}_RTS"
                     required_signals["CTS"] = f"{inst_name}_CTS"
-
+            
+            # --- 分配邏輯 ---
             temp_assignment = {}
             possible = True
             
+            # A. 單一腳位類型 (PWM, ADC)
             if "PWM" in peri_type:
                 pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_timers)
                 if pin:
@@ -200,6 +192,16 @@ class GPIOPlanner:
                     meta = TIMER_METADATA.get(tim_inst, "Unknown")
                     temp_assignment[pin] = f"{func} [{meta}]"
                 else: possible = False
+
+            # ✨ V7.2 新增 ADC 邏輯
+            elif "ADC" in peri_type:
+                # 尋找任意 ADC 輸入 (IN 或 INP)
+                pin, func = self.find_pin_for_signal(r"ADC\d+_IN(P)?\d+")
+                if pin:
+                    temp_assignment[pin] = func
+                else: possible = False
+
+            # B. 多腳位群組類型 (I2C, SPI, UART)
             else:
                 for role, sig_name in required_signals.items():
                     pin, func = self.find_pin_for_signal(f"^{sig_name}$", exclude_pins=temp_assignment.keys())
@@ -211,6 +213,14 @@ class GPIOPlanner:
                     self.assignments[p] = {'desc': f"[Auto] {inst_name} ({f})", 'row': row_idx, 'mode': 'Auto'}
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
+            
+            # 如果是 ADC 或 PWM，即使成功了也不要跳出 i 迴圈，因為還有其他 channel 可用
+            # 但為了簡化，這裡 allocate_group 是針對 "數量"，上面的 loop 是針對 "Instance 1~15"
+            # 對於 PWM/ADC 這種 Resource Pool 型，我們不需要依賴 i 來區分 Instance
+            # 所以如果成功分配了一個，我們就不需要繼續跑 i 迴圈去試探 "ADC2", "ADC3"... 
+            # 因為 find_pin_for_signal 已經會全域搜尋了。
+            if ("PWM" in peri_type or "ADC" in peri_type) and possible:
+                pass # 繼續下一次 while count 檢查 (外層邏輯控制)
 
         if success_groups >= count: return f"✅ OK ({success_groups}/{count})"
         else: return f"❌ Insufficient ({success_groups}/{count})"
@@ -267,7 +277,12 @@ class DashboardController:
         try: return self.sheet.worksheet(WORKSHEET_CONFIG).get_all_records()
         except: return []
     def write_status_back(self, status_list):
-        try: ws = self.sheet.worksheet(WORKSHEET_CONFIG); cell_list = [[s] for s in status_list]; range_str = f"E2:E{1 + len(status_list)}"; ws.update(range_name=range_str, values=cell_list)
+        try:
+            ws = self.sheet.worksheet(WORKSHEET_CONFIG)
+            cell_list = [[s] for s in status_list]
+            range_str = f"E2:E{1 + len(status_list)}"
+            # 修正 DeprecationWarning: 使用具名參數
+            ws.update(range_name=range_str, values=cell_list)
         except: pass
     def generate_pinout_view(self, assignments, total_pins):
         try:
@@ -275,7 +290,8 @@ class DashboardController:
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="100", cols="20")
             ws.clear()
             used_count = len(assignments); free_count = total_pins - used_count
-            ws.update('A1:B4', [['Resource Summary', ''], ['Total GPIO', total_pins], ['Used GPIO', used_count], ['Free GPIO', free_count]])
+            # 修正 DeprecationWarning
+            ws.update(values=[['Resource Summary', ''], ['Total GPIO', total_pins], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
             ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
             headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode"]
             rows = [headers]
@@ -286,12 +302,13 @@ class DashboardController:
                     match = re.search(r'(TIM\d+)', usage)
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
                 rows.append([pin, usage, spec, mode])
-            ws.update('A6', rows)
+            # 修正 DeprecationWarning
+            ws.update(values=rows, range_name='A6')
             ws.format('A6:D6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
         except: pass
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V7.1 - 修正版)...")
+    log("🚀 程式啟動 (V7.2 - ADC Fix)...")
     parser = STM32XMLParser(XML_FILENAME); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     dashboard = DashboardController()
