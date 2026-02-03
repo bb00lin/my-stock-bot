@@ -171,56 +171,59 @@ class DashboardController:
                             self.sheet_capabilities[pin_name].add(f.strip())
         except: pass
 
-    # ✨ V36: 智慧模糊比對 (Smart Fuzzy Matching)
     def normalize_name(self, name):
-        # 移除空格、底線、連字號，並轉大寫
-        # 例如: "I2C1_SCL" -> "I2C1SCL", "I2C 1 SCL" -> "I2C1SCL"
         return re.sub(r'[\s_\-]+', '', str(name).upper())
 
-    def generate_validation_report(self, xml_pin_map):
-        log("🔍 執行資料驗證 (Smart Fuzzy Matching)...")
+    # ✨ V37: 支援 Trust Mode 參數
+    def generate_validation_report(self, xml_pin_map, trust_mode):
+        log(f"🔍 執行資料驗證 (Trust Mode: {trust_mode})...")
         report_rows = [["Pin Name", "Discrepancy Type", "Function Name", "Description"]]
         format_requests = []
         
         all_pins = sorted(list(set(list(xml_pin_map.keys()) + list(self.sheet_capabilities.keys()))))
-        
         row_idx = 1
         
         for pin in all_pins:
             xml_raw_list = xml_pin_map.get(pin, [])
             sheet_raw_set = self.sheet_capabilities.get(pin, set())
             
-            # 建立 "標準化名稱 -> 原始名稱" 的對照表
             xml_norm_map = {self.normalize_name(f): f for f in xml_raw_list}
             sheet_norm_map = {self.normalize_name(f): f for f in sheet_raw_set}
             
             xml_norm_keys = set(xml_norm_map.keys())
             sheet_norm_keys = set(sheet_norm_map.keys())
             
-            # 1. 檢查 XML 有，但 Sheet 沒有 (High Risk)
+            # 1. XML 有，Sheet 沒有
             xml_only_keys = xml_norm_keys - sheet_norm_keys
             for k in xml_only_keys:
                 original_name = xml_norm_map[k]
                 
-                # 過濾掉非 AF 的功能
                 if original_name.startswith("GPIO") or "ADC" in original_name or "DAC" in original_name or "DEBUG" in original_name or "WKUP" in original_name or "RESET" in original_name or "BOOT" in original_name:
                     continue
                 
-                report_rows.append([pin, "⚠️ XML Only (Risk)", original_name, "XML has it, Sheet missing (even after fuzzy match)."])
+                if trust_mode == 'GPIO':
+                    # 如果信任 GPIO Sheet，這就是 "被過濾掉" 的功能 (Good)
+                    report_rows.append([pin, "✅ Filtered (By Sheet)", original_name, "Validly removed because Sheet doesn't have it."])
+                    bg_color = {"red": 0.9, "green": 1.0, "blue": 0.9} # Light Green
+                else:
+                    # 如果信任 XML，這就是 "表格漏寫" (Risk)
+                    report_rows.append([pin, "⚠️ XML Only (Risk)", original_name, "XML claims it exists, but Sheet missing."])
+                    bg_color = {"red": 1.0, "green": 0.8, "blue": 0.8} # Light Red
+
                 format_requests.append({
                     "repeatCell": {
                         "range": {"sheetId": 0, "startRowIndex": row_idx, "endRowIndex": row_idx + 1, "startColumnIndex": 0, "endColumnIndex": 4},
-                        "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1.0, "green": 0.8, "blue": 0.8}}}, 
+                        "cell": {"userEnteredFormat": {"backgroundColor": bg_color}}, 
                         "fields": "userEnteredFormat.backgroundColor"
                     }
                 })
                 row_idx += 1
 
-            # 2. 檢查 Sheet 有，但 XML 沒有 (Info)
+            # 2. Sheet 有，XML 沒有
             sheet_only_keys = sheet_norm_keys - xml_norm_keys
             for k in sheet_only_keys:
                 original_name = sheet_norm_map[k]
-                report_rows.append([pin, "ℹ️ Sheet Only", original_name, "Sheet has it, XML missing. Planner won't use it."])
+                report_rows.append([pin, "ℹ️ Sheet Only", original_name, "Sheet has it, XML missing."])
                 format_requests.append({
                     "repeatCell": {
                         "range": {"sheetId": 0, "startRowIndex": row_idx, "endRowIndex": row_idx + 1, "startColumnIndex": 0, "endColumnIndex": 4},
@@ -244,7 +247,7 @@ class DashboardController:
             if format_requests:
                 self.sheet.batch_update({"requests": format_requests})
             
-            log(f"✅ 驗證報告已生成: {WORKSHEET_VALIDATION} ({row_idx-1} discrepancies found)")
+            log(f"✅ 驗證報告已生成: {WORKSHEET_VALIDATION}")
             
         except Exception as e:
             log(f"❌ 生成驗證報告失敗: {e}")
@@ -369,15 +372,14 @@ class DashboardController:
                 existing_data = ws.get_all_values()
                 if len(existing_data) > 0:
                     headers = existing_data[0]
-                    if "Remark" in headers:
-                        rem_col_idx = headers.index("Remark")
-                        name_col_idx = 0 
-                        for row in existing_data[1:]:
-                            if len(row) > rem_col_idx and row[name_col_idx]:
-                                pin_name = row[name_col_idx].strip().upper()
-                                remark_val = row[rem_col_idx]
-                                if remark_val:
-                                    preserved_remarks[pin_name] = remark_val
+                    name_col_idx = 0 
+                    rem_col_idx = 5
+                    for row in existing_data[1:]:
+                        if len(row) > rem_col_idx and row[name_col_idx]:
+                            pin_name = row[name_col_idx].strip().upper()
+                            remark_val = row[rem_col_idx]
+                            if remark_val:
+                                preserved_remarks[pin_name] = remark_val
             except Exception as e:
                 log(f"⚠️ 讀取舊 Remark 失敗: {e}")
 
@@ -723,20 +725,67 @@ class GPIOPlanner:
                 return f"❌ Conflict ({conflict_desc})"
         else: return "❌ Invalid Pin"
 
+# ✨ V37: 智慧過濾功能 (Smart Filter)
+def filter_map_by_sheet(xml_map, dashboard):
+    log("🧹 正在使用 GPIO Sheet 過濾 XML Map...")
+    filtered_map = defaultdict(list)
+    removed_count = 0
+    
+    for pin, funcs in xml_map.items():
+        sheet_funcs = dashboard.sheet_capabilities.get(pin, set())
+        # 建立 Sheet 功能的標準化 Set (加速比對)
+        sheet_norm_set = {dashboard.normalize_name(f) for f in sheet_funcs}
+        
+        for f in funcs:
+            # 1. 永遠保留非 AF 功能 (ADC, Power, Reset...)
+            if f.startswith("GPIO") or "ADC" in f or "DAC" in f or "DEBUG" in f or "WKUP" in f or "RESET" in f or "BOOT" in f or "VBUS" in f:
+                filtered_map[pin].append(f)
+                continue
+            
+            # 2. 檢查數位 AF 是否存在於 Sheet 中 (模糊比對)
+            f_norm = dashboard.normalize_name(f)
+            if f_norm in sheet_norm_set:
+                filtered_map[pin].append(f)
+            else:
+                # 這是重點！如果 Sheet 沒有，就不要加進去 (例如 PD12 的 I2C1)
+                removed_count += 1
+                
+    log(f"✅ 過濾完成！共移除 {removed_count} 個 XML 幽靈功能。")
+    return filtered_map
+
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V36 - Smart Fuzzy Matching)...")
+    log("🚀 程式啟動 (V37 - Interactive Trust Mode)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
-    # 1. XML Parser 負責讀取完整功能
     xml_parser = STM32XMLParser(XML_FILENAME)
     xml_parser.parse()
     
-    # 2. Dashboard 負責讀取 AF 表格供顯示與驗證
     dashboard.load_gpio_af_data()
     
-    # ✨ V36: 執行資料驗證 (在規劃之前)
-    dashboard.generate_validation_report(xml_parser.pin_map)
+    # ✨ V37: 互動選單 (Interactive Menu)
+    print("\n" + "="*40)
+    print(" 🤔 請選擇您的「信任來源 (Trust Source)」：")
+    print(" 1. XML Master (以 XML 為主，忽略表格缺漏)")
+    print(" 2. GPIO Sheet Master (以表格為主，過濾掉 XML 多餘的功能)")
+    print("="*40)
+    
+    try:
+        user_input = input("👉 請輸入 1 或 2 (預設 2): ").strip()
+    except EOFError:
+        user_input = "2" # 自動化環境預設選 2
+        
+    if user_input == "1":
+        trust_mode = "XML"
+        active_pin_map = xml_parser.pin_map
+    else:
+        trust_mode = "GPIO"
+        # 執行過濾！
+        active_pin_map = filter_map_by_sheet(xml_parser.pin_map, dashboard)
+
+    log(f"🔒 已鎖定信任模式: {trust_mode}")
+    
+    dashboard.generate_validation_report(xml_parser.pin_map, trust_mode)
     
     menu_data, all_peris = xml_parser.get_organized_menu_data()
     
@@ -744,7 +793,9 @@ if __name__ == "__main__":
     categories = dashboard.setup_reference_data(menu_data)
     dashboard.init_config_sheet(categories, all_peris)
     log("⚙️ 讀取設定..."); config_data = dashboard.read_config()
-    log("⚙️ 執行規劃..."); planner = GPIOPlanner(xml_parser.pin_map); status_results = []
+    
+    # 使用 active_pin_map (可能是過濾過的) 來進行規劃
+    log("⚙️ 執行規劃..."); planner = GPIOPlanner(active_pin_map); status_results = []
     
     for row_idx, row in enumerate(config_data):
         peri = str(row.get('Peripheral', '')).strip()
@@ -752,7 +803,8 @@ if __name__ == "__main__":
         option = str(row.get('Option / Fixed Pin', '')).strip().upper()
         pin_define = str(row.get('Pin Define', '')).strip()
         
-        if option in xml_parser.pin_map:
+        # 檢查是否存在時，也要查 active_pin_map
+        if option in active_pin_map:
             if not peri: peri = "Reserved" 
             result = planner.allocate_manual(peri, option, row_idx, pin_define)
             status_results.append(result)
