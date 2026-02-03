@@ -27,46 +27,69 @@ TIMER_METADATA = {
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ================= 配色引擎 =================
+# ================= 配色引擎 (V27 重寫) =================
 class ColorEngine:
     def __init__(self):
-        self.palette = {
-            "SPI1": {"red": 1.0, "green": 0.85, "blue": 0.9},
-            "SPI2": {"red": 1.0, "green": 0.8, "blue": 0.8},
-            "SPI3": {"red": 1.0, "green": 0.9, "blue": 0.7},
-            "SPI4": {"red": 1.0, "green": 1.0, "blue": 0.8},
-            "SPI5": {"red": 0.9, "green": 0.8, "blue": 1.0},
-            "ETH1": {"red": 0.8, "green": 1.0, "blue": 1.0},
-            "ETH2": {"red": 0.7, "green": 0.9, "blue": 0.9},
-            "SDMMC1": {"red": 0.8, "green": 0.9, "blue": 1.0},
-            "SDMMC2": {"red": 0.7, "green": 0.8, "blue": 1.0},
-            "SDMMC3": {"red": 0.6, "green": 0.8, "blue": 1.0},
-            "I2C":  {"red": 0.8, "green": 1.0, "blue": 0.8},
-            "UART": {"red": 1.0, "green": 0.95, "blue": 0.8},
-            "TIM":  {"red": 0.95, "green": 0.95, "blue": 0.95},
-            "ADC":  {"red": 1.0, "green": 0.9, "blue": 0.8},
-            "Reserved": {"red": 0.9, "green": 0.9, "blue": 0.9},
-            "System":   {"red": 1.0, "green": 0.8, "blue": 0.8},
+        # 定義 "家族" 的基礎色系 (Base Color)
+        self.family_palette = {
+            "SPI":    {"red": 1.0, "green": 0.85, "blue": 0.9}, # 粉紅基底
+            "ETH":    {"red": 0.8, "green": 1.0, "blue": 1.0},  # 青色基底
+            "SDMMC":  {"red": 0.8, "green": 0.9, "blue": 1.0},  # 藍色基底
+            "I2C":    {"red": 0.8, "green": 1.0, "blue": 0.8},  # 綠色基底
+            "UART":   {"red": 1.0, "green": 0.95, "blue": 0.8}, # 米黃基底
+            "USART":  {"red": 1.0, "green": 0.95, "blue": 0.8}, # 米黃基底
+            "TIM":    {"red": 0.95, "green": 0.95, "blue": 0.95}, # 灰色基底
+            "ADC":    {"red": 1.0, "green": 0.9, "blue": 0.8},  # 橘色基底
+            "FDCAN":  {"red": 1.0, "green": 0.8, "blue": 1.0},  # 紫色基底
+            "USB":    {"red": 0.8, "green": 0.8, "blue": 1.0},  # 深藍基底
+        }
+        
+        self.special_palette = {
+            "Reserved": {"red": 0.9, "green": 0.9, "blue": 0.9}, # 灰色
+            "System":   {"red": 1.0, "green": 0.8, "blue": 0.8}, # 警告紅
         }
 
     def get_color(self, func_name):
-        func_name = str(func_name).upper()
-        if "RESERVED" in func_name: return self.palette["Reserved"]
-        if "SYSTEM" in func_name: return self.palette["System"]
-        for key, color in self.palette.items():
-            if func_name.startswith(key):
-                if key in ["I2C", "UART", "TIM", "ADC"]:
-                    return self._tweak_color(color, func_name)
-                return color
+        func_name = str(func_name).strip().upper()
+        
+        # 1. 特殊關鍵字優先
+        if "RESERVED" in func_name: return self.special_palette["Reserved"]
+        if "SYSTEM" in func_name: return self.special_palette["System"]
+        
+        # 2. 智慧解析：分離 "類型" 與 "編號" (例如 SPI10 -> SPI, 10)
+        match = re.match(r'^([A-Z]+)(\d+)?', func_name)
+        
+        if match:
+            peri_type = match.group(1) # e.g. SPI
+            instance = match.group(2)  # e.g. 10 (可能為 None)
+            
+            # 如果這個類型在我們的色票庫中 (例如 SPI)
+            if peri_type in self.family_palette:
+                base_color = self.family_palette[peri_type]
+                
+                # 如果有編號 (例如 1, 2, 10...)，根據編號進行顏色微調
+                if instance:
+                    return self._hash_tweak(base_color, int(instance))
+                else:
+                    return base_color
+        
+        # 3. 預設顏色 (白色)
         return {"red": 1.0, "green": 1.0, "blue": 1.0}
 
-    def _tweak_color(self, base_color, seed_str):
-        h = int(hashlib.md5(seed_str.encode()).hexdigest(), 16)
-        factor = (h % 20) / 100.0 - 0.1
+    def _hash_tweak(self, base, seed):
+        # V27: 使用數學算法，確保不同編號有不同的偏移量，但保持在同色系
+        # seed 是編號 (1, 10, 11...)
+        
+        # 利用 sin/cos 產生 -0.15 ~ +0.15 的波動，讓顏色有深淺變化
+        import math
+        shift_r = math.sin(seed) * 0.15
+        shift_g = math.cos(seed) * 0.15
+        shift_b = math.sin(seed * 2) * 0.15
+        
         return {
-            "red": max(0, min(1, base_color["red"] + factor * 0.5)),
-            "green": max(0, min(1, base_color["green"] + factor)),
-            "blue": max(0, min(1, base_color["blue"] + factor * 0.5))
+            "red":   max(0.6, min(1.0, base["red"] + shift_r)),
+            "green": max(0.6, min(1.0, base["green"] + shift_g)),
+            "blue":  max(0.6, min(1.0, base["blue"] + shift_b))
         }
 
 # ================= Google Sheet 控制器 =================
@@ -219,7 +242,6 @@ class DashboardController:
             
             sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p].get('row', 999) if isinstance(assignments[p], dict) else 999, p))
             
-            # --- 處理成功分配的腳位 ---
             for i, pin in enumerate(sorted_pins):
                 raw_data = assignments[pin]
                 if isinstance(raw_data, dict):
@@ -239,7 +261,6 @@ class DashboardController:
                 af_data = parser.pin_af_data.get(pin, [""] * 16)
                 rows.append([pin, usage, spec, mode, note] + af_data)
                 
-                # 計算顏色
                 func_key = usage
                 if "]" in usage: func_key = usage.split(']')[1].strip().split('(')[0].strip()
                 bg_color = self.color_engine.get_color(func_key)
@@ -261,7 +282,6 @@ class DashboardController:
             if planner.failed_reports:
                 rows.append(["--- FAILED / MISSING ---", "", "", "", ""] + [""]*16)
                 
-                # --- FAILED 分隔線 (紅色) ---
                 sep_row = start_row_idx + len(sorted_pins)
                 format_requests.append({
                     "repeatCell": {
@@ -277,15 +297,12 @@ class DashboardController:
                     }
                 })
                 
-                # --- 處理失敗項目 (依群組上色) ---
                 fail_start_row = sep_row + 1
                 for i, report in enumerate(planner.failed_reports):
                     rows.append([report['pin'], report['desc'], "-", report['mode'], ""] + [""]*16)
                     
-                    # ✨ V26: 讓失敗項目也跟隨群組顏色
-                    # report['desc'] 通常是訊號名稱，例如 "SPI1_MISO"
                     sig_name = report['desc']
-                    func_key = sig_name.split('_')[0] if '_' in sig_name else sig_name # 取出 "SPI1"
+                    func_key = sig_name.split('_')[0] if '_' in sig_name else sig_name
                     
                     bg_color = self.color_engine.get_color(func_key)
                     
@@ -556,7 +573,7 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V26 - Full Color Sync)...")
+    log("🚀 程式啟動 (V27 - Smart Hash Color)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     parser = STM32SheetParser(dashboard); parser.parse()
