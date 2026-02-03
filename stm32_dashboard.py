@@ -129,7 +129,8 @@ class GPIOPlanner:
                         return f"{occupier} on {pin}"
         return "HW Limitation"
 
-    def allocate_system_critical(self, peri_type, row_idx, option_str=""):
+    # ✨ V18: 增加 pin_define 參數
+    def allocate_system_critical(self, peri_type, row_idx, option_str="", pin_define=""):
         locked_count = 0
         target_prefixes = []
         opt_clean = self.normalize_option(option_str)
@@ -160,16 +161,18 @@ class GPIOPlanner:
                         match = True; break
                 
                 if match:
-                    self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical'}
+                    # ✨ V18: 儲存 pin_define
+                    self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical', 'note': pin_define}
                     locked_count += 1
                     break
         if locked_count > 0: return f"✅ Reserved {locked_count} pins"
         else: return "⚠️ No pins found/locked"
 
-    def allocate_group(self, peri_type, count, option_str="", row_idx=0):
+    # ✨ V18: 增加 pin_define 參數
+    def allocate_group(self, peri_type, count, option_str="", row_idx=0, pin_define=""):
         if count == 0: return ""
         if peri_type in ["DDR", "FMC", "SDMMC", "QUADSPI"]:
-            return self.allocate_system_critical(peri_type, row_idx, option_str)
+            return self.allocate_system_critical(peri_type, row_idx, option_str, pin_define)
 
         results = []
         failure_reasons = [] 
@@ -247,7 +250,8 @@ class GPIOPlanner:
             
             if possible:
                 for p, f in temp_assignment.items():
-                    self.assignments[p] = {'desc': f"[Auto] {inst_name} ({f})", 'row': row_idx, 'mode': 'Auto'}
+                    # ✨ V18: 儲存 pin_define
+                    self.assignments[p] = {'desc': f"[Auto] {inst_name} ({f})", 'row': row_idx, 'mode': 'Auto', 'note': pin_define}
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
             else:
@@ -271,11 +275,13 @@ class GPIOPlanner:
             if failure_reasons: reason_str = f"\n❌ {failure_reasons[0]}"
             return f"❌ Insufficient ({success_groups}/{count}){reason_str}"
         
-    def allocate_manual(self, peri_name, pin, row_idx=0):
+    # ✨ V18: 增加 pin_define 參數
+    def allocate_manual(self, peri_name, pin, row_idx=0, pin_define=""):
         pin = pin.strip().upper() 
         if pin in self.pin_map:
             if self.is_pin_free(pin):
-                self.assignments[pin] = {'desc': f"[Manual] {peri_name}", 'row': row_idx, 'mode': 'Manual'}
+                # ✨ V18: 儲存 pin_define
+                self.assignments[pin] = {'desc': f"[Manual] {peri_name}", 'row': row_idx, 'mode': 'Manual', 'note': pin_define}
                 return "✅ Locked"
             else: 
                 conflict_desc = self.assignments[pin]['desc']
@@ -311,8 +317,8 @@ class DashboardController:
             try: ws = self.sheet.worksheet(WORKSHEET_CONFIG)
             except:
                 ws = self.sheet.add_worksheet(title=WORKSHEET_CONFIG, rows="50", cols="10")
-                ws.append_row(["Category", "Peripheral", "Quantity (Groups)", "Option / Fixed Pin", "Status (Result)"])
-                ws.format('A1:E1', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 1.0, 'green': 0.9, 'blue': 0.6}})
+                ws.append_row(["Category", "Peripheral", "Quantity (Groups)", "Option / Fixed Pin", "Status (Result)", "Pin Define"])
+                ws.format('A1:F1', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 1.0, 'green': 0.9, 'blue': 0.6}})
             rule_cat = {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": c} for c in categories]}, "showCustomUi": True}
             rule_peri = {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": p} for p in all_peris]}, "showCustomUi": True}
             reqs = [{"setDataValidation": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 0, "endColumnIndex": 1}, "rule": rule_cat}},
@@ -332,6 +338,8 @@ class DashboardController:
                 if 'Peripheral' in text: col_map['peri'] = idx
                 elif 'Quantity' in text: col_map['qty'] = idx
                 elif 'Option' in text or 'Fixed' in text: col_map['opt'] = idx
+                # ✨ V18: 尋找 "Define" 欄位
+                elif 'Define' in text: col_map['def'] = idx
             
             if 'peri' not in col_map or 'opt' not in col_map: return []
 
@@ -341,7 +349,9 @@ class DashboardController:
                 item = {
                     'Peripheral': row[col_map['peri']],
                     'Quantity (Groups)': row[col_map.get('qty', -1)] if 'qty' in col_map else "0",
-                    'Option / Fixed Pin': row[col_map['opt']]
+                    'Option / Fixed Pin': row[col_map['opt']],
+                    # ✨ V18: 讀取 Pin Define
+                    'Pin Define': row[col_map['def']] if 'def' in col_map else ""
                 }
                 data_list.append(item)
             log(f"🔎 成功解析 {len(data_list)} 筆設定資料")
@@ -357,6 +367,7 @@ class DashboardController:
             range_str = f"E2:E{1 + len(status_list)}"
             ws.update(range_name=range_str, values=cell_list)
         except: pass
+    
     def generate_pinout_view(self, planner, total_pins):
         try:
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
@@ -365,29 +376,36 @@ class DashboardController:
             assignments = planner.assignments; used_count = len(assignments); free_count = total_pins - used_count
             ws.update(values=[['Resource Summary', ''], ['Total GPIO', total_pins], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
             ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
-            headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode"]
+            
+            # ✨ V18: 增加 Pin Define 標題
+            headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define"]
             rows = [headers]
             sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p]['row'], p))
             for pin in sorted_pins:
                 data = assignments[pin]; usage = data['desc']; mode = data['mode']; spec = "-"
+                # ✨ V18: 取得 Pin Define
+                note = data.get('note', '')
                 if "TIM" in usage:
                     match = re.search(r'(TIM\d+)', usage)
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
-                rows.append([pin, usage, spec, mode])
+                rows.append([pin, usage, spec, mode, note])
+                
             if planner.failed_reports:
-                rows.append(["--- FAILED / MISSING ---", "---", "---", "---"])
+                rows.append(["--- FAILED / MISSING ---", "---", "---", "---", "---"])
                 for report in planner.failed_reports:
-                    rows.append([report['pin'], report['desc'], "-", report['mode']])
+                    rows.append([report['pin'], report['desc'], "-", report['mode'], ""])
+            
+            # ✨ V18: 寫入範圍擴大到 E 欄
             ws.update(values=rows, range_name='A6')
-            ws.format('A6:D6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
+            ws.format('A6:E6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
             if planner.failed_reports:
                 start_row = 6 + len(assignments) + 1
                 end_row = start_row + len(planner.failed_reports)
-                ws.format(f'A{start_row}:D{end_row}', {'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8}})
+                ws.format(f'A{start_row}:E{end_row}', {'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8}})
         except: pass
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V17.1 - XML Pin Match & Hotfix)...")
+    log("🚀 程式啟動 (V18 - Pin Define Sync)...")
     parser = STM32XMLParser(XML_FILENAME); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     dashboard = DashboardController()
@@ -402,19 +420,18 @@ if __name__ == "__main__":
         peri = str(row.get('Peripheral', '')).strip()
         qty_str = str(row.get('Quantity (Groups)', '0'))
         option = str(row.get('Option / Fixed Pin', '')).strip().upper()
+        # ✨ V18: 讀取 Pin Define
+        pin_define = str(row.get('Pin Define', '')).strip()
         
-        # ✨ V17 重大更新：優先檢查 Option 是否為有效的 XML 腳位
+        # 腳位優先判斷
         if option in parser.pin_map:
-            # 是有效的腳位！直接進入手動鎖定流程
-            if not peri: peri = "Reserved" # 懶人模式：B欄沒填就當 Reserved
-            
-            # 直接鎖定，無視其他邏輯
-            result = planner.allocate_manual(peri, option, row_idx)
+            if not peri: peri = "Reserved" 
+            # ✨ V18: 傳入 pin_define
+            result = planner.allocate_manual(peri, option, row_idx, pin_define)
             status_results.append(result)
             log(f"   🔹 Row {row_idx+2}: 腳位鎖定 {option} -> {result}")
             continue
 
-        # 如果不是腳位，才去跑原本的智慧判斷 (例如 RGMII, SDMMC 等)
         if not peri:
             if "RGMII" in option or "ETH" in option: peri = "ETH"
             elif "SDMMC" in option: peri = "SDMMC"
@@ -426,7 +443,8 @@ if __name__ == "__main__":
         try: qty = int(qty_str)
         except: qty = 0
         
-        result = planner.allocate_group(peri, qty, option, row_idx)
+        # ✨ V18: 傳入 pin_define
+        result = planner.allocate_group(peri, qty, option, row_idx, pin_define)
         status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
 
     log("📝 寫回結果..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, len(parser.pin_map))
