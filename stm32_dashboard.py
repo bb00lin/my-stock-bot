@@ -16,7 +16,8 @@ XML_FILENAME = "STM32MP133CAFx.xml"
 SPREADSHEET_NAME = 'STM32_GPIO_Planner'
 WORKSHEET_CONFIG = 'Config_Panel'
 WORKSHEET_RESULT = 'Pinout_View'
-WORKSHEET_GPIO = 'GPIO' 
+WORKSHEET_GPIO = 'GPIO'
+WORKSHEET_VALIDATION = 'Data_Validation'
 
 TIMER_METADATA = {
     "TIM1": "16-bit, Advanced", "TIM8": "16-bit, Advanced",
@@ -113,17 +114,6 @@ class STM32XMLParser:
             
             for p in self.pin_map: self.pin_map[p].sort()
             log(f"✅ XML 解析完成，可用 I/O 數: {len(self.pin_map)}")
-            
-            # ✨ V34 Debug: 印出嫌疑犯腳位的功能列表
-            suspects = ["PD12", "PE8", "PA15", "PB10"]
-            log("🔍 DEBUG: 腳位功能檢查 (Suspect Check):")
-            for s in suspects:
-                if s in self.pin_map:
-                    log(f"   🚩 {s} 擁有功能: {self.pin_map[s]}")
-                else:
-                    log(f"   ❓ {s} 不存在於 XML 中")
-            log("--------------------------------------------------")
-
         except Exception as e:
             log(f"❌ XML 解析失敗: {e}")
             sys.exit(1)
@@ -153,6 +143,7 @@ class DashboardController:
         self.client = None; self.sheet = None
         self.color_engine = ColorEngine()
         self.gpio_af_data = {}
+        self.sheet_capabilities = defaultdict(set) 
 
     def connect(self):
         log("🔌 連線 Google Sheet..."); json_content = os.environ.get('GOOGLE_SHEETS_JSON')
@@ -172,7 +163,92 @@ class DashboardController:
                 pin_name = row[0].strip().upper()
                 while len(row) < 20: row.append("")
                 self.gpio_af_data[pin_name] = row[4:20] 
+                
+                for cell in row[4:20]: 
+                    if cell.strip():
+                        funcs = cell.split('/')
+                        for f in funcs:
+                            self.sheet_capabilities[pin_name].add(f.strip())
         except: pass
+
+    # ✨ V36: 智慧模糊比對 (Smart Fuzzy Matching)
+    def normalize_name(self, name):
+        # 移除空格、底線、連字號，並轉大寫
+        # 例如: "I2C1_SCL" -> "I2C1SCL", "I2C 1 SCL" -> "I2C1SCL"
+        return re.sub(r'[\s_\-]+', '', str(name).upper())
+
+    def generate_validation_report(self, xml_pin_map):
+        log("🔍 執行資料驗證 (Smart Fuzzy Matching)...")
+        report_rows = [["Pin Name", "Discrepancy Type", "Function Name", "Description"]]
+        format_requests = []
+        
+        all_pins = sorted(list(set(list(xml_pin_map.keys()) + list(self.sheet_capabilities.keys()))))
+        
+        row_idx = 1
+        
+        for pin in all_pins:
+            xml_raw_list = xml_pin_map.get(pin, [])
+            sheet_raw_set = self.sheet_capabilities.get(pin, set())
+            
+            # 建立 "標準化名稱 -> 原始名稱" 的對照表
+            xml_norm_map = {self.normalize_name(f): f for f in xml_raw_list}
+            sheet_norm_map = {self.normalize_name(f): f for f in sheet_raw_set}
+            
+            xml_norm_keys = set(xml_norm_map.keys())
+            sheet_norm_keys = set(sheet_norm_map.keys())
+            
+            # 1. 檢查 XML 有，但 Sheet 沒有 (High Risk)
+            xml_only_keys = xml_norm_keys - sheet_norm_keys
+            for k in xml_only_keys:
+                original_name = xml_norm_map[k]
+                
+                # 過濾掉非 AF 的功能
+                if original_name.startswith("GPIO") or "ADC" in original_name or "DAC" in original_name or "DEBUG" in original_name or "WKUP" in original_name or "RESET" in original_name or "BOOT" in original_name:
+                    continue
+                
+                report_rows.append([pin, "⚠️ XML Only (Risk)", original_name, "XML has it, Sheet missing (even after fuzzy match)."])
+                format_requests.append({
+                    "repeatCell": {
+                        "range": {"sheetId": 0, "startRowIndex": row_idx, "endRowIndex": row_idx + 1, "startColumnIndex": 0, "endColumnIndex": 4},
+                        "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1.0, "green": 0.8, "blue": 0.8}}}, 
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                })
+                row_idx += 1
+
+            # 2. 檢查 Sheet 有，但 XML 沒有 (Info)
+            sheet_only_keys = sheet_norm_keys - xml_norm_keys
+            for k in sheet_only_keys:
+                original_name = sheet_norm_map[k]
+                report_rows.append([pin, "ℹ️ Sheet Only", original_name, "Sheet has it, XML missing. Planner won't use it."])
+                format_requests.append({
+                    "repeatCell": {
+                        "range": {"sheetId": 0, "startRowIndex": row_idx, "endRowIndex": row_idx + 1, "startColumnIndex": 0, "endColumnIndex": 4},
+                        "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1.0, "green": 1.0, "blue": 0.8}}},
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                })
+                row_idx += 1
+
+        try:
+            try: ws = self.sheet.worksheet(WORKSHEET_VALIDATION)
+            except: ws = self.sheet.add_worksheet(title=WORKSHEET_VALIDATION, rows="1000", cols="10")
+            
+            for req in format_requests:
+                req['repeatCell']['range']['sheetId'] = ws.id
+            
+            ws.clear()
+            ws.update(values=report_rows, range_name='A1')
+            ws.format('A1:D1', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.8, 'green': 0.8, 'blue': 0.8}})
+            
+            if format_requests:
+                self.sheet.batch_update({"requests": format_requests})
+            
+            log(f"✅ 驗證報告已生成: {WORKSHEET_VALIDATION} ({row_idx-1} discrepancies found)")
+            
+        except Exception as e:
+            log(f"❌ 生成驗證報告失敗: {e}")
+
 
     def sync_to_gpio(self, assignments, preserved_remarks):
         log("🔄 同步資料至 'GPIO' 工作表...")
@@ -648,14 +724,19 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V34 - Deep Debugger)...")
+    log("🚀 程式啟動 (V36 - Smart Fuzzy Matching)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
+    # 1. XML Parser 負責讀取完整功能
     xml_parser = STM32XMLParser(XML_FILENAME)
     xml_parser.parse()
     
+    # 2. Dashboard 負責讀取 AF 表格供顯示與驗證
     dashboard.load_gpio_af_data()
+    
+    # ✨ V36: 執行資料驗證 (在規劃之前)
+    dashboard.generate_validation_report(xml_parser.pin_map)
     
     menu_data, all_peris = xml_parser.get_organized_menu_data()
     
