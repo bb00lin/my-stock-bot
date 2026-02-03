@@ -37,35 +37,26 @@ AF_WEIGHTS = {
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ✨ [修改 1] 強力名稱解析函式：支援 "AO 1~4" -> AO1, AO2, AO3, AO4
+# 強力名稱解析函式：支援 "AO 1~4" -> AO1, AO2, AO3, AO4
 def expand_pin_names(name_pattern, quantity):
     if not name_pattern:
-        # 預設名稱
         return [f"Dev_{i+1}" for i in range(quantity)]
     
-    # 1. 優先處理逗號分隔 (例如: "SCL, SDA")
     if ',' in name_pattern:
         parts = [p.strip() for p in name_pattern.split(',')]
-        # 如果名稱不夠，後面補上索引
         if len(parts) < quantity:
             parts += [f"{parts[-1]}_{i+1}" for i in range(quantity - len(parts))]
         return parts[:quantity]
 
-    # 2. 處理範圍語法 (例如: "AO 1~4", "AO 1-4", "LED1-4")
-    # Regex 解析: Group1=前綴, Group2=起始數字, Group3=結束數字
     match = re.search(r'^(.*?)\s*(\d+)\s*[~-]\s*(\d+)$', name_pattern)
     if match:
-        prefix = match.group(1).strip() # 去除空白，讓 "AO " 變成 "AO"
+        prefix = match.group(1).strip()
         start = int(match.group(2))
-        
-        # 依照 Quantity 生成對應數量的名稱 (忽略結束數字，以 Quantity 為準，確保分配數量正確)
-        # 例如 Quantity=4, Start=1 -> 1, 2, 3, 4
         names = []
         for i in range(quantity):
             names.append(f"{prefix}{start + i}")
         return names
 
-    # 3. 單一名稱自動編號 (例如: "PWM" -> PWM1, PWM2...)
     return [f"{name_pattern}{i+1}" for i in range(quantity)]
 
 # ================= 配色引擎 =================
@@ -223,6 +214,7 @@ class DashboardController:
             if format_requests: self.sheet.batch_update({"requests": format_requests})
         except: pass
 
+    # ✨ [修改 1] 強化同步邏輯：合併 Function 與 Spec，並移除不必要的截斷
     def sync_to_gpio(self, assignments, preserved_remarks):
         log("🔄 同步至 GPIO 表...")
         try:
@@ -236,7 +228,27 @@ class DashboardController:
                     d = assignments[pin]
                     if isinstance(d, dict):
                         desc = d.get('desc', '')
-                        gw_val = desc.split(']')[1].strip().split('(')[0] if "]" in desc else desc
+                        
+                        # 1. 處理 Function Name (去除 [Auto] 等前綴)
+                        # 注意：這裡拿掉了之前的 split('(')[0]，保留完整括號內容
+                        clean_func = desc.split(']')[1].strip() if "]" in desc else desc
+                        
+                        # 2. 處理 Detail Spec (參考 TIMER_METADATA)
+                        spec_text = ""
+                        if "TIM" in desc:
+                            match = re.search(r'(TIM\d+)', desc)
+                            if match:
+                                tim_inst = match.group(1)
+                                spec_text = TIMER_METADATA.get(tim_inst, "")
+
+                        # 3. 組合 (如果有 Spec 就加在後面)
+                        # 結果範例: "PWM (TIM5_CH3) 32-bit, General"
+                        if spec_text:
+                            gw_val = f"{clean_func} {spec_text}"
+                        else:
+                            gw_val = clean_func
+
+                        # 處理 Remark
                         sheet_remark = preserved_remarks.get(pin, '')
                         assigned_lbl = d.get('group_label', d.get('note', ''))
                         if assigned_lbl and assigned_lbl not in sheet_remark:
@@ -443,8 +455,7 @@ class GPIOPlanner:
         opt_clean = self.normalize_option(option_str)
         search_range = range(1, 15); target_instances = None
         
-        # ✨ [修改 2] 在這裡呼叫名稱擴展函式，而不是只用逗號切割
-        # 這樣就能支援 AO 1~4 的語法分配給 PWM/ADC 等功能
+        # 在這裡呼叫名稱擴展函式
         group_labels = expand_pin_names(pin_define, count)
         
         if "PWM" in peri_type: target_instances = ["TIM2", "TIM5"] if "32BIT" in opt_clean else ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
@@ -511,7 +522,7 @@ def filter_map_by_sheet(xml_map, dashboard):
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V42 - Auto-Expand Names for All Peripherals)...")
+    log("🚀 程式啟動 (V43 - GPIO Sync Enhanced)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
