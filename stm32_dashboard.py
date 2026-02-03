@@ -69,7 +69,7 @@ class DashboardController:
                 if pin in assignments:
                     data = assignments[pin]
                     
-                    # ✨ V20.1 安全檢查：確保 data 是字典
+                    # ✨ V21 安全檢查：確保 data 是字典
                     if isinstance(data, dict):
                         raw_func = data.get('desc', '')
                         if "]" in raw_func: 
@@ -80,7 +80,6 @@ class DashboardController:
                         
                         remark_val = data.get('note', '')
                     else:
-                        # 如果意外是字串，直接當作功能名稱
                         gateway_val = str(data)
                         remark_val = ""
 
@@ -178,7 +177,6 @@ class DashboardController:
             
             for pin in sorted_pins:
                 raw_data = assignments[pin]
-                # ✨ V20.1 安全檢查
                 if isinstance(raw_data, dict):
                     usage = raw_data.get('desc', '')
                     mode = raw_data.get('mode', '')
@@ -303,7 +301,7 @@ class GPIOPlanner:
             for func in funcs:
                 if re.match(signal_regex, func):
                     if pin in self.assignments:
-                        # ✨ V20.1 安全檢查
+                        # ✨ V21 安全檢查
                         data = self.assignments[pin]
                         if isinstance(data, dict):
                             occupier = data.get('desc', 'Unknown')
@@ -464,12 +462,12 @@ class GPIOPlanner:
                 return "✅ Locked"
             else: 
                 conflict_desc = self.assignments[pin]['desc']
-                if isinstance(conflict_desc, dict): conflict_desc = str(conflict_desc) # V20.1 安全
+                if isinstance(conflict_desc, dict): conflict_desc = str(conflict_desc) 
                 return f"❌ Conflict ({conflict_desc})"
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V20.1 - Type Safe Fix)...")
+    log("🚀 程式啟動 (V21 - SPI Fix & Type Safe)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
