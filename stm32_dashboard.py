@@ -37,9 +37,19 @@ AF_WEIGHTS = {
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
+# ✨ [修改 1] 增強名稱擴展邏輯，優先處理逗號分隔
 def expand_pin_names(name_pattern, quantity):
     if not name_pattern:
         return [f"GPIO_{i+1}" for i in range(quantity)]
+    
+    # 如果包含逗號，優先以逗號切割
+    if ',' in name_pattern:
+        parts = [p.strip() for p in name_pattern.split(',')]
+        # 如果切割出來的數量少於需求，後面補上預設名稱
+        if len(parts) < quantity:
+            parts += [f"GPIO_{i+1}" for i in range(len(parts), quantity)]
+        return parts[:quantity]
+
     match = re.search(r'^(.*?)\s*(\d+)\s*[~-]\s*(\d+)$', name_pattern)
     if match:
         prefix, start, end = match.group(1).strip(), int(match.group(2)), int(match.group(3))
@@ -85,7 +95,7 @@ class ColorEngine:
         import math
         shift = lambda x: math.sin(x) * 0.15
         return {
-            "red":   max(0.6, min(1.0, base["red"] + shift(seed))),
+            "red":    max(0.6, min(1.0, base["red"] + shift(seed))),
             "green": max(0.6, min(1.0, base["green"] + shift(seed + 1))),
             "blue":  max(0.6, min(1.0, base["blue"] + shift(seed * 2)))
         }
@@ -275,7 +285,6 @@ class DashboardController:
             
             ws.clear(); assigns = planner.assignments
             
-            # ✨ V40 Update: 計算 Summary 並新增 Free 列
             xml_total = len(planner.pin_map)
             xml_used = len(assigns)
             xml_free = xml_total - xml_used
@@ -288,7 +297,7 @@ class DashboardController:
                 ['Summary', 'XML', 'Sheet'], 
                 ['Total', xml_total, sheet_total], 
                 ['Used', xml_used, sheet_used],
-                ['Free', xml_free, sheet_free]  # 新增這一列
+                ['Free', xml_free, sheet_free]
             ], range_name='A1:C4')
             ws.format('A1:C4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
             
@@ -304,6 +313,7 @@ class DashboardController:
                 manual_remark = preserved.get(p, '')
                 auto_label = d.get('group_label', '')
                 
+                # Remark 組合邏輯：如果已有名稱則填入，若有手動備註則接在後面
                 final_remark = manual_remark
                 if auto_label:
                     if auto_label not in manual_remark:
@@ -311,7 +321,18 @@ class DashboardController:
                     else:
                         final_remark = manual_remark
                 
-                row_data = [p, usage, spec, d.get('mode', '') if isinstance(d, dict) else '', d.get('note', '') if isinstance(d, dict) else '', final_remark] + dashboard.gpio_af_data.get(p, [""]*16)
+                # ✨ [修改 3] 強制將 Pin Define 欄位 (index 4) 設為空字串 ""
+                # d.get('mode', '') 是 Mode 欄位
+                # 之後是空字串 "" 作為 Pin Define
+                row_data = [
+                    p, 
+                    usage, 
+                    spec, 
+                    d.get('mode', '') if isinstance(d, dict) else '', 
+                    "",  # Pin Define 欄位：依需求不填值
+                    final_remark
+                ] + dashboard.gpio_af_data.get(p, [""]*16)
+                
                 rows.append(row_data)
                 
                 func_key = usage.split(']')[1].strip() if "]" in usage else usage
@@ -410,6 +431,7 @@ class GPIOPlanner:
         opt_clean = self.normalize_option(option_str)
         search_range = range(1, 15); target_instances = None
         
+        # ✨ [確認點] 這裡已經有處理逗號分隔的邏輯，保留即可
         group_labels = [x.strip() for x in pin_define.split(',')] if pin_define else []
         
         if "PWM" in peri_type: target_instances = ["TIM2", "TIM5"] if "32BIT" in opt_clean else ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
@@ -425,6 +447,7 @@ class GPIOPlanner:
             if target_instances and ("ETH" in peri_type):
                  if inst_name not in target_instances: continue
 
+            # ✨ [確認點] 依照成功組數 (success_groups) 取得對應名稱
             current_label = group_labels[success_groups] if success_groups < len(group_labels) else ""
 
             required = {}
@@ -452,6 +475,7 @@ class GPIOPlanner:
             
             if possible:
                 for p, f in temp_assign.items():
+                    # 將 current_label 存入 group_label
                     self.assignments[p] = {'desc': f"[Auto] {inst_name} ({f})", 'row': row_idx, 'mode': 'Auto', 'note': pin_define, 'group_label': current_label}
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
@@ -475,7 +499,7 @@ def filter_map_by_sheet(xml_map, dashboard):
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V40 - Free Summary Row)...")
+    log("🚀 程式啟動 (V41 - Pin Define Split Fix)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
@@ -503,7 +527,7 @@ if __name__ == "__main__":
         if peri == "GPIO":
             log(f"   🔹 Row {i+2}: 智慧分配 GPIO (x{qty})...")
             res = planner.allocate_smart_gpio(qty, i, defi, all_peris_in_plan)
-            stats.append(res); log(f"     -> {res}"); continue
+            stats.append(res); log(f"      -> {res}"); continue
         
         if opt in active_map:
             res = planner.allocate_manual(peri if peri else "Reserved", opt, i, defi)
