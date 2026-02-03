@@ -5,6 +5,7 @@ import re
 import csv
 import io
 import gspread
+import hashlib
 from oauth2client.service_account import ServiceAccountCredentials
 from collections import defaultdict
 from datetime import datetime
@@ -26,10 +27,54 @@ TIMER_METADATA = {
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
+# ================= 配色引擎 =================
+class ColorEngine:
+    def __init__(self):
+        self.palette = {
+            "SPI1": {"red": 1.0, "green": 0.85, "blue": 0.9},
+            "SPI2": {"red": 1.0, "green": 0.8, "blue": 0.8},
+            "SPI3": {"red": 1.0, "green": 0.9, "blue": 0.7},
+            "SPI4": {"red": 1.0, "green": 1.0, "blue": 0.8},
+            "SPI5": {"red": 0.9, "green": 0.8, "blue": 1.0},
+            "ETH1": {"red": 0.8, "green": 1.0, "blue": 1.0},
+            "ETH2": {"red": 0.7, "green": 0.9, "blue": 0.9},
+            "SDMMC1": {"red": 0.8, "green": 0.9, "blue": 1.0},
+            "SDMMC2": {"red": 0.7, "green": 0.8, "blue": 1.0},
+            "SDMMC3": {"red": 0.6, "green": 0.8, "blue": 1.0},
+            "I2C":  {"red": 0.8, "green": 1.0, "blue": 0.8},
+            "UART": {"red": 1.0, "green": 0.95, "blue": 0.8},
+            "TIM":  {"red": 0.95, "green": 0.95, "blue": 0.95},
+            "ADC":  {"red": 1.0, "green": 0.9, "blue": 0.8},
+            "Reserved": {"red": 0.9, "green": 0.9, "blue": 0.9},
+            "System":   {"red": 1.0, "green": 0.8, "blue": 0.8},
+        }
+
+    def get_color(self, func_name):
+        func_name = str(func_name).upper()
+        if "RESERVED" in func_name: return self.palette["Reserved"]
+        if "SYSTEM" in func_name: return self.palette["System"]
+        for key, color in self.palette.items():
+            if func_name.startswith(key):
+                if key in ["I2C", "UART", "TIM", "ADC"]:
+                    return self._tweak_color(color, func_name)
+                return color
+        return {"red": 1.0, "green": 1.0, "blue": 1.0}
+
+    def _tweak_color(self, base_color, seed_str):
+        h = int(hashlib.md5(seed_str.encode()).hexdigest(), 16)
+        factor = (h % 20) / 100.0 - 0.1
+        return {
+            "red": max(0, min(1, base_color["red"] + factor * 0.5)),
+            "green": max(0, min(1, base_color["green"] + factor)),
+            "blue": max(0, min(1, base_color["blue"] + factor * 0.5))
+        }
+
 # ================= Google Sheet 控制器 =================
 class DashboardController:
     def __init__(self):
         self.client = None; self.sheet = None
+        self.color_engine = ColorEngine()
+
     def connect(self):
         log("🔌 連線 Google Sheet..."); json_content = os.environ.get('GOOGLE_SHEETS_JSON')
         if not json_content: return False
@@ -61,20 +106,31 @@ class DashboardController:
                     pin_row_map[row[0].strip().upper()] = idx
 
             updates = []
-            
             for pin, row_idx in pin_row_map.items():
                 gateway_val = ""
                 remark_val = ""
-                
                 if pin in assignments:
                     data = assignments[pin]
                     if isinstance(data, dict):
                         raw_func = data.get('desc', '')
+                        
+                        # ✨ V25 修改邏輯：保留括號及內部所有內容
+                        # 1. 去除前面的標籤 [Auto] / [Manual]
                         if "]" in raw_func: 
-                            gateway_val = raw_func.split(']')[1].strip()
-                            if "(" in gateway_val: gateway_val = gateway_val.split('(')[0].strip()
+                            content = raw_func.split(']')[1].strip()
                         else:
-                            gateway_val = raw_func
+                            content = raw_func
+                            
+                        # 2. 尋找第一個左括號 '('
+                        start_index = content.find('(')
+                        if start_index != -1:
+                            # 找到了！直接截取從 '(' 開始到最後的所有內容
+                            # 例如: "PWM (TIM2_CH1 [32-bit])" -> "(TIM2_CH1 [32-bit])"
+                            gateway_val = content[start_index:].strip()
+                        else:
+                            # 沒括號 (例如 "Reserved" 或純腳位名)，直接用原本的
+                            gateway_val = content
+                            
                         remark_val = data.get('note', '')
                     else:
                         gateway_val = str(data)
@@ -85,18 +141,10 @@ class DashboardController:
                 updates.append({'range': f'D{sheet_row}', 'values': [[remark_val]]})
 
             if updates:
-                # ✨ V22: 修正 batch_update 參數傳遞方式
-                try:
-                    # 嘗試新版 gspread 語法
-                    ws.batch_update(updates, value_input_option='RAW')
-                except TypeError:
-                    # 相容舊版 gspread (若有需要)
-                    ws.batch_update(updates)
-                    
+                try: ws.batch_update(updates, value_input_option='RAW')
+                except TypeError: ws.batch_update(updates)
                 log("✅ GPIO 表格同步完成！")
-            
-        except Exception as e:
-            log(f"❌ 同步失敗: {e}")
+        except Exception as e: log(f"❌ 同步失敗: {e}")
 
     def setup_reference_data(self, menu_data):
         try:
@@ -123,7 +171,6 @@ class DashboardController:
                     {"setDataValidation": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 1, "endColumnIndex": 2}, "rule": rule_peri}}]
             self.sheet.batch_update({"requests": reqs})
         except: pass
-    
     def read_config(self):
         try:
             ws = self.sheet.worksheet(WORKSHEET_CONFIG)
@@ -137,9 +184,7 @@ class DashboardController:
                 elif 'Quantity' in text: col_map['qty'] = idx
                 elif 'Option' in text or 'Fixed' in text: col_map['opt'] = idx
                 elif 'Define' in text: col_map['def'] = idx
-            
             if 'peri' not in col_map or 'opt' not in col_map: return []
-
             data_list = []
             for row in raw_rows[1:]:
                 while len(row) < len(headers): row.append("")
@@ -152,10 +197,7 @@ class DashboardController:
                 data_list.append(item)
             log(f"🔎 成功解析 {len(data_list)} 筆設定資料")
             return data_list
-        except Exception as e:
-            log(f"❌ 讀取失敗: {e}")
-            return []
-
+        except Exception as e: log(f"❌ 讀取失敗: {e}"); return []
     def write_status_back(self, status_list):
         try:
             ws = self.sheet.worksheet(WORKSHEET_CONFIG)
@@ -177,9 +219,13 @@ class DashboardController:
             headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define"] + af_headers
             rows = [headers]
             
+            format_requests = []
+            sheet_id = ws.id
+            start_row_idx = 6 
+            
             sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p].get('row', 999) if isinstance(assignments[p], dict) else 999, p))
             
-            for pin in sorted_pins:
+            for i, pin in enumerate(sorted_pins):
                 raw_data = assignments[pin]
                 if isinstance(raw_data, dict):
                     usage = raw_data.get('desc', '')
@@ -198,19 +244,48 @@ class DashboardController:
                 af_data = parser.pin_af_data.get(pin, [""] * 16)
                 rows.append([pin, usage, spec, mode, note] + af_data)
                 
+                func_key = usage
+                if "]" in usage: func_key = usage.split(']')[1].strip().split('(')[0].strip()
+                bg_color = self.color_engine.get_color(func_key)
+                
+                format_requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": start_row_idx + i,
+                            "endRowIndex": start_row_idx + i + 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 21
+                        },
+                        "cell": {"userEnteredFormat": {"backgroundColor": bg_color}},
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                })
+
             if planner.failed_reports:
                 rows.append(["--- FAILED / MISSING ---", "", "", "", ""] + [""]*16)
+                fail_start = start_row_idx + len(sorted_pins)
+                format_requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": fail_start,
+                            "endRowIndex": fail_start + 1 + len(planner.failed_reports),
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 21
+                        },
+                        "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1.0, "green": 0.8, "blue": 0.8}}},
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                })
                 for report in planner.failed_reports:
                     rows.append([report['pin'], report['desc'], "-", report['mode'], ""] + [""]*16)
             
             ws.update(values=rows, range_name='A6')
             ws.format('A6:U6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
-            if planner.failed_reports:
-                start_row = 6 + len(assignments) + 1
-                end_row = start_row + len(planner.failed_reports)
-                ws.format(f'A{start_row}:E{end_row}', {'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8}})
-        except Exception as e:
-            log(f"❌ 寫入結果失敗: {e}")
+            if format_requests: self.sheet.batch_update({"requests": format_requests})
+                
+        except Exception as e: log(f"❌ 寫入結果失敗: {e}")
 
 # ================= Sheet 解析器 =================
 class STM32SheetParser:
@@ -223,17 +298,13 @@ class STM32SheetParser:
     def parse(self):
         log(f"📖 讀取 'GPIO' 工作表資料庫...")
         rows = self.dashboard.get_gpio_sheet_data()
-        
-        for row in rows[1:]: # Skip header
+        for row in rows[1:]: 
             if len(row) < 1: continue
             pin_name = row[0].strip().upper()
             if not pin_name: continue
-            
             while len(row) < 20: row.append("")
-            
             af_data = row[4:20] 
             self.pin_af_data[pin_name] = af_data
-            
             for cell in af_data:
                 if not cell.strip(): continue
                 signals = cell.split('/')
@@ -244,10 +315,8 @@ class STM32SheetParser:
                     peri_type = re.sub(r'\d+', '', raw_peri)
                     if "OTG" in sig: peri_type = "USB_OTG"
                     self.detected_peripherals.add(peri_type)
-        
         for p in ["DDR", "FMC", "SDMMC", "QUADSPI", "ADC", "ETH"]:
             self.detected_peripherals.add(p)
-            
         log(f"✅ 資料庫解析完成，可用 I/O 數: {len(self.pin_map)}")
 
     def get_organized_menu_data(self):
@@ -305,13 +374,9 @@ class GPIOPlanner:
             for func in funcs:
                 if re.match(signal_regex, func):
                     if pin in self.assignments:
-                        # ✨ V21 安全檢查
                         data = self.assignments[pin]
-                        if isinstance(data, dict):
-                            occupier = data.get('desc', 'Unknown')
-                        else:
-                            occupier = str(data)
-                            
+                        if isinstance(data, dict): occupier = data.get('desc', 'Unknown')
+                        else: occupier = str(data)
                         if "]" in occupier: occupier = occupier.split(']')[1].strip().split('(')[0]
                         return f"{occupier} on {pin}"
         return "HW Limitation"
@@ -329,7 +394,6 @@ class GPIOPlanner:
             if "SDMMC2" in opt_clean: instance_prefix = "SDMMC2"
             elif "SDMMC3" in opt_clean: instance_prefix = "SDMMC3"
             target_prefixes = [instance_prefix]
-            
         elif "QUADSPI" in peri_type: target_prefixes = ["QUADSPI"]
         elif "FMC" in peri_type: target_prefixes = ["FMC"]
 
@@ -345,7 +409,6 @@ class GPIOPlanner:
                             elif is_4bit:
                                 if any(x in func for x in ["_D4", "_D5", "_D6", "_D7"]): continue 
                         match = True; break
-                
                 if match:
                     self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical', 'note': pin_define}
                     locked_count += 1
@@ -471,13 +534,11 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V22 - Batch Update Fix)...")
+    log("🚀 程式啟動 (V25 - Detail Preservation)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
-    
     parser = STM32SheetParser(dashboard); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
-    
     log("⚙️ 初始化表單...")
     categories = dashboard.setup_reference_data(menu_data)
     dashboard.init_config_sheet(categories, all_peris)
@@ -489,14 +550,12 @@ if __name__ == "__main__":
         qty_str = str(row.get('Quantity (Groups)', '0'))
         option = str(row.get('Option / Fixed Pin', '')).strip().upper()
         pin_define = str(row.get('Pin Define', '')).strip()
-        
         if option in parser.pin_map:
             if not peri: peri = "Reserved" 
             result = planner.allocate_manual(peri, option, row_idx, pin_define)
             status_results.append(result)
             log(f"   🔹 Row {row_idx+2}: 腳位鎖定 {option} -> {result}")
             continue
-
         if not peri:
             if "RGMII" in option or "ETH" in option: peri = "ETH"
             elif "SDMMC" in option: peri = "SDMMC"
@@ -504,15 +563,11 @@ if __name__ == "__main__":
             else:
                 status_results.append("")
                 continue
-
         try: qty = int(qty_str)
         except: qty = 0
-        
         result = planner.allocate_group(peri, qty, option, row_idx, pin_define)
         status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
 
     log("📝 寫回結果 (Pinout View)..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, parser)
-    
     dashboard.sync_to_gpio(planner.assignments)
-    
     log("🎉 執行成功！")
