@@ -60,7 +60,6 @@ class STM32XMLParser:
                     if "OTG" in sig_name: peri_type = "USB_OTG"
                     self.detected_peripherals.add(peri_type)
             
-            # 手動補充關鍵字
             for p in ["DDR", "FMC", "SDMMC", "QUADSPI", "ADC", "ETH"]:
                 self.detected_peripherals.add(p)
             
@@ -118,30 +117,40 @@ class GPIOPlanner:
                 if re.match(signal_regex, func):
                     return pin, func
         return None, None
+    
+    def diagnose_conflict(self, signal_regex):
+        """✨ V10 新增：衝突偵探功能"""
+        suspects = []
+        for pin, funcs in self.pin_map.items():
+            # 找出所有原本支援這個訊號的腳位
+            for func in funcs:
+                if re.match(signal_regex, func):
+                    # 如果這個腳位被佔用了，找出是誰佔用的
+                    if pin in self.assignments:
+                        occupier = self.assignments[pin]['desc']
+                        # 格式化輸出：[Auto] SDMMC1 (SDMMC1_D2)
+                        # 我們只取前面的名稱比較簡潔
+                        occupier_name = occupier.split('(')[0].strip()
+                        suspects.append(f"{occupier_name} on {pin}")
+        
+        if not suspects:
+            return "No Pins Available (HW Limitation)"
+        
+        # 只回傳前 2 個衝突原因以免表格太長
+        return ", ".join(suspects[:2])
 
     def allocate_system_critical(self, peri_type, row_idx, option_str=""):
-        """✨ V9 修正版：支援指定 SDMMC1/SDMMC2"""
         locked_count = 0
         target_prefixes = []
         opt_clean = self.normalize_option(option_str)
         
-        # 1. DDR: 全鎖
-        if "DDR" in peri_type: 
-            target_prefixes = ["DDR_", "DDRPHYC_"]
-        
-        # 2. SDMMC: 判斷 Option
+        if "DDR" in peri_type: target_prefixes = ["DDR_", "DDRPHYC_"]
         elif "SDMMC" in peri_type:
             if "SDMMC2" in opt_clean: target_prefixes = ["SDMMC2"]
             elif "SDMMC3" in opt_clean: target_prefixes = ["SDMMC3"]
-            else: target_prefixes = ["SDMMC1"] # 預設只鎖 SDMMC1 (eMMC)
-            
-        # 3. QUADSPI: 預設全鎖 (因為腳位複雜)
-        elif "QUADSPI" in peri_type:
-             target_prefixes = ["QUADSPI"]
-             
-        # 4. FMC: 預設全鎖
-        elif "FMC" in peri_type:
-             target_prefixes = ["FMC"]
+            else: target_prefixes = ["SDMMC1"]
+        elif "QUADSPI" in peri_type: target_prefixes = ["QUADSPI"]
+        elif "FMC" in peri_type: target_prefixes = ["FMC"]
 
         for pin, funcs in self.pin_map.items():
             if not self.is_pin_free(pin): continue
@@ -158,26 +167,21 @@ class GPIOPlanner:
 
     def allocate_group(self, peri_type, count, option_str="", row_idx=0):
         if count == 0: return ""
-        
-        # 修正系統關鍵字進入點，傳入 option_str
         if peri_type in ["DDR", "FMC", "SDMMC", "QUADSPI"]:
             return self.allocate_system_critical(peri_type, row_idx, option_str)
 
         results = []
+        failure_reasons = [] # 收集錯誤原因
         success_groups = 0
         opt_clean = self.normalize_option(option_str)
         
-        # 通用選項
         needs_rts_cts = ("RTS" in opt_clean and "CTS" in opt_clean)
         needs_nss = "NSS" in opt_clean
         force_32bit = "32BIT" in opt_clean
         force_16bit = "16BIT" in opt_clean
-        
-        # ETH 選項
         is_rgmii = "RGMII" in opt_clean
         is_rmii = "RMII" in opt_clean
         
-        # 搜尋範圍
         search_range = range(1, 15)
         target_instances = None 
         
@@ -185,7 +189,6 @@ class GPIOPlanner:
             if force_32bit: target_instances = ["TIM2", "TIM5"]
             elif force_16bit: target_instances = ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
             
-        # ✨ V9 修正: 讓 "RGMII" 或 "ETH" 都能觸發 Ethernet 邏輯
         elif "ETH" in peri_type or "RGMII" in peri_type or "RMII" in peri_type:
             if "ETH1" in opt_clean: target_instances = ["ETH1"]
             elif "ETH2" in opt_clean: target_instances = ["ETH2"]
@@ -195,76 +198,36 @@ class GPIOPlanner:
         for i in search_range:
             if success_groups >= count: break
             
-            # 定義 Instance 名稱
             if "PWM" in peri_type: inst_name = "PWM"
             elif "ADC" in peri_type: inst_name = "ADC"
-            elif "ETH" in peri_type or "RGMII" in peri_type or "RMII" in peri_type:
-                # 如果使用者在 Peripheral 填 RGMII，我們要把它正規化成 ETHx
-                # 這裡假設如果填 RGMII，i=1 就是 ETH1
-                inst_name = f"ETH{i}"
-            else: 
-                inst_name = f"{peri_type}{i}"
+            elif "ETH" in peri_type or "RGMII" in peri_type or "RMII" in peri_type: inst_name = f"ETH{i}"
+            else: inst_name = f"{peri_type}{i}"
             
-            # 檢查 Target Instance
             if target_instances and ("ETH" in peri_type or "RGMII" in peri_type):
                 if inst_name not in target_instances: continue
 
             required_signals = {}
-            
-            # === 定義各種週邊的訊號需求 ===
-            if "I2C" in peri_type:
-                required_signals = {"SCL": f"{inst_name}_SCL", "SDA": f"{inst_name}_SDA"}
+            if "I2C" in peri_type: required_signals = {"SCL": f"{inst_name}_SCL", "SDA": f"{inst_name}_SDA"}
             elif "SPI" in peri_type:
                 required_signals = {"SCK": f"{inst_name}_SCK", "MISO": f"{inst_name}_MISO", "MOSI": f"{inst_name}_MOSI"}
                 if needs_nss: required_signals["NSS"] = f"{inst_name}_NSS"
             elif "UART" in peri_type or "USART" in peri_type:
                 required_signals = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
-                if needs_rts_cts:
-                    required_signals["RTS"] = f"{inst_name}_RTS"
-                    required_signals["CTS"] = f"{inst_name}_CTS"
+                if needs_rts_cts: required_signals["RTS"] = f"{inst_name}_RTS"; required_signals["CTS"] = f"{inst_name}_CTS"
             
-            # ✨ V9 修正: 包含 "RGMII" 關鍵字
             elif "ETH" in peri_type or "RGMII" in peri_type or "RMII" in peri_type:
-                # 優先使用 Option 判斷，如果沒有，再看 Peripheral Name
                 use_rmii = is_rmii or ("RMII" in peri_type)
                 use_rgmii = is_rgmii or ("RGMII" in peri_type)
-                
-                # 如果都沒指定，預設 RMII
                 if not use_rmii and not use_rgmii: use_rmii = True
                 
                 if use_rmii:
-                    required_signals = {
-                        "REF_CLK": f"{inst_name}_RMII_REF_CLK",
-                        "CRS_DV": f"{inst_name}_RMII_CRS_DV",
-                        "RXD0": f"{inst_name}_RMII_RXD0",
-                        "RXD1": f"{inst_name}_RMII_RXD1",
-                        "TX_EN": f"{inst_name}_RMII_TX_EN",
-                        "TXD0": f"{inst_name}_RMII_TXD0",
-                        "TXD1": f"{inst_name}_RMII_TXD1",
-                        "MDC": f"{inst_name}_MDC",   
-                        "MDIO": f"{inst_name}_MDIO"
-                    }
+                    required_signals = {"REF_CLK": f"{inst_name}_RMII_REF_CLK", "CRS_DV": f"{inst_name}_RMII_CRS_DV", "RXD0": f"{inst_name}_RMII_RXD0", "RXD1": f"{inst_name}_RMII_RXD1", "TX_EN": f"{inst_name}_RMII_TX_EN", "TXD0": f"{inst_name}_RMII_TXD0", "TXD1": f"{inst_name}_RMII_TXD1", "MDC": f"{inst_name}_MDC", "MDIO": f"{inst_name}_MDIO"}
                 elif use_rgmii:
-                    required_signals = {
-                        "GTX_CLK": f"{inst_name}_RGMII_GTX_CLK",
-                        "RX_CLK": f"{inst_name}_RGMII_RX_CLK",
-                        "RX_CTL": f"{inst_name}_RGMII_RX_CTL",
-                        "RXD0": f"{inst_name}_RGMII_RXD0",
-                        "RXD1": f"{inst_name}_RGMII_RXD1",
-                        "RXD2": f"{inst_name}_RGMII_RXD2",
-                        "RXD3": f"{inst_name}_RGMII_RXD3",
-                        "TX_CTL": f"{inst_name}_RGMII_TX_CTL",
-                        "TXD0": f"{inst_name}_RGMII_TXD0",
-                        "TXD1": f"{inst_name}_RGMII_TXD1",
-                        "TXD2": f"{inst_name}_RGMII_TXD2",
-                        "TXD3": f"{inst_name}_RGMII_TXD3",
-                        "MDC": f"{inst_name}_MDC",
-                        "MDIO": f"{inst_name}_MDIO"
-                    }
+                    required_signals = {"GTX_CLK": f"{inst_name}_RGMII_GTX_CLK", "RX_CLK": f"{inst_name}_RGMII_RX_CLK", "RX_CTL": f"{inst_name}_RGMII_RX_CTL", "RXD0": f"{inst_name}_RGMII_RXD0", "RXD1": f"{inst_name}_RGMII_RXD1", "RXD2": f"{inst_name}_RGMII_RXD2", "RXD3": f"{inst_name}_RGMII_RXD3", "TX_CTL": f"{inst_name}_RGMII_TX_CTL", "TXD0": f"{inst_name}_RGMII_TXD0", "TXD1": f"{inst_name}_RGMII_TXD1", "TXD2": f"{inst_name}_RGMII_TXD2", "TXD3": f"{inst_name}_RGMII_TXD3", "MDC": f"{inst_name}_MDC", "MDIO": f"{inst_name}_MDIO"}
 
-            # === 分配執行 ===
             temp_assignment = {}
             possible = True
+            missing_signal_reason = "" # 記錄是哪個訊號失敗
             
             if "PWM" in peri_type:
                 pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
@@ -280,20 +243,34 @@ class GPIOPlanner:
             else:
                 for role, sig_name in required_signals.items():
                     pin, func = self.find_pin_for_signal(f"^{sig_name}$", exclude_pins=temp_assignment.keys())
-                    if pin: temp_assignment[pin] = func
-                    else: possible = False; break
+                    if pin: 
+                        temp_assignment[pin] = func
+                    else: 
+                        possible = False
+                        # ✨ 關鍵：找出是誰卡住了這個訊號
+                        culprit = self.diagnose_conflict(f"^{sig_name}$")
+                        missing_signal_reason = f"Missing {sig_name} (Blocked by: {culprit})"
+                        break
             
             if possible:
                 for p, f in temp_assignment.items():
                     self.assignments[p] = {'desc': f"[Auto] {inst_name} ({f})", 'row': row_idx, 'mode': 'Auto'}
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
+            else:
+                if missing_signal_reason:
+                    failure_reasons.append(missing_signal_reason)
             
-            if ("PWM" in peri_type or "ADC" in peri_type) and possible:
-                pass 
+            if ("PWM" in peri_type or "ADC" in peri_type) and possible: pass 
 
-        if success_groups >= count: return f"✅ OK ({success_groups}/{count})"
-        else: return f"❌ Insufficient ({success_groups}/{count})"
+        if success_groups >= count: 
+            return f"✅ OK ({success_groups}/{count})"
+        else:
+            # ✨ 如果失敗，回傳具體的衝突原因 (只顯示第一條以免太長)
+            reason_str = ""
+            if failure_reasons:
+                reason_str = f"\n❌ {failure_reasons[0]}"
+            return f"❌ Insufficient ({success_groups}/{count}){reason_str}"
         
     def allocate_manual(self, peri_name, pin, row_idx=0):
         pin = pin.strip()
@@ -375,7 +352,7 @@ class DashboardController:
         except: pass
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V9 - ETH & SDMMC Fix)...")
+    log("🚀 程式啟動 (V10 - Conflict Detective)...")
     parser = STM32XMLParser(XML_FILENAME); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     dashboard = DashboardController()
