@@ -3,17 +3,15 @@ import sys
 import json
 import re
 import gspread
-import xml.etree.ElementTree as ET
 from oauth2client.service_account import ServiceAccountCredentials
 from collections import defaultdict
 from datetime import datetime
 
 # ================= 設定區 =================
-XML_FILENAME = "STM32MP133CAFx.xml"
 SPREADSHEET_NAME = 'STM32_GPIO_Planner'
 WORKSHEET_CONFIG = 'Config_Panel'
 WORKSHEET_RESULT = 'Pinout_View'
-WORKSHEET_REF = 'Ref_Data'
+WORKSHEET_GPIO = 'GPIO' # 資料來源與同步目標
 
 TIMER_METADATA = {
     "TIM1": "16-bit, Advanced", "TIM8": "16-bit, Advanced",
@@ -26,48 +24,221 @@ TIMER_METADATA = {
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ================= XML 解析器 =================
-class STM32XMLParser:
-    def __init__(self, xml_path):
-        self.xml_path = xml_path
+# ================= Google Sheet 控制器 =================
+class DashboardController:
+    def __init__(self):
+        self.client = None; self.sheet = None
+    def connect(self):
+        log("🔌 連線 Google Sheet..."); json_content = os.environ.get('GOOGLE_SHEETS_JSON')
+        if not json_content: return False
+        try:
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_content), ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
+            self.client = gspread.authorize(creds); self.sheet = self.client.open(SPREADSHEET_NAME)
+            return True
+        except: return False
+    
+    # ✨ V20: 讀取 GPIO Sheet 資料庫
+    def get_gpio_sheet_data(self):
+        try:
+            ws = self.sheet.worksheet(WORKSHEET_GPIO)
+            return ws.get_all_values()
+        except:
+            log(f"❌ 找不到工作表 '{WORKSHEET_GPIO}'，請確認名稱是否正確！")
+            sys.exit(1)
+
+    # ✨ V20: 同步結果回 GPIO Sheet
+    def sync_to_gpio(self, assignments):
+        log("🔄 同步資料至 'GPIO' 工作表...")
+        try:
+            ws = self.sheet.worksheet(WORKSHEET_GPIO)
+            rows = ws.get_all_values()
+            if not rows: return
+
+            # 1. 建立 Pin Name 對應的 Row Index (從 0 開始算)
+            pin_row_map = {}
+            for idx, row in enumerate(rows):
+                if idx == 0: continue # Skip header
+                if row and row[0]: # Column A is Name
+                    pin_row_map[row[0].strip().upper()] = idx
+
+            # 2. 準備更新資料 (C欄=Gateway, D欄=Remark)
+            # 先讀取現有資料以免覆蓋其他欄位? 
+            # 為了效能，我們只針對 C 和 D 欄做 Batch Update
+            
+            updates = []
+            
+            # 清除舊資料 (C2:D_MAX)
+            # 這裡我們直接在寫入迴圈中覆蓋，未分配的腳位填空
+            
+            for pin, row_idx in pin_row_map.items():
+                gateway_val = ""
+                remark_val = ""
+                
+                if pin in assignments:
+                    data = assignments[pin]
+                    # Gateway = Assigned Function (去除 [Auto]/[Manual] 標籤)
+                    raw_func = data['desc']
+                    if "]" in raw_func: 
+                        gateway_val = raw_func.split(']')[1].strip()
+                        # 去除括號內的詳細定義 (ex: "(SDMMC1_D0)") 讓表格更乾淨，如果需要可以保留
+                        if "(" in gateway_val: gateway_val = gateway_val.split('(')[0].strip()
+                    else:
+                        gateway_val = raw_func
+                    
+                    # Remark = Pin Define (User Note)
+                    remark_val = data.get('note', '')
+
+                # 轉換為 A1 Notation
+                # C欄 = Column 3, D欄 = Column 4
+                # Row index (0-based) + 1 = Excel Row Number
+                sheet_row = row_idx + 1
+                updates.append({'range': f'C{sheet_row}', 'values': [[gateway_val]]})
+                updates.append({'range': f'D{sheet_row}', 'values': [[remark_val]]})
+
+            if updates:
+                ws.batch_update({'data': updates, 'valueInputOption': 'RAW'})
+                log("✅ GPIO 表格同步完成！")
+            
+        except Exception as e:
+            log(f"❌ 同步失敗: {e}")
+
+    def setup_reference_data(self, menu_data):
+        try:
+            try: ws = self.sheet.worksheet(WORKSHEET_REF)
+            except: ws = self.sheet.add_worksheet(title=WORKSHEET_REF, rows="50", cols="20")
+            ws.clear(); categories = sorted(menu_data.keys()); cols = []
+            for cat in categories: cols.append([cat] + sorted(menu_data[cat]))
+            for i, col_data in enumerate(cols):
+                col_values = [[x] for x in col_data]
+                range_str = gspread.utils.rowcol_to_a1(1, i+1)
+                ws.update(range_name=range_str, values=col_values)
+            return categories
+        except: return []
+    def init_config_sheet(self, categories, all_peris):
+        try:
+            try: ws = self.sheet.worksheet(WORKSHEET_CONFIG)
+            except:
+                ws = self.sheet.add_worksheet(title=WORKSHEET_CONFIG, rows="50", cols="10")
+                ws.append_row(["Category", "Peripheral", "Quantity (Groups)", "Option / Fixed Pin", "Status (Result)", "Pin Define"])
+                ws.format('A1:F1', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 1.0, 'green': 0.9, 'blue': 0.6}})
+            rule_cat = {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": c} for c in categories]}, "showCustomUi": True}
+            rule_peri = {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": p} for p in all_peris]}, "showCustomUi": True}
+            reqs = [{"setDataValidation": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 0, "endColumnIndex": 1}, "rule": rule_cat}},
+                    {"setDataValidation": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 1, "endColumnIndex": 2}, "rule": rule_peri}}]
+            self.sheet.batch_update({"requests": reqs})
+        except: pass
+    def read_config(self):
+        try:
+            ws = self.sheet.worksheet(WORKSHEET_CONFIG)
+            raw_rows = ws.get_all_values()
+            if len(raw_rows) < 1: return []
+            headers = raw_rows[0]
+            col_map = {}
+            for idx, text in enumerate(headers):
+                text = str(text).strip()
+                if 'Peripheral' in text: col_map['peri'] = idx
+                elif 'Quantity' in text: col_map['qty'] = idx
+                elif 'Option' in text or 'Fixed' in text: col_map['opt'] = idx
+                elif 'Define' in text: col_map['def'] = idx
+            
+            if 'peri' not in col_map or 'opt' not in col_map: return []
+            data_list = []
+            for row in raw_rows[1:]:
+                while len(row) < len(headers): row.append("")
+                item = {
+                    'Peripheral': row[col_map['peri']],
+                    'Quantity (Groups)': row[col_map.get('qty', -1)] if 'qty' in col_map else "0",
+                    'Option / Fixed Pin': row[col_map['opt']],
+                    'Pin Define': row[col_map['def']] if 'def' in col_map else ""
+                }
+                data_list.append(item)
+            log(f"🔎 成功解析 {len(data_list)} 筆設定資料")
+            return data_list
+        except Exception as e:
+            log(f"❌ 讀取失敗: {e}")
+            return []
+    def write_status_back(self, status_list):
+        try:
+            ws = self.sheet.worksheet(WORKSHEET_CONFIG)
+            cell_list = [[s] for s in status_list]
+            range_str = f"E2:E{1 + len(status_list)}"
+            ws.update(range_name=range_str, values=cell_list)
+        except: pass
+    def generate_pinout_view(self, planner, parser):
+        try:
+            try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
+            except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="200", cols="30")
+            ws.clear()
+            assignments = planner.assignments; used_count = len(assignments); free_count = len(parser.pin_map) - used_count
+            ws.update(values=[['Resource Summary', ''], ['Total GPIO', len(parser.pin_map)], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
+            ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
+            
+            af_headers = [f"AF{i}" for i in range(16)]
+            headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define"] + af_headers
+            rows = [headers]
+            sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p]['row'], p))
+            for pin in sorted_pins:
+                data = assignments[pin]; usage = data['desc']; mode = data['mode']; spec = "-"
+                note = data.get('note', '')
+                if "TIM" in usage:
+                    match = re.search(r'(TIM\d+)', usage)
+                    if match: spec = TIMER_METADATA.get(match.group(1), "")
+                af_data = parser.pin_af_data.get(pin, [""] * 16)
+                rows.append([pin, usage, spec, mode, note] + af_data)
+            if planner.failed_reports:
+                rows.append(["--- FAILED / MISSING ---", "", "", "", ""] + [""]*16)
+                for report in planner.failed_reports:
+                    rows.append([report['pin'], report['desc'], "-", report['mode'], ""] + [""]*16)
+            ws.update(values=rows, range_name='A6')
+            ws.format('A6:U6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
+            if planner.failed_reports:
+                start_row = 6 + len(assignments) + 1
+                end_row = start_row + len(planner.failed_reports)
+                ws.format(f'A{start_row}:E{end_row}', {'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8}})
+        except Exception as e: log(f"❌ 寫入結果失敗: {e}")
+
+# ================= Sheet 解析器 (V20: 讀取 GPIO Sheet) =================
+class STM32SheetParser:
+    def __init__(self, dashboard):
+        self.dashboard = dashboard
         self.pin_map = defaultdict(list)
+        self.pin_af_data = {} 
         self.detected_peripherals = set()
 
     def parse(self):
-        log(f"📖 讀取 XML: {self.xml_path}")
-        if not os.path.exists(self.xml_path):
-            log(f"❌ 找不到 XML: {self.xml_path}")
-            sys.exit(1)
-
-        try:
-            tree = ET.parse(self.xml_path)
-            root = tree.getroot()
-            ns = {'ns': 'http://mcd.rou.st.com/modules.php?name=mcu'}
-            pins = root.findall("ns:Pin", ns)
+        log(f"📖 讀取 'GPIO' 工作表資料庫...")
+        rows = self.dashboard.get_gpio_sheet_data()
+        
+        # 假設第一列是標題，格式: Name, Position, AH GATEWAY, Remark, AF0...AF15
+        # Name=0, AF0=4 (E欄)
+        
+        for row in rows[1:]: # Skip header
+            if len(row) < 1: continue
+            pin_name = row[0].strip().upper()
+            if not pin_name: continue
             
-            for pin in pins:
-                pin_name = pin.attrib.get('Name')
-                if pin_name.startswith("V") and len(pin_name) < 4: continue
-                
-                signals = pin.findall('ns:Signal', ns)
+            # 確保 row 長度足夠，以免 index error
+            while len(row) < 20: row.append("")
+            
+            # AF0 在 Index 4 (E欄)
+            af_data = row[4:20] 
+            self.pin_af_data[pin_name] = af_data
+            
+            for cell in af_data:
+                if not cell.strip(): continue
+                signals = cell.split('/')
                 for sig in signals:
-                    sig_name = sig.attrib.get('Name')
-                    self.pin_map[pin_name].append(sig_name)
-                    if sig_name.startswith("GPIO"): continue
-
-                    raw_peri = sig_name.split('_')[0]
+                    sig = sig.strip()
+                    self.pin_map[pin_name].append(sig)
+                    raw_peri = sig.split('_')[0]
                     peri_type = re.sub(r'\d+', '', raw_peri)
-                    if "OTG" in sig_name: peri_type = "USB_OTG"
+                    if "OTG" in sig: peri_type = "USB_OTG"
                     self.detected_peripherals.add(peri_type)
+        
+        for p in ["DDR", "FMC", "SDMMC", "QUADSPI", "ADC", "ETH"]:
+            self.detected_peripherals.add(p)
             
-            for p in ["DDR", "FMC", "SDMMC", "QUADSPI", "ADC", "ETH"]:
-                self.detected_peripherals.add(p)
-            
-            for p in self.pin_map: self.pin_map[p].sort()
-            log(f"✅ XML 解析完成，可用 I/O 數: {len(self.pin_map)}")
-        except Exception as e:
-            log(f"❌ XML 解析失敗: {e}")
-            sys.exit(1)
+        log(f"✅ 資料庫解析完成，可用 I/O 數: {len(self.pin_map)}")
 
     def get_organized_menu_data(self):
         categories = {
@@ -129,7 +300,6 @@ class GPIOPlanner:
                         return f"{occupier} on {pin}"
         return "HW Limitation"
 
-    # ✨ V18: 增加 pin_define 參數
     def allocate_system_critical(self, peri_type, row_idx, option_str="", pin_define=""):
         locked_count = 0
         target_prefixes = []
@@ -159,16 +329,13 @@ class GPIOPlanner:
                             elif is_4bit:
                                 if any(x in func for x in ["_D4", "_D5", "_D6", "_D7"]): continue 
                         match = True; break
-                
                 if match:
-                    # ✨ V18: 儲存 pin_define
                     self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical', 'note': pin_define}
                     locked_count += 1
                     break
         if locked_count > 0: return f"✅ Reserved {locked_count} pins"
         else: return "⚠️ No pins found/locked"
 
-    # ✨ V18: 增加 pin_define 參數
     def allocate_group(self, peri_type, count, option_str="", row_idx=0, pin_define=""):
         if count == 0: return ""
         if peri_type in ["DDR", "FMC", "SDMMC", "QUADSPI"]:
@@ -250,7 +417,6 @@ class GPIOPlanner:
             
             if possible:
                 for p, f in temp_assignment.items():
-                    # ✨ V18: 儲存 pin_define
                     self.assignments[p] = {'desc': f"[Auto] {inst_name} ({f})", 'row': row_idx, 'mode': 'Auto', 'note': pin_define}
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
@@ -275,12 +441,10 @@ class GPIOPlanner:
             if failure_reasons: reason_str = f"\n❌ {failure_reasons[0]}"
             return f"❌ Insufficient ({success_groups}/{count}){reason_str}"
         
-    # ✨ V18: 增加 pin_define 參數
     def allocate_manual(self, peri_name, pin, row_idx=0, pin_define=""):
         pin = pin.strip().upper() 
         if pin in self.pin_map:
             if self.is_pin_free(pin):
-                # ✨ V18: 儲存 pin_define
                 self.assignments[pin] = {'desc': f"[Manual] {peri_name}", 'row': row_idx, 'mode': 'Manual', 'note': pin_define}
                 return "✅ Locked"
             else: 
@@ -288,128 +452,15 @@ class GPIOPlanner:
                 return f"❌ Conflict ({conflict_desc})"
         else: return "❌ Invalid Pin"
 
-# ================= Google Sheet 控制器 =================
-class DashboardController:
-    def __init__(self):
-        self.client = None; self.sheet = None
-    def connect(self):
-        log("🔌 連線 Google Sheet..."); json_content = os.environ.get('GOOGLE_SHEETS_JSON')
-        if not json_content: return False
-        try:
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_content), ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
-            self.client = gspread.authorize(creds); self.sheet = self.client.open(SPREADSHEET_NAME)
-            return True
-        except: return False
-    def setup_reference_data(self, menu_data):
-        try:
-            try: ws = self.sheet.worksheet(WORKSHEET_REF)
-            except: ws = self.sheet.add_worksheet(title=WORKSHEET_REF, rows="50", cols="20")
-            ws.clear(); categories = sorted(menu_data.keys()); cols = []
-            for cat in categories: cols.append([cat] + sorted(menu_data[cat]))
-            for i, col_data in enumerate(cols):
-                col_values = [[x] for x in col_data]
-                range_str = gspread.utils.rowcol_to_a1(1, i+1)
-                ws.update(range_name=range_str, values=col_values)
-            return categories
-        except: return []
-    def init_config_sheet(self, categories, all_peris):
-        try:
-            try: ws = self.sheet.worksheet(WORKSHEET_CONFIG)
-            except:
-                ws = self.sheet.add_worksheet(title=WORKSHEET_CONFIG, rows="50", cols="10")
-                ws.append_row(["Category", "Peripheral", "Quantity (Groups)", "Option / Fixed Pin", "Status (Result)", "Pin Define"])
-                ws.format('A1:F1', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 1.0, 'green': 0.9, 'blue': 0.6}})
-            rule_cat = {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": c} for c in categories]}, "showCustomUi": True}
-            rule_peri = {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": p} for p in all_peris]}, "showCustomUi": True}
-            reqs = [{"setDataValidation": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 0, "endColumnIndex": 1}, "rule": rule_cat}},
-                    {"setDataValidation": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 1, "endColumnIndex": 2}, "rule": rule_peri}}]
-            self.sheet.batch_update({"requests": reqs})
-        except: pass
-    
-    def read_config(self):
-        try:
-            ws = self.sheet.worksheet(WORKSHEET_CONFIG)
-            raw_rows = ws.get_all_values()
-            if len(raw_rows) < 1: return []
-            headers = raw_rows[0]
-            col_map = {}
-            for idx, text in enumerate(headers):
-                text = str(text).strip()
-                if 'Peripheral' in text: col_map['peri'] = idx
-                elif 'Quantity' in text: col_map['qty'] = idx
-                elif 'Option' in text or 'Fixed' in text: col_map['opt'] = idx
-                # ✨ V18: 尋找 "Define" 欄位
-                elif 'Define' in text: col_map['def'] = idx
-            
-            if 'peri' not in col_map or 'opt' not in col_map: return []
-
-            data_list = []
-            for row in raw_rows[1:]:
-                while len(row) < len(headers): row.append("")
-                item = {
-                    'Peripheral': row[col_map['peri']],
-                    'Quantity (Groups)': row[col_map.get('qty', -1)] if 'qty' in col_map else "0",
-                    'Option / Fixed Pin': row[col_map['opt']],
-                    # ✨ V18: 讀取 Pin Define
-                    'Pin Define': row[col_map['def']] if 'def' in col_map else ""
-                }
-                data_list.append(item)
-            log(f"🔎 成功解析 {len(data_list)} 筆設定資料")
-            return data_list
-        except Exception as e:
-            log(f"❌ 讀取失敗: {e}")
-            return []
-
-    def write_status_back(self, status_list):
-        try:
-            ws = self.sheet.worksheet(WORKSHEET_CONFIG)
-            cell_list = [[s] for s in status_list]
-            range_str = f"E2:E{1 + len(status_list)}"
-            ws.update(range_name=range_str, values=cell_list)
-        except: pass
-    
-    def generate_pinout_view(self, planner, total_pins):
-        try:
-            try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
-            except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="100", cols="20")
-            ws.clear()
-            assignments = planner.assignments; used_count = len(assignments); free_count = total_pins - used_count
-            ws.update(values=[['Resource Summary', ''], ['Total GPIO', total_pins], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
-            ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
-            
-            # ✨ V18: 增加 Pin Define 標題
-            headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define"]
-            rows = [headers]
-            sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p]['row'], p))
-            for pin in sorted_pins:
-                data = assignments[pin]; usage = data['desc']; mode = data['mode']; spec = "-"
-                # ✨ V18: 取得 Pin Define
-                note = data.get('note', '')
-                if "TIM" in usage:
-                    match = re.search(r'(TIM\d+)', usage)
-                    if match: spec = TIMER_METADATA.get(match.group(1), "")
-                rows.append([pin, usage, spec, mode, note])
-                
-            if planner.failed_reports:
-                rows.append(["--- FAILED / MISSING ---", "---", "---", "---", "---"])
-                for report in planner.failed_reports:
-                    rows.append([report['pin'], report['desc'], "-", report['mode'], ""])
-            
-            # ✨ V18: 寫入範圍擴大到 E 欄
-            ws.update(values=rows, range_name='A6')
-            ws.format('A6:E6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
-            if planner.failed_reports:
-                start_row = 6 + len(assignments) + 1
-                end_row = start_row + len(planner.failed_reports)
-                ws.format(f'A{start_row}:E{end_row}', {'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8}})
-        except: pass
-
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V18 - Pin Define Sync)...")
-    parser = STM32XMLParser(XML_FILENAME); parser.parse()
-    menu_data, all_peris = parser.get_organized_menu_data()
+    log("🚀 程式啟動 (V20 - GPIO Sync)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
+    
+    # 1. 解析資料庫 (從 GPIO sheet)
+    parser = STM32SheetParser(dashboard); parser.parse()
+    menu_data, all_peris = parser.get_organized_menu_data()
+    
     log("⚙️ 初始化表單...")
     categories = dashboard.setup_reference_data(menu_data)
     dashboard.init_config_sheet(categories, all_peris)
@@ -420,13 +471,10 @@ if __name__ == "__main__":
         peri = str(row.get('Peripheral', '')).strip()
         qty_str = str(row.get('Quantity (Groups)', '0'))
         option = str(row.get('Option / Fixed Pin', '')).strip().upper()
-        # ✨ V18: 讀取 Pin Define
         pin_define = str(row.get('Pin Define', '')).strip()
         
-        # 腳位優先判斷
         if option in parser.pin_map:
             if not peri: peri = "Reserved" 
-            # ✨ V18: 傳入 pin_define
             result = planner.allocate_manual(peri, option, row_idx, pin_define)
             status_results.append(result)
             log(f"   🔹 Row {row_idx+2}: 腳位鎖定 {option} -> {result}")
@@ -443,9 +491,12 @@ if __name__ == "__main__":
         try: qty = int(qty_str)
         except: qty = 0
         
-        # ✨ V18: 傳入 pin_define
         result = planner.allocate_group(peri, qty, option, row_idx, pin_define)
         status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
 
-    log("📝 寫回結果..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, len(parser.pin_map))
+    log("📝 寫回結果 (Pinout View)..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, parser)
+    
+    # 2. 同步回 GPIO Sheet
+    dashboard.sync_to_gpio(planner.assignments)
+    
     log("🎉 執行成功！")
