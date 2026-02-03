@@ -113,6 +113,17 @@ class STM32XMLParser:
             
             for p in self.pin_map: self.pin_map[p].sort()
             log(f"✅ XML 解析完成，可用 I/O 數: {len(self.pin_map)}")
+            
+            # ✨ V34 Debug: 印出嫌疑犯腳位的功能列表
+            suspects = ["PD12", "PE8", "PA15", "PB10"]
+            log("🔍 DEBUG: 腳位功能檢查 (Suspect Check):")
+            for s in suspects:
+                if s in self.pin_map:
+                    log(f"   🚩 {s} 擁有功能: {self.pin_map[s]}")
+                else:
+                    log(f"   ❓ {s} 不存在於 XML 中")
+            log("--------------------------------------------------")
+
         except Exception as e:
             log(f"❌ XML 解析失敗: {e}")
             sys.exit(1)
@@ -278,20 +289,19 @@ class DashboardController:
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="200", cols="30")
             
-            # ✨ V33: 強制備份 Remark，不依賴 Header 名稱
             try:
                 existing_data = ws.get_all_values()
                 if len(existing_data) > 0:
-                    # 預設 A 欄是 Pin Name (Index 0), F 欄是 Remark (Index 5)
-                    name_col_idx = 0 
-                    rem_col_idx = 5 
-                    
-                    for row in existing_data[1:]: # Skip header
-                        if len(row) > rem_col_idx and row[name_col_idx]:
-                            pin_name = row[name_col_idx].strip().upper()
-                            remark_val = row[rem_col_idx]
-                            if remark_val:
-                                preserved_remarks[pin_name] = remark_val
+                    headers = existing_data[0]
+                    if "Remark" in headers:
+                        rem_col_idx = headers.index("Remark")
+                        name_col_idx = 0 
+                        for row in existing_data[1:]:
+                            if len(row) > rem_col_idx and row[name_col_idx]:
+                                pin_name = row[name_col_idx].strip().upper()
+                                remark_val = row[rem_col_idx]
+                                if remark_val:
+                                    preserved_remarks[pin_name] = remark_val
             except Exception as e:
                 log(f"⚠️ 讀取舊 Remark 失敗: {e}")
 
@@ -322,7 +332,6 @@ class DashboardController:
             sheet_id = ws.id
             start_row_idx = 6 
             
-            # ✨ V33: 在上色前，先強制將背景色重置為白色
             format_requests.append({
                 "repeatCell": {
                     "range": {
@@ -356,8 +365,6 @@ class DashboardController:
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
                 
                 af_data = dashboard.gpio_af_data.get(pin, [""] * 16)
-                
-                # ✨ V33: 填回保留的 Remark
                 user_remark = preserved_remarks.get(pin, "")
                 
                 rows.append([pin, usage, spec, mode, note, user_remark] + af_data)
@@ -641,7 +648,7 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V33 - Safe Remark Protection)...")
+    log("🚀 程式啟動 (V34 - Deep Debugger)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
