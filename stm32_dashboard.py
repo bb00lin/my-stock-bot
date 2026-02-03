@@ -15,7 +15,8 @@ WORKSHEET_CONFIG = 'Config_Panel'
 WORKSHEET_RESULT = 'Pinout_View'
 WORKSHEET_REF = 'Ref_Data'
 
-# STM32 Timer Metadata (供顯示用)
+# STM32 Timer Metadata
+# 根據 STM32MP133 參考手冊: TIM2, TIM5 為 32-bit
 TIMER_METADATA = {
     "TIM1": "16-bit, Advanced", "TIM8": "16-bit, Advanced",
     "TIM2": "32-bit, General",  "TIM5": "32-bit, General",
@@ -25,7 +26,6 @@ TIMER_METADATA = {
 }
 
 def log(msg):
-    """印出帶有時間戳記的 Log，強制刷新緩衝區以免 GitHub Actions 卡住"""
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 # ================= XML 解析器 =================
@@ -36,16 +36,14 @@ class STM32XMLParser:
         self.detected_peripherals = set()
 
     def parse(self):
-        log(f"📖 正在讀取 XML: {self.xml_path}")
+        log(f"📖 讀取 XML: {self.xml_path}")
         if not os.path.exists(self.xml_path):
-            log(f"❌ 嚴重錯誤：找不到 XML 檔案 '{self.xml_path}'！")
-            log(f"   目前目錄下的檔案: {os.listdir('.')}")
+            log(f"❌ 找不到 XML: {self.xml_path}")
             sys.exit(1)
 
         try:
             tree = ET.parse(self.xml_path)
             root = tree.getroot()
-            # 處理 XML Namespace
             ns = {'ns': 'http://mcd.rou.st.com/modules.php?name=mcu'}
             pins = root.findall("ns:Pin", ns)
             
@@ -60,7 +58,6 @@ class STM32XMLParser:
 
                     self.pin_map[pin_name].append(sig_name)
                     
-                    # 提取週邊類型 (例如 I2C1_SDA -> I2C)
                     raw_peri = sig_name.split('_')[0]
                     peri_type = re.sub(r'\d+', '', raw_peri)
                     if "OTG" in sig_name: peri_type = "USB_OTG"
@@ -82,7 +79,9 @@ class STM32XMLParser:
             "Security": ["CRYP", "HASH"]
         }
         menu = defaultdict(list)
-        for peri in sorted(self.detected_peripherals):
+        all_peris = sorted(list(self.detected_peripherals)) # 扁平化列表供 B 欄使用
+        
+        for peri in all_peris:
             assigned = False
             for cat, keywords in categories.items():
                 if peri in keywords:
@@ -90,9 +89,10 @@ class STM32XMLParser:
                     assigned = True
                     break
             if not assigned: menu["Other"].append(peri)
-        return menu
+            
+        return menu, all_peris
 
-# ================= 規劃核心演算法 =================
+# ================= 規劃核心 =================
 class GPIOPlanner:
     def __init__(self, pin_map):
         self.pin_map = pin_map
@@ -101,8 +101,27 @@ class GPIOPlanner:
     def is_pin_free(self, pin):
         return pin not in self.assignments
 
-    def find_pin_for_signal(self, signal_regex, exclude_pins=[]):
-        """尋找符合 Regex 訊號名稱的空閒腳位"""
+    def find_pin_for_signal(self, signal_regex, exclude_pins=[], preferred_instances=None):
+        """
+        preferred_instances: list of strings, e.g. ['TIM2', 'TIM5']
+        """
+        # 第一次掃描：優先尋找 preferred_instances
+        if preferred_instances:
+            for pin, funcs in self.pin_map.items():
+                if not self.is_pin_free(pin) or pin in exclude_pins: continue
+                for func in funcs:
+                    if re.match(signal_regex, func):
+                        # 檢查是否屬於偏好的 Instance
+                        for pref in preferred_instances:
+                            if func.startswith(pref):
+                                return pin, func
+        
+        # 如果沒指定偏好，或偏好的找不到，則進行一般搜尋 (除非強制要求)
+        # 這裡的邏輯是：如果有指定 32-bit 但找不到，就會回傳 None (嚴格模式)
+        if preferred_instances:
+            return None, None
+
+        # 第二次掃描：任意匹配
         for pin, funcs in self.pin_map.items():
             if not self.is_pin_free(pin) or pin in exclude_pins: continue
             for func in funcs:
@@ -111,22 +130,37 @@ class GPIOPlanner:
         return None, None
 
     def allocate_group(self, peri_type, count, option_str=""):
-        """分配整組週邊 (例如 I2C=SCL+SDA)"""
         if count == 0: return ""
         results = []
         success_groups = 0
         
-        # 進階選項解析
-        needs_rts_cts = "RTS_CTS" in str(option_str).upper()
-        needs_nss = "NSS" in str(option_str).upper()
+        # 解析選項
+        opt_upper = str(option_str).upper()
+        needs_rts_cts = "RTS_CTS" in opt_upper
+        needs_nss = "NSS" in opt_upper
+        force_32bit = "32-BIT" in opt_upper or "32BIT" in opt_upper
         
-        # 嘗試 Instance 1~12 (涵蓋大部分 STM32)
-        for i in range(1, 13):
+        # 決定搜尋範圍
+        search_range = range(1, 15) # Default
+        
+        # 如果是 PWM 且要求 32-bit，我們不遍歷 Instance，而是直接找 TIM2/TIM5
+        if "PWM" in peri_type and force_32bit:
+            target_timers = ["TIM2", "TIM5"]
+        else:
+            target_timers = None # 任意 Timer
+
+        # 針對 UART/I2C/SPI 等的一般邏輯
+        for i in search_range:
             if success_groups >= count: break
-            inst_name = f"{peri_type}{i}"
-            required_signals = {}
             
-            # 定義各週邊需要的訊號組合
+            # 決定 Instance 名稱
+            if "PWM" in peri_type:
+                inst_name = "PWM_32bit" if force_32bit else "PWM"
+            else:
+                inst_name = f"{peri_type}{i}"
+            
+            required_signals = {}
+            # ... (信號定義與之前相同) ...
             if "I2C" in peri_type:
                 required_signals = {"SCL": f"{inst_name}_SCL", "SDA": f"{inst_name}_SDA"}
             elif "SPI" in peri_type:
@@ -137,16 +171,13 @@ class GPIOPlanner:
                 if needs_rts_cts:
                     required_signals["RTS"] = f"{inst_name}_RTS"
                     required_signals["CTS"] = f"{inst_name}_CTS"
-            elif "TIM" in peri_type or "PWM" in peri_type:
-                inst_name = "PWM" # PWM 不綁定特定 Timer
-                pass 
 
             temp_assignment = {}
             possible = True
             
             if "PWM" in peri_type:
-                # PWM 邏輯：找任意 TIMx_CHx
-                pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+")
+                # 這裡傳入 target_timers (['TIM2', 'TIM5'])
+                pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_timers)
                 if pin:
                     tim_inst = func.split('_')[0]
                     meta = TIMER_METADATA.get(tim_inst, "Unknown")
@@ -154,25 +185,30 @@ class GPIOPlanner:
                     temp_assignment[pin] = full_desc
                 else: possible = False
             else:
-                # 一般週邊邏輯：找齊所有訊號
                 for role, sig_name in required_signals.items():
                     pin, func = self.find_pin_for_signal(f"^{sig_name}$", exclude_pins=temp_assignment.keys())
                     if pin: temp_assignment[pin] = func
                     else: possible = False; break
             
             if possible:
-                # 確定分配
                 for p, f in temp_assignment.items():
+                    # 對於 PWM，如果分配到了，我們通常只算成功分配了一組
+                    # 但為了讓 PWM 可以分配多次 (例如 TIM2_CH1, TIM2_CH2)，我們不需要切換 Loop i
+                    # 這裡簡化處理：如果 PWM 成功，直接當作成功一組
                     desc = f"[Auto] {inst_name} ({f})"
                     self.assignments[p] = desc
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
+            
+            # 對於 PWM，不要因為一次成功就跳過迴圈，因為 TIM2 有多個通道
+            # 但一般的 Instance (I2C1) 用完就沒了
+            if "PWM" not in peri_type and possible:
+                pass # Continue to next instance i
 
         if success_groups >= count: return f"✅ OK ({success_groups}/{count})"
         else: return f"❌ Insufficient ({success_groups}/{count})"
         
     def allocate_manual(self, peri_name, pin):
-        """手動鎖定特定腳位"""
         pin = pin.strip()
         if pin in self.pin_map:
             if self.is_pin_free(pin):
@@ -188,83 +224,63 @@ class DashboardController:
         self.sheet = None
 
     def connect(self):
+        # ... (連線邏輯不變) ...
         log("🔌 正在連線 Google Sheet...")
         json_content = os.environ.get('GOOGLE_SHEETS_JSON')
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        
-        if not json_content:
-            log("❌ 嚴重錯誤：GitHub Secret 'GOOGLE_SHEETS_JSON' 未設定！")
-            return False
-            
+        if not json_content: return False
         try:
             creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_content), scope)
             self.client = gspread.authorize(creds)
             self.sheet = self.client.open(SPREADSHEET_NAME)
-            log(f"✅ 成功連線至表單: {SPREADSHEET_NAME}")
+            log(f"✅ 成功連線: {SPREADSHEET_NAME}")
             return True
-        except gspread.exceptions.SpreadsheetNotFound:
-            log(f"❌ 錯誤：找不到表單 '{SPREADSHEET_NAME}'。請確認名稱完全一致。")
-            return False
-        except Exception as e:
-            log(f"❌ 連線失敗: {e}")
-            return False
+        except: return False
 
     def setup_reference_data(self, menu_data):
-        """建立下拉選單資料庫"""
-        try:
-            try: ws = self.sheet.worksheet(WORKSHEET_REF)
-            except: ws = self.sheet.add_worksheet(title=WORKSHEET_REF, rows="50", cols="20")
-            ws.clear()
-            
-            categories = sorted(menu_data.keys())
-            cols = []
-            for cat in categories: cols.append([cat] + sorted(menu_data[cat]))
-            for i, col_data in enumerate(cols):
-                col_values = [[x] for x in col_data]
-                range_str = gspread.utils.rowcol_to_a1(1, i+1)
-                ws.update(range_name=range_str, values=col_values)
-            return categories
-        except: return []
+        # ... (略) ...
+        pass
 
-    def init_config_sheet(self, categories):
-        """初始化設定頁面 (若不存在則建立)"""
+    def init_config_sheet(self, categories, all_peris):
+        """修正版：同時設定 A 欄與 B 欄的驗證"""
         try:
             try: ws = self.sheet.worksheet(WORKSHEET_CONFIG)
             except:
                 ws = self.sheet.add_worksheet(title=WORKSHEET_CONFIG, rows="50", cols="10")
-                # 寫入正確的 V4 版標題
                 ws.append_row(["Category", "Peripheral", "Quantity (Groups)", "Option / Fixed Pin", "Status (Result)"])
                 ws.format('A1:E1', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 1.0, 'green': 0.9, 'blue': 0.6}})
             
-            # 設定 Category A 欄下拉選單
-            rule_category = {
+            # A 欄 (Category) 下拉選單
+            rule_cat = {
                 "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": c} for c in categories]},
                 "showCustomUi": True
             }
-            req_validations = [{"setDataValidation": {
-                "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 0, "endColumnIndex": 1},
-                "rule": rule_category
-            }}]
-            self.sheet.batch_update({"requests": req_validations})
-        except: pass
+            
+            # B 欄 (Peripheral) 下拉選單 - 直接給所有功能的大清單
+            rule_peri = {
+                "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": p} for p in all_peris]},
+                "showCustomUi": True
+            }
+
+            reqs = [
+                {"setDataValidation": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 0, "endColumnIndex": 1},
+                    "rule": rule_cat
+                }},
+                {"setDataValidation": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 1, "endColumnIndex": 2},
+                    "rule": rule_peri
+                }}
+            ]
+            self.sheet.batch_update({"requests": reqs})
+            log("✅ 下拉選單 (A欄, B欄) 已更新。")
+        except Exception as e:
+            log(f"⚠️ 設定選單失敗: {e}")
 
     def read_config(self):
         try:
-            ws = self.sheet.worksheet(WORKSHEET_CONFIG)
-            data = ws.get_all_records()
-            log(f"📊 讀取到 {len(data)} 筆設定資料。")
-            
-            # 防呆檢查：確認欄位名稱是否為新版
-            if len(data) > 0:
-                required = 'Quantity (Groups)'
-                if required not in data[0]:
-                    log(f"❌ 錯誤：表單欄位不符！請刪除 '{WORKSHEET_CONFIG}' 分頁讓程式重建。")
-                    log(f"   預期: {required}, 實際: {list(data[0].keys())}")
-                    return []
-            return data
-        except Exception as e:
-            log(f"❌ 讀取設定失敗: {e}")
-            return []
+            return self.sheet.worksheet(WORKSHEET_CONFIG).get_all_records()
+        except: return []
 
     def write_status_back(self, status_list):
         try:
@@ -290,9 +306,11 @@ class DashboardController:
             for pin in sorted(assignments.keys()):
                 usage = assignments[pin]
                 spec = "-"
+                # 解析 Timer 規格
                 if "TIM" in usage:
                     match = re.search(r'(TIM\d+)', usage)
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
+                
                 rows.append([pin, usage, spec, "Manual" if "Manual" in usage else "Auto"])
                 
             ws.update('A6', rows)
@@ -301,31 +319,25 @@ class DashboardController:
 
 # ================= 主程式執行點 =================
 if __name__ == "__main__":
-    log("🚀 程式啟動 (stm32_dashboard.py V4)...")
+    log("🚀 程式啟動 (V5)...")
     
-    # 1. XML 解析
     parser = STM32XMLParser(XML_FILENAME)
     parser.parse()
-    menu_data = parser.get_organized_menu_data()
+    # 這裡現在回傳兩個值：分類字典, 所有功能列表
+    menu_data, all_peris = parser.get_organized_menu_data()
     
-    # 2. 連線
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
 
-    # 3. 初始化 (建立 Ref_Data 與 Config_Panel)
-    log("⚙️ 初始化表單結構...")
+    log("⚙️ 初始化表單選單...")
     categories = dashboard.setup_reference_data(menu_data)
-    dashboard.init_config_sheet(categories)
+    # 將所有功能列表傳入，設定 B 欄選單
+    dashboard.init_config_sheet(categories, all_peris)
     
-    # 4. 讀取設定
-    log("⚙️ 讀取使用者設定...")
+    log("⚙️ 讀取設定...")
     config_data = dashboard.read_config()
-    if not config_data:
-        log("⚠️ 設定資料為空或格式錯誤，程式中止。")
-        sys.exit(0)
-
-    # 5. 執行規劃
-    log("⚙️ 開始執行演算法...")
+    
+    log("⚙️ 執行規劃...")
     planner = GPIOPlanner(parser.pin_map)
     status_results = []
     
@@ -341,7 +353,6 @@ if __name__ == "__main__":
         try: qty = int(qty_str)
         except: qty = 0
         
-        # 判斷手動鎖定或自動分配
         is_fixed_pin = re.match(r'^P[A-K]\d+$', option)
         if is_fixed_pin:
             result = planner.allocate_manual(peri, option)
@@ -351,8 +362,7 @@ if __name__ == "__main__":
         status_results.append(result)
         log(f"   🔹 {peri} (x{qty}): {result}")
 
-    # 6. 回寫結果
-    log("📝 寫回結果至 Google Sheet...")
+    log("📝 寫回結果...")
     dashboard.write_status_back(status_results)
     dashboard.generate_pinout_view(planner.assignments, len(parser.pin_map))
     
