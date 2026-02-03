@@ -52,8 +52,7 @@ class STM32XMLParser:
                 signals = pin.findall('ns:Signal', ns)
                 for sig in signals:
                     sig_name = sig.attrib.get('Name')
-                    # 即使是 GPIO 也要記錄，但標記為 GPIO
-                    # 為了保護 DDR，我們需要解析所有訊號
+                    # 記錄所有功能
                     self.pin_map[pin_name].append(sig_name)
                     
                     if sig_name.startswith("GPIO"): continue
@@ -62,10 +61,12 @@ class STM32XMLParser:
                     peri_type = re.sub(r'\d+', '', raw_peri)
                     if "OTG" in sig_name: peri_type = "USB_OTG"
                     self.detected_peripherals.add(peri_type)
-                    
-            # 手動加入一些可能沒被識別到的系統關鍵字
+            
+            # 手動補充系統關鍵字
             self.detected_peripherals.add("DDR")
-            self.detected_peripherals.add("FMC") # For NAND/NOR Flash
+            self.detected_peripherals.add("FMC")
+            self.detected_peripherals.add("SDMMC")
+            self.detected_peripherals.add("QUADSPI")
             
             for p in self.pin_map: self.pin_map[p].sort()
             log(f"✅ XML 解析完成，可用 I/O 數: {len(self.pin_map)}")
@@ -75,7 +76,7 @@ class STM32XMLParser:
 
     def get_organized_menu_data(self):
         categories = {
-            "System_Critical": ["DDR", "FMC", "SDMMC", "QUADSPI"], # 新增：系統關鍵
+            "System_Critical": ["DDR", "FMC", "SDMMC", "QUADSPI"],
             "System_Core": ["GPIO", "NVIC", "RCC", "SYS", "PWR"],
             "Connectivity": ["I2C", "SPI", "UART", "USART", "ETH", "USB", "FDCAN"],
             "Timers": ["TIM", "LPTIM", "RTC"],
@@ -110,7 +111,7 @@ class GPIOPlanner:
         return re.sub(r'[\s_\-,/]+', '', str(text).upper())
 
     def find_pin_for_signal(self, signal_regex, exclude_pins=[], preferred_instances=None):
-        # 邏輯維持 V6 相同 (優先搜尋 + 一般搜尋)
+        # 1. 優先搜尋
         if preferred_instances:
             for pin, funcs in self.pin_map.items():
                 if not self.is_pin_free(pin) or pin in exclude_pins: continue
@@ -120,6 +121,7 @@ class GPIOPlanner:
                             if func.startswith(pref): return pin, func
             return None, None
 
+        # 2. 一般搜尋
         for pin, funcs in self.pin_map.items():
             if not self.is_pin_free(pin) or pin in exclude_pins: continue
             for func in funcs:
@@ -128,62 +130,35 @@ class GPIOPlanner:
         return None, None
 
     def allocate_system_critical(self, peri_type, row_idx):
-        """✨ V7 新功能：霸道鎖定系統關鍵腳位"""
+        """鎖定系統關鍵腳位"""
         locked_count = 0
-        
-        # 針對 DDR 的特殊處理
         if "DDR" in peri_type:
-            # 搜尋所有腳位，只要該腳位的訊號列表裡有以 "DDR" 開頭的，全部鎖死
             for pin, funcs in self.pin_map.items():
                 if not self.is_pin_free(pin): continue
                 for func in funcs:
                     if func.startswith("DDR_") or func.startswith("DDRPHYC_"):
-                        self.assignments[pin] = {
-                            'desc': f"[System] {peri_type} ({func})",
-                            'row': row_idx,
-                            'mode': 'Critical'
-                        }
+                        self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical'}
                         locked_count += 1
-                        break # 鎖定後跳過此腳位的其他訊號
-        
-        # 針對 SDMMC / FMC / QUADSPI 的處理
-        # 這裡假設如果使用者選了 SDMMC1，就是要保留整組介面
-        # 簡單邏輯：搜尋包含該關鍵字的訊號並優先鎖定
+                        break
         else:
-            # 找出特定 Instance (e.g., SDMMC1)
-            # 如果使用者只選了 SDMMC，我們預設鎖定 SDMMC1, SDMMC2... 
-            # 建議使用者在 Option 欄位指定 "SDMMC1" 或是 quantity 填 1 代表要一組
-            
-            # 這裡採用廣域搜尋：只要腳位有該功能，且目前沒被用，就預設保留給系統
-            # 這是一個保護性策略
-            target_peri = peri_type # e.g. SDMMC
-            
+            target_peri = peri_type 
             for pin, funcs in self.pin_map.items():
                 if not self.is_pin_free(pin): continue
                 for func in funcs:
-                    # 嚴格比對：例如 SDMMC1_CK
                     if func.startswith(target_peri):
-                         self.assignments[pin] = {
-                            'desc': f"[System] {peri_type} ({func})",
-                            'row': row_idx,
-                            'mode': 'Critical'
-                        }
+                         self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical'}
                          locked_count += 1
                          break
-
-        if locked_count > 0:
-            return f"✅ Reserved {locked_count} pins"
-        else:
-            return "⚠️ No pins found/locked"
+        if locked_count > 0: return f"✅ Reserved {locked_count} pins"
+        else: return "⚠️ No pins found/locked"
 
     def allocate_group(self, peri_type, count, option_str="", row_idx=0):
         if count == 0: return ""
         
-        # ✨ V7: 攔截系統關鍵字
+        # 攔截系統關鍵字
         if peri_type in ["DDR", "FMC", "SDMMC", "QUADSPI"]:
             return self.allocate_system_critical(peri_type, row_idx)
 
-        # 以下維持 V6 的邏輯
         results = []
         success_groups = 0
         opt_clean = self.normalize_option(option_str)
@@ -210,7 +185,10 @@ class GPIOPlanner:
                 if needs_nss: required_signals["NSS"] = f"{inst_name}_NSS"
             elif "UART" in peri_type or "USART" in peri_type:
                 required_signals = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
-                if needs_rts_cts: required_signals["RTS"] = f"{inst_name}_RTS", "CTS": f"{inst_name}_CTS"
+                if needs_rts_cts:
+                    # 修正處：將賦值分開寫
+                    required_signals["RTS"] = f"{inst_name}_RTS"
+                    required_signals["CTS"] = f"{inst_name}_CTS"
 
             temp_assignment = {}
             possible = True
@@ -224,7 +202,6 @@ class GPIOPlanner:
                 else: possible = False
             else:
                 for role, sig_name in required_signals.items():
-                    if isinstance(sig_name, tuple): sig_name = sig_name[0]
                     pin, func = self.find_pin_for_signal(f"^{sig_name}$", exclude_pins=temp_assignment.keys())
                     if pin: temp_assignment[pin] = func
                     else: possible = False; break
@@ -239,7 +216,6 @@ class GPIOPlanner:
         else: return f"❌ Insufficient ({success_groups}/{count})"
         
     def allocate_manual(self, peri_name, pin, row_idx=0):
-        # 維持 V6 邏輯
         pin = pin.strip()
         if pin in self.pin_map:
             if self.is_pin_free(pin):
@@ -251,7 +227,6 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 # ================= Google Sheet 控制器 =================
-# (此區塊與 V6 相同，無須變更，複製 V6 的內容即可)
 class DashboardController:
     def __init__(self):
         self.client = None; self.sheet = None
@@ -316,7 +291,7 @@ class DashboardController:
         except: pass
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V7 - System Critical Protection)...")
+    log("🚀 程式啟動 (V7.1 - 修正版)...")
     parser = STM32XMLParser(XML_FILENAME); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     dashboard = DashboardController()
