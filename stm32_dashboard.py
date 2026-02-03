@@ -60,12 +60,9 @@ class STM32XMLParser:
                     if "OTG" in sig_name: peri_type = "USB_OTG"
                     self.detected_peripherals.add(peri_type)
             
-            # 手動補充系統關鍵字
-            self.detected_peripherals.add("DDR")
-            self.detected_peripherals.add("FMC")
-            self.detected_peripherals.add("SDMMC")
-            self.detected_peripherals.add("QUADSPI")
-            self.detected_peripherals.add("ADC") # 確保 ADC 有被列入
+            # 補充關鍵字
+            for p in ["DDR", "FMC", "SDMMC", "QUADSPI", "ADC", "ETH"]:
+                self.detected_peripherals.add(p)
             
             for p in self.pin_map: self.pin_map[p].sort()
             log(f"✅ XML 解析完成，可用 I/O 數: {len(self.pin_map)}")
@@ -148,27 +145,46 @@ class GPIOPlanner:
         results = []
         success_groups = 0
         opt_clean = self.normalize_option(option_str)
+        
+        # 通用選項
         needs_rts_cts = ("RTS" in opt_clean and "CTS" in opt_clean)
         needs_nss = "NSS" in opt_clean
         force_32bit = "32BIT" in opt_clean
         force_16bit = "16BIT" in opt_clean
         
+        # ETH 選項
+        is_rgmii = "RGMII" in opt_clean
+        is_rmii = "RMII" in opt_clean
+        
+        # 搜尋範圍
         search_range = range(1, 15)
-        target_timers = None
+        target_instances = None # 預設任意
+        
         if "PWM" in peri_type:
-            if force_32bit: target_timers = ["TIM2", "TIM5"]
-            elif force_16bit: target_timers = ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
+            if force_32bit: target_instances = ["TIM2", "TIM5"]
+            elif force_16bit: target_instances = ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
+            
+        elif "ETH" in peri_type:
+            # 優先檢查 Option 是否指定了 ETH1 或 ETH2
+            if "ETH1" in opt_clean: target_instances = ["ETH1"]
+            elif "ETH2" in opt_clean: target_instances = ["ETH2"]
+            else: target_instances = ["ETH1", "ETH2"] # 兩者皆可
+            search_range = range(1, 3) # 只跑 1 和 2
 
         for i in search_range:
             if success_groups >= count: break
             
-            # 定義 Instance 名稱
+            inst_name = f"{peri_type}{i}"
             if "PWM" in peri_type: inst_name = "PWM"
-            elif "ADC" in peri_type: inst_name = "ADC" # ADC 不強制區分 ADC1/ADC2，視為資源池
-            else: inst_name = f"{peri_type}{i}"
+            if "ADC" in peri_type: inst_name = "ADC"
             
+            # 如果有限定 Instance (例如 ETH 指定 ETH2)，則跳過不符合的 i
+            if target_instances and "ETH" in peri_type:
+                if inst_name not in target_instances: continue
+
             required_signals = {}
-            # 依據週邊類型定義需求
+            
+            # === 定義各種週邊的訊號需求 ===
             if "I2C" in peri_type:
                 required_signals = {"SCL": f"{inst_name}_SCL", "SDA": f"{inst_name}_SDA"}
             elif "SPI" in peri_type:
@@ -180,28 +196,60 @@ class GPIOPlanner:
                     required_signals["RTS"] = f"{inst_name}_RTS"
                     required_signals["CTS"] = f"{inst_name}_CTS"
             
-            # --- 分配邏輯 ---
+            # ✨ V8 新增: ETH 邏輯 (RMII / RGMII)
+            elif "ETH" in peri_type:
+                # 預設如果沒寫，就當作 RGMII (或是可以報錯)
+                # 這裡定義 RMII 介面
+                if is_rmii:
+                    required_signals = {
+                        "REF_CLK": f"{inst_name}_RMII_REF_CLK",
+                        "CRS_DV": f"{inst_name}_RMII_CRS_DV",
+                        "RXD0": f"{inst_name}_RMII_RXD0",
+                        "RXD1": f"{inst_name}_RMII_RXD1",
+                        "TX_EN": f"{inst_name}_RMII_TX_EN",
+                        "TXD0": f"{inst_name}_RMII_TXD0",
+                        "TXD1": f"{inst_name}_RMII_TXD1",
+                        "MDC": f"{inst_name}_MDC",   # Management
+                        "MDIO": f"{inst_name}_MDIO"
+                    }
+                # 定義 RGMII 介面 (1000M)
+                elif is_rgmii:
+                    required_signals = {
+                        "GTX_CLK": f"{inst_name}_RGMII_GTX_CLK",
+                        "RX_CLK": f"{inst_name}_RGMII_RX_CLK",
+                        "RX_CTL": f"{inst_name}_RGMII_RX_CTL",
+                        "RXD0": f"{inst_name}_RGMII_RXD0",
+                        "RXD1": f"{inst_name}_RGMII_RXD1",
+                        "RXD2": f"{inst_name}_RGMII_RXD2",
+                        "RXD3": f"{inst_name}_RGMII_RXD3",
+                        "TX_CTL": f"{inst_name}_RGMII_TX_CTL",
+                        "TXD0": f"{inst_name}_RGMII_TXD0",
+                        "TXD1": f"{inst_name}_RGMII_TXD1",
+                        "TXD2": f"{inst_name}_RGMII_TXD2",
+                        "TXD3": f"{inst_name}_RGMII_TXD3",
+                        "MDC": f"{inst_name}_MDC",
+                        "MDIO": f"{inst_name}_MDIO"
+                    }
+                else:
+                    # 未指定，預設找 RMII (因為腳位少，比較容易成功)
+                    # 或是回傳警告，這裡先預設 RMII
+                    required_signals = {"REF_CLK": f"{inst_name}_RMII_REF_CLK"} # 簡化檢查
+
+            # === 分配執行 ===
             temp_assignment = {}
             possible = True
             
-            # A. 單一腳位類型 (PWM, ADC)
             if "PWM" in peri_type:
-                pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_timers)
+                pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
                 if pin:
                     tim_inst = func.split('_')[0]
                     meta = TIMER_METADATA.get(tim_inst, "Unknown")
                     temp_assignment[pin] = f"{func} [{meta}]"
                 else: possible = False
-
-            # ✨ V7.2 新增 ADC 邏輯
             elif "ADC" in peri_type:
-                # 尋找任意 ADC 輸入 (IN 或 INP)
                 pin, func = self.find_pin_for_signal(r"ADC\d+_IN(P)?\d+")
-                if pin:
-                    temp_assignment[pin] = func
+                if pin: temp_assignment[pin] = func
                 else: possible = False
-
-            # B. 多腳位群組類型 (I2C, SPI, UART)
             else:
                 for role, sig_name in required_signals.items():
                     pin, func = self.find_pin_for_signal(f"^{sig_name}$", exclude_pins=temp_assignment.keys())
@@ -214,13 +262,8 @@ class GPIOPlanner:
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
             
-            # 如果是 ADC 或 PWM，即使成功了也不要跳出 i 迴圈，因為還有其他 channel 可用
-            # 但為了簡化，這裡 allocate_group 是針對 "數量"，上面的 loop 是針對 "Instance 1~15"
-            # 對於 PWM/ADC 這種 Resource Pool 型，我們不需要依賴 i 來區分 Instance
-            # 所以如果成功分配了一個，我們就不需要繼續跑 i 迴圈去試探 "ADC2", "ADC3"... 
-            # 因為 find_pin_for_signal 已經會全域搜尋了。
             if ("PWM" in peri_type or "ADC" in peri_type) and possible:
-                pass # 繼續下一次 while count 檢查 (外層邏輯控制)
+                pass 
 
         if success_groups >= count: return f"✅ OK ({success_groups}/{count})"
         else: return f"❌ Insufficient ({success_groups}/{count})"
@@ -281,7 +324,6 @@ class DashboardController:
             ws = self.sheet.worksheet(WORKSHEET_CONFIG)
             cell_list = [[s] for s in status_list]
             range_str = f"E2:E{1 + len(status_list)}"
-            # 修正 DeprecationWarning: 使用具名參數
             ws.update(range_name=range_str, values=cell_list)
         except: pass
     def generate_pinout_view(self, assignments, total_pins):
@@ -290,7 +332,6 @@ class DashboardController:
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="100", cols="20")
             ws.clear()
             used_count = len(assignments); free_count = total_pins - used_count
-            # 修正 DeprecationWarning
             ws.update(values=[['Resource Summary', ''], ['Total GPIO', total_pins], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
             ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
             headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode"]
@@ -302,13 +343,12 @@ class DashboardController:
                     match = re.search(r'(TIM\d+)', usage)
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
                 rows.append([pin, usage, spec, mode])
-            # 修正 DeprecationWarning
             ws.update(values=rows, range_name='A6')
             ws.format('A6:D6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
         except: pass
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V7.2 - ADC Fix)...")
+    log("🚀 程式啟動 (V8 - Ethernet Support)...")
     parser = STM32XMLParser(XML_FILENAME); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     dashboard = DashboardController()
