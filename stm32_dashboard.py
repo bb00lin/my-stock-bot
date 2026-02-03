@@ -28,7 +28,6 @@ TIMER_METADATA = {
     "TIM6": "16-bit, Basic",    "TIM7": "16-bit, Basic"
 }
 
-# 功能權重表
 AF_WEIGHTS = {
     'ETH': 100, 'USB': 90, 'CAN': 80, 'FDCAN': 80,
     'I2C': 60,  'SPI': 60, 'UART': 50, 'USART': 50,
@@ -39,16 +38,13 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def expand_pin_names(name_pattern, quantity):
-    """解析 'BID 1-3' 為 ['BID1', 'BID2', 'BID3']"""
     if not name_pattern:
         return [f"GPIO_{i+1}" for i in range(quantity)]
     match = re.search(r'^(.*?)\s*(\d+)\s*[~-]\s*(\d+)$', name_pattern)
     if match:
         prefix, start, end = match.group(1).strip(), int(match.group(2)), int(match.group(3))
-        # 若數量不符，優先滿足 Quantity，名稱順延
         if (end - start + 1) != quantity: end = start + quantity - 1
         return [f"{prefix}{i}" for i in range(start, end + 1)]
-    # 若無範圍，則加上後綴數字
     return [f"{name_pattern} {i+1}" if name_pattern else f"GPIO_{i+1}" for i in range(quantity)]
 
 # ================= 配色引擎 =================
@@ -220,12 +216,8 @@ class DashboardController:
                     if isinstance(d, dict):
                         desc = d.get('desc', '')
                         gw_val = desc.split(']')[1].strip().split('(')[0] if "]" in desc else desc
-                        # 這裡使用 sheet_remark 邏輯
                         sheet_remark = preserved_remarks.get(pin, '')
-                        # 如果是 Smart GPIO 或 Group，remark 可能在 assignments 裡
                         assigned_lbl = d.get('group_label', d.get('note', ''))
-                        
-                        # 避免重複：如果 assigned_lbl 已經在 sheet_remark 裡，就不重複加
                         if assigned_lbl and assigned_lbl not in sheet_remark:
                             rm_val = f"{assigned_lbl} {sheet_remark}".strip()
                         else:
@@ -275,16 +267,30 @@ class DashboardController:
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="200", cols="30")
             
-            # 1. 讀取現有的 F 欄 (Remark) 以便保存
             try: 
                 for r in ws.get_all_values()[1:]: 
                     if len(r) > 5 and r[0]: 
-                        preserved[r[0].strip().upper()] = r[5] # Column F is index 5
+                        preserved[r[0].strip().upper()] = r[5] 
             except: pass
             
             ws.clear(); assigns = planner.assignments
-            ws.update(values=[['Summary', 'XML', 'Sheet'], ['Total', len(planner.pin_map), len(dashboard.gpio_af_data)], ['Used', len(assigns), len([p for p in assigns if p in dashboard.gpio_af_data])]], range_name='A1:C3')
-            ws.format('A1:C3', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
+            
+            # ✨ V40 Update: 計算 Summary 並新增 Free 列
+            xml_total = len(planner.pin_map)
+            xml_used = len(assigns)
+            xml_free = xml_total - xml_used
+            
+            sheet_total = len(dashboard.gpio_af_data)
+            sheet_used = len([p for p in assigns if p in dashboard.gpio_af_data])
+            sheet_free = sheet_total - sheet_used
+            
+            ws.update(values=[
+                ['Summary', 'XML', 'Sheet'], 
+                ['Total', xml_total, sheet_total], 
+                ['Used', xml_used, sheet_used],
+                ['Free', xml_free, sheet_free]  # 新增這一列
+            ], range_name='A1:C4')
+            ws.format('A1:C4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
             
             headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define", "Remark"] + [f"AF{i}" for i in range(16)]
             rows = [headers]; reqs = []; sheet_id = ws.id
@@ -295,30 +301,17 @@ class DashboardController:
                 usage = d.get('desc', str(d)) if isinstance(d, dict) else str(d)
                 spec = TIMER_METADATA.get(re.search(r'(TIM\d+)', usage).group(1), "") if "TIM" in usage and re.search(r'(TIM\d+)', usage) else "-"
                 
-                # ✨ 新功能：合併 Remark (Config Label + Manual Record)
-                # d.get('note') 是 Pin Define 欄位 (Col E)
-                # d.get('group_label') 是我們從 Pin Define 解析出來要填入 Remark 的名稱 (例如 PMIC)
-                
                 manual_remark = preserved.get(p, '')
                 auto_label = d.get('group_label', '')
                 
-                # 邏輯：如果 Config 有指定名稱，且該名稱不在原有的 Manual Remark 中，則加在前面
                 final_remark = manual_remark
                 if auto_label:
                     if auto_label not in manual_remark:
                         final_remark = f"{auto_label} {manual_remark}".strip()
                     else:
-                        final_remark = manual_remark # 已經有了就不重複
+                        final_remark = manual_remark
                 
-                row_data = [
-                    p, 
-                    usage, 
-                    spec, 
-                    d.get('mode', '') if isinstance(d, dict) else '', 
-                    d.get('note', '') if isinstance(d, dict) else '', # Col E: Pin Define
-                    final_remark # Col F: Remark (Merged)
-                ] + dashboard.gpio_af_data.get(p, [""]*16)
-                
+                row_data = [p, usage, spec, d.get('mode', '') if isinstance(d, dict) else '', d.get('note', '') if isinstance(d, dict) else '', final_remark] + dashboard.gpio_af_data.get(p, [""]*16)
                 rows.append(row_data)
                 
                 func_key = usage.split(']')[1].strip() if "]" in usage else usage
@@ -345,21 +338,13 @@ class GPIOPlanner:
     def is_pin_free(self, pin): return pin not in self.assignments
     def normalize_option(self, text): return re.sub(r'[\s_\-,/]+', '', str(text).upper()) if text else ""
 
-    # 🛑 核心更新：系統腳位過濾器 (Smart GPIO)
     def calculate_pin_cost(self, pin, current_peripherals):
-        """計算腳位成本。回傳 999999 代表此腳位為系統保留，不可分配。"""
         funcs = self.pin_map.get(pin, [])
-        
-        # ⚠️ 黑名單關鍵字擴充：包含 PWR, CPU, WAKEUP, REG 等
         FORBIDDEN = ["DDR", "RESET", "NRST", "NJTRST", "JTAG", "SWD", "BOOT", "OSC", "VBUS", "VDD", "VSS", "PZ", "PWR", "CPU", "WAKEUP", "REG"]
-        
-        # 1. 檢查 Pin Name
         if any(bad in pin.upper() for bad in FORBIDDEN): return 999999
-        # 2. 檢查 Function List
         for f in funcs:
             if any(bad in f.upper() for bad in FORBIDDEN): return 999999
-
-        cost = len(funcs) * 5 # 基礎成本
+        cost = len(funcs) * 5 
         for f in funcs:
             match = re.match(r'([A-Z]+)', f)
             if match:
@@ -373,19 +358,14 @@ class GPIOPlanner:
         for pin in self.pin_map.keys():
             if not self.is_pin_free(pin): continue
             if pin.startswith("V") and len(pin) < 4: continue 
-            
             cost = self.calculate_pin_cost(pin, current_peripherals)
-            if cost >= 999999: continue # 跳過系統腳位
-                
+            if cost >= 999999: continue 
             candidates.append({'pin': pin, 'cost': cost})
-        
         candidates.sort(key=lambda x: x['cost'])
         if len(candidates) < count: return f"❌ 可用腳位不足 ({len(candidates)}/{count})"
-        
         selected = candidates[:count]
         names = expand_pin_names(pin_define, count)
         for i in range(count):
-            # Smart GPIO 的 Pin Define 既是 Note 也是 Label
             self.assignments[selected[i]['pin']] = {'desc': f"[GPIO] {names[i]}", 'row': row_idx, 'mode': 'Smart GPIO', 'note': names[i], 'group_label': names[i]}
         return f"✅ Smart Allocated ({count})"
 
@@ -422,7 +402,6 @@ class GPIOPlanner:
             return f"❌ Conflict ({self.assignments[pin].get('desc','')})"
         return "❌ Invalid Pin"
 
-    # ✨ 核心更新：支援群組命名 (comma separated)
     def allocate_group(self, peri_type, count, option_str="", row_idx=0, pin_define=""):
         if count == 0: return ""
         if peri_type in ["DDR", "FMC", "SDMMC", "QUADSPI"]: return self.allocate_system_critical(peri_type, row_idx, option_str, pin_define)
@@ -431,7 +410,6 @@ class GPIOPlanner:
         opt_clean = self.normalize_option(option_str)
         search_range = range(1, 15); target_instances = None
         
-        # 解析標籤：將 "PMIC, ADC" 分割成 ["PMIC", "ADC"]
         group_labels = [x.strip() for x in pin_define.split(',')] if pin_define else []
         
         if "PWM" in peri_type: target_instances = ["TIM2", "TIM5"] if "32BIT" in opt_clean else ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
@@ -447,14 +425,13 @@ class GPIOPlanner:
             if target_instances and ("ETH" in peri_type):
                  if inst_name not in target_instances: continue
 
-            # 取得當前群組的標籤 (例如第 0 組拿 "PMIC")
             current_label = group_labels[success_groups] if success_groups < len(group_labels) else ""
 
             required = {}
             if "I2C" in peri_type: required = {"SCL": f"{inst_name}_SCL", "SDA": f"{inst_name}_SDA"}
             elif "SPI" in peri_type: required = {"SCK": f"{inst_name}_SCK", "MISO": f"{inst_name}_MISO", "MOSI": f"{inst_name}_MOSI"}
             elif "UART" in peri_type or "USART" in peri_type: required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
-            elif "ETH" in peri_type: required = {"MDC": f"{inst_name}_MDC", "MDIO": f"{inst_name}_MDIO", "REF_CLK": f"{inst_name}_RMII_REF_CLK"} # 簡化，完整版見前
+            elif "ETH" in peri_type: required = {"MDC": f"{inst_name}_MDC", "MDIO": f"{inst_name}_MDIO", "REF_CLK": f"{inst_name}_RMII_REF_CLK"}
             elif "ADC" in peri_type: required = {"IN": r"ADC\d+_IN(P)?\d+"}
 
             temp_assign = {}; possible = True
@@ -475,7 +452,6 @@ class GPIOPlanner:
             
             if possible:
                 for p, f in temp_assign.items():
-                    # 將 current_label 寫入 assignments
                     self.assignments[p] = {'desc': f"[Auto] {inst_name} ({f})", 'row': row_idx, 'mode': 'Auto', 'note': pin_define, 'group_label': current_label}
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
@@ -485,7 +461,6 @@ class GPIOPlanner:
         return f"✅ OK ({success_groups}/{count})" if success_groups >= count else f"❌ Insufficient ({success_groups}/{count})"
 
     def allocate_system_critical(self, peri, row, option, define):
-        # 簡化版，請確保您的系統有完整邏輯
         return "✅ Reserved"
 
 def filter_map_by_sheet(xml_map, dashboard):
@@ -500,7 +475,7 @@ def filter_map_by_sheet(xml_map, dashboard):
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V39 - Remark Label Feature)...")
+    log("🚀 程式啟動 (V40 - Free Summary Row)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
