@@ -272,7 +272,7 @@ class GPIOPlanner:
             return f"❌ Insufficient ({success_groups}/{count}){reason_str}"
         
     def allocate_manual(self, peri_name, pin, row_idx=0):
-        pin = pin.strip()
+        pin = pin.strip().upper() # ✨ V14 強制大寫
         if pin in self.pin_map:
             if self.is_pin_free(pin):
                 self.assignments[pin] = {'desc': f"[Manual] {peri_name}", 'row': row_idx, 'mode': 'Manual'}
@@ -320,8 +320,18 @@ class DashboardController:
             self.sheet.batch_update({"requests": reqs})
         except: pass
     def read_config(self):
-        try: return self.sheet.worksheet(WORKSHEET_CONFIG).get_all_records()
-        except: return []
+        try:
+            ws = self.sheet.worksheet(WORKSHEET_CONFIG)
+            data = ws.get_all_records()
+            # ✨ V14 除錯：印出第一行看標題對不對
+            if data:
+                log(f"🔎 偵測到 {len(data)} 筆資料，第一筆範例: {data[0]}")
+            else:
+                log("⚠️ 警告：讀取到的設定資料為空！")
+            return data
+        except Exception as e:
+            log(f"❌ 讀取失敗: {e}")
+            return []
     def write_status_back(self, status_list):
         try:
             ws = self.sheet.worksheet(WORKSHEET_CONFIG)
@@ -359,7 +369,7 @@ class DashboardController:
         except: pass
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V13 - Smart Lock)...")
+    log("🚀 程式啟動 (V14 - Debug Mode)...")
     parser = STM32XMLParser(XML_FILENAME); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     dashboard = DashboardController()
@@ -371,15 +381,24 @@ if __name__ == "__main__":
     log("⚙️ 執行規劃..."); planner = GPIOPlanner(parser.pin_map); status_results = []
     
     for row_idx, row in enumerate(config_data):
-        peri = str(row.get('Peripheral', '')).strip()
-        qty_str = str(row.get('Quantity (Groups)', '0'))
-        option = str(row.get('Option / Fixed Pin', '')).strip()
+        # ✨ V14: 智慧抓取欄位 (不依賴完全精準的 Header 名稱)
+        # 嘗試尋找含有 'Peripheral' 的欄位，如果沒有就找 B 欄 (假設順序)
+        peri_key = next((k for k in row.keys() if 'Peripheral' in k), None)
+        opt_key = next((k for k in row.keys() if 'Option' in k or 'Pin' in k), None)
         
-        # ✨ V13 新邏輯：如果 Peripheral 空白，但 Option 看起來像腳位，自動視為 "Reserved"
+        peri = str(row.get(peri_key, '')).strip() if peri_key else ""
+        qty_str = str(row.get('Quantity (Groups)', '0')) # Quantity 比較少變動，先維持
+        option = str(row.get(opt_key, '')).strip().upper() if opt_key else ""
+        
+        # ✨ V14 強制印出每一行的判斷結果
+        log(f"   🔎 檢查第 {row_idx+2} 行: Peri='{peri}', Opt='{option}'")
+
         if not peri:
             if re.match(r'^P[A-K]\d+$', option):
                 peri = "Reserved"
+                log(f"      👉 自動識別為 Reserved 腳位")
             else:
+                log(f"      ⚠️ 跳過：沒有功能名稱且 Option 不像腳位")
                 status_results.append("")
                 continue
 
@@ -389,7 +408,7 @@ if __name__ == "__main__":
         is_fixed_pin = re.match(r'^P[A-K]\d+$', option)
         if is_fixed_pin: result = planner.allocate_manual(peri, option, row_idx)
         else: result = planner.allocate_group(peri, qty, option, row_idx)
-        status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
+        status_results.append(result); log(f"      ✅ 結果: {result}")
 
     log("📝 寫回結果..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, len(parser.pin_map))
     log("🎉 執行成功！")
