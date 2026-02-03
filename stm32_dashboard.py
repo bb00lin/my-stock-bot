@@ -163,7 +163,6 @@ class DashboardController:
                 self.gpio_af_data[pin_name] = row[4:20] 
         except: pass
 
-    # ✨ V30: 接收 preserved_remarks 參數
     def sync_to_gpio(self, assignments, preserved_remarks):
         log("🔄 同步資料至 'GPIO' 工作表...")
         try:
@@ -182,7 +181,6 @@ class DashboardController:
                 gateway_val = ""
                 remark_val = ""
                 
-                # 取得 Pinout_View 裡的資料
                 if pin in assignments:
                     data = assignments[pin]
                     if isinstance(data, dict):
@@ -190,18 +188,14 @@ class DashboardController:
                         if "]" in raw_func: content = raw_func.split(']')[1].strip()
                         else: content = raw_func
                         
-                        # 處理括號顯示
                         if "(" in content and ")" in content:
                             start_index = content.find('(')
                             if start_index != -1: gateway_val = content[start_index:].strip()
                             else: gateway_val = content
                         else: gateway_val = content
                         
-                        # ✨ V30: 合併 Pin Define (E欄) 與 User Remark (F欄)
-                        pin_define = data.get('note', '') # 來自 Config 的 Pin Define
-                        user_remark = preserved_remarks.get(pin, '') # 來自 Pinout_View 手寫的 Remark
-                        
-                        # 用空格連接，並去除多餘空白
+                        pin_define = data.get('note', '') 
+                        user_remark = preserved_remarks.get(pin, '') 
                         remark_val = f"{pin_define} {user_remark}".strip()
                         
                     else:
@@ -280,7 +274,7 @@ class DashboardController:
     
     def generate_pinout_view(self, planner, dashboard):
         try:
-            preserved_remarks = {} # ✨ V30: 初始化回傳值
+            preserved_remarks = {} 
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="200", cols="30")
             
@@ -302,9 +296,26 @@ class DashboardController:
 
             ws.clear()
             
-            assignments = planner.assignments; used_count = len(assignments); free_count = len(planner.pin_map) - used_count
-            ws.update(values=[['Resource Summary', ''], ['Total GPIO', len(planner.pin_map)], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
-            ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
+            # ✨ V32: 計算雙重統計資料
+            # 1. XML 統計
+            xml_total = len(planner.pin_map)
+            xml_used = len(planner.assignments)
+            xml_free = xml_total - xml_used
+            
+            # 2. GPIO Sheet 統計
+            sheet_total = len(dashboard.gpio_af_data)
+            # 只有當分配的腳位 "真的存在於" GPIO Sheet 中，才算 Sheet Used
+            sheet_used = len([p for p in planner.assignments if p in dashboard.gpio_af_data])
+            sheet_free = sheet_total - sheet_used
+
+            # 更新 Header (雙欄位)
+            ws.update(values=[
+                ['Resource Summary', 'XML Spec', 'GPIO Sheet'], 
+                ['Total GPIO', xml_total, sheet_total], 
+                ['Used GPIO', xml_used, sheet_used], 
+                ['Free GPIO', xml_free, sheet_free]
+            ], range_name='A1:C4')
+            ws.format('A1:C4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
             
             af_headers = [f"AF{i}" for i in range(16)]
             headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define", "Remark"] + af_headers
@@ -411,7 +422,7 @@ class DashboardController:
             ws.format('A6:V6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
             if format_requests: self.sheet.batch_update({"requests": format_requests})
             
-            return preserved_remarks # ✨ V30: 回傳備份資料給 main
+            return preserved_remarks
             
         except Exception as e: 
             log(f"❌ 寫入結果失敗: {e}")
@@ -431,11 +442,12 @@ class GPIOPlanner:
         if not text: return ""
         return re.sub(r'[\s_\-,/]+', '', str(text).upper())
 
-    def find_pin_for_signal(self, signal_regex, exclude_pins=[], preferred_instances=None):
+    def find_pin_for_signal(self, signal_regex, exclude_pins=[], preferred_instances=None, exclude_signals=[]):
         if preferred_instances:
             for pin, funcs in self.pin_map.items():
                 if not self.is_pin_free(pin) or pin in exclude_pins: continue
                 for func in funcs:
+                    if func in exclude_signals: continue 
                     if re.match(signal_regex, func):
                         for pref in preferred_instances:
                             if func.startswith(pref): return pin, func
@@ -444,6 +456,7 @@ class GPIOPlanner:
         for pin, funcs in self.pin_map.items():
             if not self.is_pin_free(pin) or pin in exclude_pins: continue
             for func in funcs:
+                if func in exclude_signals: continue 
                 if re.match(signal_regex, func):
                     return pin, func
         return None, None
@@ -557,8 +570,23 @@ class GPIOPlanner:
             possible = True
             missing_signal_reason = "" 
             
+            used_funcs_in_group = [v for k, v in temp_assignment.items()] 
+
             if "PWM" in peri_type:
-                pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
+                current_used_funcs = []
+                for _, data in self.assignments.items():
+                    if isinstance(data, dict) and 'desc' in data:
+                        d = data['desc']
+                        if "(" in d: 
+                            f = d.split('(')[1].split(')')[0].split('[')[0].strip() 
+                            current_used_funcs.append(f)
+                            
+                pin, func = self.find_pin_for_signal(
+                    r"TIM\d+_CH\d+", 
+                    preferred_instances=target_instances,
+                    exclude_signals=current_used_funcs 
+                )
+                
                 if pin:
                     tim_inst = func.split('_')[0]
                     meta = TIMER_METADATA.get(tim_inst, "Unknown")
@@ -613,7 +641,7 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V30 - Combined Remark Sync)...")
+    log("🚀 程式啟動 (V32 - Dual Summary Comparison)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
@@ -657,12 +685,9 @@ if __name__ == "__main__":
         result = planner.allocate_group(peri, qty, option, row_idx, pin_define)
         status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
 
-    # 1. 生成 Pinout View 並備份 User Remark
-    log("📝 寫回結果 (Pinout View)...")
-    dashboard.write_status_back(status_results)
+    log("📝 寫回結果 (Pinout View)..."); dashboard.write_status_back(status_results)
     preserved_remarks = dashboard.generate_pinout_view(planner, dashboard)
     
-    # 2. 同步回 GPIO Sheet (傳入備份的 remarks)
     dashboard.sync_to_gpio(planner.assignments, preserved_remarks)
     
     log("🎉 執行成功！")
