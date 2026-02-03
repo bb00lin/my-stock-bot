@@ -163,7 +163,8 @@ class DashboardController:
                 self.gpio_af_data[pin_name] = row[4:20] 
         except: pass
 
-    def sync_to_gpio(self, assignments):
+    # ✨ V30: 接收 preserved_remarks 參數
+    def sync_to_gpio(self, assignments, preserved_remarks):
         log("🔄 同步資料至 'GPIO' 工作表...")
         try:
             ws = self.sheet.worksheet(WORKSHEET_GPIO)
@@ -180,6 +181,8 @@ class DashboardController:
             for pin, row_idx in pin_row_map.items():
                 gateway_val = ""
                 remark_val = ""
+                
+                # 取得 Pinout_View 裡的資料
                 if pin in assignments:
                     data = assignments[pin]
                     if isinstance(data, dict):
@@ -187,13 +190,20 @@ class DashboardController:
                         if "]" in raw_func: content = raw_func.split(']')[1].strip()
                         else: content = raw_func
                         
+                        # 處理括號顯示
                         if "(" in content and ")" in content:
                             start_index = content.find('(')
                             if start_index != -1: gateway_val = content[start_index:].strip()
                             else: gateway_val = content
                         else: gateway_val = content
                         
-                        remark_val = data.get('note', '')
+                        # ✨ V30: 合併 Pin Define (E欄) 與 User Remark (F欄)
+                        pin_define = data.get('note', '') # 來自 Config 的 Pin Define
+                        user_remark = preserved_remarks.get(pin, '') # 來自 Pinout_View 手寫的 Remark
+                        
+                        # 用空格連接，並去除多餘空白
+                        remark_val = f"{pin_define} {user_remark}".strip()
+                        
                     else:
                         gateway_val = str(data)
                         remark_val = ""
@@ -270,19 +280,17 @@ class DashboardController:
     
     def generate_pinout_view(self, planner, dashboard):
         try:
+            preserved_remarks = {} # ✨ V30: 初始化回傳值
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="200", cols="30")
             
-            # ✨ V29: 在清除之前，先讀取並備份 Remark 欄位 (F欄)
-            preserved_remarks = {}
             try:
                 existing_data = ws.get_all_values()
                 if len(existing_data) > 0:
                     headers = existing_data[0]
-                    # 尋找 Remark 欄位 (假設標題叫 "Remark")
                     if "Remark" in headers:
                         rem_col_idx = headers.index("Remark")
-                        name_col_idx = 0 # 假設 A 欄是 Name
+                        name_col_idx = 0 
                         for row in existing_data[1:]:
                             if len(row) > rem_col_idx and row[name_col_idx]:
                                 pin_name = row[name_col_idx].strip().upper()
@@ -290,7 +298,7 @@ class DashboardController:
                                 if remark_val:
                                     preserved_remarks[pin_name] = remark_val
             except Exception as e:
-                log(f"⚠️ 讀取舊 Remark 失敗 (可能為首次執行): {e}")
+                log(f"⚠️ 讀取舊 Remark 失敗: {e}")
 
             ws.clear()
             
@@ -298,8 +306,6 @@ class DashboardController:
             ws.update(values=[['Resource Summary', ''], ['Total GPIO', len(planner.pin_map)], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
             ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
             
-            # ✨ V29: 插入 Remark 到欄位 5 (F欄)
-            # A=0, B=1, C=2, D=3, E=4, F=5, G=6...
             af_headers = [f"AF{i}" for i in range(16)]
             headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define", "Remark"] + af_headers
             rows = [headers]
@@ -308,16 +314,14 @@ class DashboardController:
             sheet_id = ws.id
             start_row_idx = 6 
             
-            # ✨ V29: 先清除所有背景顏色 (全白)
-            # 清除 A6 到 V500 的背景色
             format_requests.append({
                 "repeatCell": {
                     "range": {
                         "sheetId": sheet_id,
-                        "startRowIndex": 5, # Row 6 (Header)
+                        "startRowIndex": 5, 
                         "endRowIndex": 500,
                         "startColumnIndex": 0,
-                        "endColumnIndex": 22 # A to V
+                        "endColumnIndex": 22
                     },
                     "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}}},
                     "fields": "userEnteredFormat.backgroundColor"
@@ -343,8 +347,6 @@ class DashboardController:
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
                 
                 af_data = dashboard.gpio_af_data.get(pin, [""] * 16)
-                
-                # ✨ V29: 填回保留的 Remark
                 user_remark = preserved_remarks.get(pin, "")
                 
                 rows.append([pin, usage, spec, mode, note, user_remark] + af_data)
@@ -388,11 +390,9 @@ class DashboardController:
                 fail_start_row = sep_row + 1
                 for i, report in enumerate(planner.failed_reports):
                     rows.append([report['pin'], report['desc'], "-", report['mode'], "", ""] + [""]*16)
-                    
                     sig_name = report['desc']
                     func_key = sig_name.split('_')[0] if '_' in sig_name else sig_name
                     bg_color = self.color_engine.get_color(func_key)
-                    
                     format_requests.append({
                         "repeatCell": {
                             "range": {
@@ -410,8 +410,12 @@ class DashboardController:
             ws.update(values=rows, range_name='A6')
             ws.format('A6:V6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
             if format_requests: self.sheet.batch_update({"requests": format_requests})
-                
-        except Exception as e: log(f"❌ 寫入結果失敗: {e}")
+            
+            return preserved_remarks # ✨ V30: 回傳備份資料給 main
+            
+        except Exception as e: 
+            log(f"❌ 寫入結果失敗: {e}")
+            return {}
 
 # ================= 規劃核心 =================
 class GPIOPlanner:
@@ -609,15 +613,13 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V29 - Remark Preservation & Color Reset)...")
+    log("🚀 程式啟動 (V30 - Combined Remark Sync)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
-    # 1. XML Parser 負責讀取完整功能
     xml_parser = STM32XMLParser(XML_FILENAME)
     xml_parser.parse()
     
-    # 2. Dashboard 負責讀取 AF 表格供顯示
     dashboard.load_gpio_af_data()
     
     menu_data, all_peris = xml_parser.get_organized_menu_data()
@@ -655,8 +657,12 @@ if __name__ == "__main__":
         result = planner.allocate_group(peri, qty, option, row_idx, pin_define)
         status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
 
-    log("📝 寫回結果 (Pinout View)..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, dashboard)
+    # 1. 生成 Pinout View 並備份 User Remark
+    log("📝 寫回結果 (Pinout View)...")
+    dashboard.write_status_back(status_results)
+    preserved_remarks = dashboard.generate_pinout_view(planner, dashboard)
     
-    dashboard.sync_to_gpio(planner.assignments)
+    # 2. 同步回 GPIO Sheet (傳入備份的 remarks)
+    dashboard.sync_to_gpio(planner.assignments, preserved_remarks)
     
     log("🎉 執行成功！")
