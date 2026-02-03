@@ -93,7 +93,6 @@ class GPIOPlanner:
     def __init__(self, pin_map):
         self.pin_map = pin_map
         self.assignments = {}
-        # ✨ V11: 新增失敗報告列表，用於 Pinout View 顯示
         self.failed_reports = [] 
 
     def is_pin_free(self, pin):
@@ -126,7 +125,6 @@ class GPIOPlanner:
                 if re.match(signal_regex, func):
                     if pin in self.assignments:
                         occupier = self.assignments[pin]['desc']
-                        # 簡化顯示: [System] SDMMC1 (SDMMC1_D2) -> SDMMC1
                         if "]" in occupier: occupier = occupier.split(']')[1].strip().split('(')[0]
                         return f"{occupier} on {pin}"
         return "HW Limitation"
@@ -136,11 +134,23 @@ class GPIOPlanner:
         target_prefixes = []
         opt_clean = self.normalize_option(option_str)
         
+        # ✨ V12 更新：SDMMC 匯流排寬度判斷
+        is_4bit = "4BIT" in opt_clean
+        is_1bit = "1BIT" in opt_clean
+        
         if "DDR" in peri_type: target_prefixes = ["DDR_", "DDRPHYC_"]
         elif "SDMMC" in peri_type:
-            if "SDMMC2" in opt_clean: target_prefixes = ["SDMMC2"]
-            elif "SDMMC3" in opt_clean: target_prefixes = ["SDMMC3"]
-            else: target_prefixes = ["SDMMC1"]
+            instance_prefix = "SDMMC1" # Default
+            if "SDMMC2" in opt_clean: instance_prefix = "SDMMC2"
+            elif "SDMMC3" in opt_clean: instance_prefix = "SDMMC3"
+            
+            # 定義該 instance 的所有基本訊號 (CK, CMD, D0)
+            # 因為 XML 裡的訊號名稱是完整的 (e.g. SDMMC1_D0), 我們可以用 startswith 鎖定
+            # 但如果選 4BIT，我們要排除 D4, D5, D6, D7
+            # 如果選 1BIT，我們要排除 D1~D7
+            
+            target_prefixes = [instance_prefix] # 預設全鎖 (為了方便，先用廣域，再過濾)
+            
         elif "QUADSPI" in peri_type: target_prefixes = ["QUADSPI"]
         elif "FMC" in peri_type: target_prefixes = ["FMC"]
 
@@ -149,20 +159,38 @@ class GPIOPlanner:
             for func in funcs:
                 match = False
                 for t in target_prefixes:
-                    if func.startswith(t): match = True; break
+                    if func.startswith(t): 
+                        # ✨ V12: 針對 SDMMC 的過濾邏輯
+                        if "SDMMC" in peri_type:
+                            if is_1bit:
+                                # 1BIT: 只要 CK, CMD, D0 (即 CKIN, CK, CMD, D0)
+                                # 排除 D1, D2, D3, D4, D5, D6, D7
+                                if any(x in func for x in ["_D1", "_D2", "_D3", "_D4", "_D5", "_D6", "_D7"]):
+                                    continue # 跳過，不鎖定
+                            elif is_4bit:
+                                # 4BIT: 只要 CK, CMD, D0-D3
+                                # 排除 D4, D5, D6, D7
+                                if any(x in func for x in ["_D4", "_D5", "_D6", "_D7"]):
+                                    continue # 跳過，不鎖定
+                        
+                        match = True; break
+                
                 if match:
                     self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical'}
                     locked_count += 1
                     break
+                    
         if locked_count > 0: return f"✅ Reserved {locked_count} pins"
         else: return "⚠️ No pins found/locked"
 
     def allocate_group(self, peri_type, count, option_str="", row_idx=0):
         if count == 0: return ""
+        # 傳入 option_str 以便判斷 4BIT
         if peri_type in ["DDR", "FMC", "SDMMC", "QUADSPI"]:
             return self.allocate_system_critical(peri_type, row_idx, option_str)
 
         results = []
+        failure_reasons = [] 
         success_groups = 0
         opt_clean = self.normalize_option(option_str)
         
@@ -216,8 +244,8 @@ class GPIOPlanner:
 
             temp_assignment = {}
             possible = True
+            missing_signal_reason = "" 
             
-            # 測試分配
             if "PWM" in peri_type:
                 pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
                 if pin:
@@ -233,44 +261,33 @@ class GPIOPlanner:
                 for role, sig_name in required_signals.items():
                     pin, func = self.find_pin_for_signal(f"^{sig_name}$", exclude_pins=temp_assignment.keys())
                     if pin: temp_assignment[pin] = func
-                    else: possible = False # 只要缺一根就算失敗
+                    else: possible = False; culprit = self.diagnose_conflict(f"^{sig_name}$"); missing_signal_reason = f"Missing {sig_name} (Blocked by: {culprit})"; break
             
             if possible:
-                # 成功：寫入正式分配表
                 for p, f in temp_assignment.items():
                     self.assignments[p] = {'desc': f"[Auto] {inst_name} ({f})", 'row': row_idx, 'mode': 'Auto'}
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
             else:
-                # ✨ V11: 失敗時，生成詳細的「缺失報告」
-                if "PWM" not in peri_type and "ADC" not in peri_type: # 僅針對群組型週邊生成報告
+                if "PWM" not in peri_type and "ADC" not in peri_type:
                     report_entry = []
                     for role, sig_name in required_signals.items():
-                        # 再次檢查每一根腳位狀態
                         pin, func = self.find_pin_for_signal(f"^{sig_name}$", exclude_pins=temp_assignment.keys())
                         if pin:
-                             report_entry.append({
-                                 'pin': pin,
-                                 'desc': f"{sig_name} (Proposed)",
-                                 'row': row_idx,
-                                 'mode': 'Auto (Proposed)'
-                             })
+                             report_entry.append({'pin': pin, 'desc': f"{sig_name} (Proposed)", 'row': row_idx, 'mode': 'Auto (Proposed)'})
                         else:
-                            # 找出兇手
                             culprit = self.diagnose_conflict(f"^{sig_name}$")
-                            report_entry.append({
-                                'pin': "MISSING", # 標記為缺失
-                                'desc': f"{sig_name}",
-                                'row': row_idx,
-                                'mode': f"❌ Blocked by {culprit}"
-                            })
-                    # 將整組報告存入
+                            report_entry.append({'pin': "MISSING", 'desc': f"{sig_name}", 'row': row_idx, 'mode': f"❌ Blocked by {culprit}"})
                     self.failed_reports.extend(report_entry)
-
+                if missing_signal_reason: failure_reasons.append(missing_signal_reason)
+            
             if ("PWM" in peri_type or "ADC" in peri_type) and possible: pass 
 
         if success_groups >= count: return f"✅ OK ({success_groups}/{count})"
-        else: return f"❌ Insufficient ({success_groups}/{count})"
+        else:
+            reason_str = ""
+            if failure_reasons: reason_str = f"\n❌ {failure_reasons[0]}"
+            return f"❌ Insufficient ({success_groups}/{count}){reason_str}"
         
     def allocate_manual(self, peri_name, pin, row_idx=0):
         pin = pin.strip()
@@ -330,22 +347,16 @@ class DashboardController:
             range_str = f"E2:E{1 + len(status_list)}"
             ws.update(range_name=range_str, values=cell_list)
         except: pass
-    
     def generate_pinout_view(self, planner, total_pins):
         try:
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
             except: ws = self.sheet.add_worksheet(title=WORKSHEET_RESULT, rows="100", cols="20")
             ws.clear()
-            
-            assignments = planner.assignments
-            used_count = len(assignments); free_count = total_pins - used_count
+            assignments = planner.assignments; used_count = len(assignments); free_count = total_pins - used_count
             ws.update(values=[['Resource Summary', ''], ['Total GPIO', total_pins], ['Used GPIO', used_count], ['Free GPIO', free_count]], range_name='A1:B4')
             ws.format('A1:B4', {'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}})
-            
             headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode"]
             rows = [headers]
-            
-            # 1. 正常的分配
             sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p]['row'], p))
             for pin in sorted_pins:
                 data = assignments[pin]; usage = data['desc']; mode = data['mode']; spec = "-"
@@ -353,26 +364,20 @@ class DashboardController:
                     match = re.search(r'(TIM\d+)', usage)
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
                 rows.append([pin, usage, spec, mode])
-            
-            # ✨ V11: 2. 插入失敗報告 (Missing Signals)
             if planner.failed_reports:
-                rows.append(["--- FAILED / MISSING ---", "---", "---", "---"]) # 分隔線
+                rows.append(["--- FAILED / MISSING ---", "---", "---", "---"])
                 for report in planner.failed_reports:
                     rows.append([report['pin'], report['desc'], "-", report['mode']])
-
             ws.update(values=rows, range_name='A6')
             ws.format('A6:D6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
-            
-            # 將失敗的行標示為紅色背景
             if planner.failed_reports:
-                start_row = 6 + len(assignments) + 1 # Header + Data + Separator
+                start_row = 6 + len(assignments) + 1
                 end_row = start_row + len(planner.failed_reports)
                 ws.format(f'A{start_row}:D{end_row}', {'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8}})
-                
         except: pass
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V11 - Visual Debugger)...")
+    log("🚀 程式啟動 (V12 - Bus Width Support)...")
     parser = STM32XMLParser(XML_FILENAME); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     dashboard = DashboardController()
@@ -395,7 +400,5 @@ if __name__ == "__main__":
         else: result = planner.allocate_group(peri, qty, option, row_idx)
         status_results.append(result); log(f"   🔹 Row {row_idx+2}: {peri} (x{qty}) -> {result}")
 
-    log("📝 寫回結果..."); dashboard.write_status_back(status_results); 
-    # V11: 傳入整個 planner 物件以取得失敗報告
-    dashboard.generate_pinout_view(planner, len(parser.pin_map))
+    log("📝 寫回結果..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, len(parser.pin_map))
     log("🎉 執行成功！")
