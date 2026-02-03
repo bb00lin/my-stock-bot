@@ -37,25 +37,36 @@ AF_WEIGHTS = {
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ✨ [修改 1] 增強名稱擴展邏輯，優先處理逗號分隔
+# ✨ [修改 1] 強力名稱解析函式：支援 "AO 1~4" -> AO1, AO2, AO3, AO4
 def expand_pin_names(name_pattern, quantity):
     if not name_pattern:
-        return [f"GPIO_{i+1}" for i in range(quantity)]
+        # 預設名稱
+        return [f"Dev_{i+1}" for i in range(quantity)]
     
-    # 如果包含逗號，優先以逗號切割
+    # 1. 優先處理逗號分隔 (例如: "SCL, SDA")
     if ',' in name_pattern:
         parts = [p.strip() for p in name_pattern.split(',')]
-        # 如果切割出來的數量少於需求，後面補上預設名稱
+        # 如果名稱不夠，後面補上索引
         if len(parts) < quantity:
-            parts += [f"GPIO_{i+1}" for i in range(len(parts), quantity)]
+            parts += [f"{parts[-1]}_{i+1}" for i in range(quantity - len(parts))]
         return parts[:quantity]
 
+    # 2. 處理範圍語法 (例如: "AO 1~4", "AO 1-4", "LED1-4")
+    # Regex 解析: Group1=前綴, Group2=起始數字, Group3=結束數字
     match = re.search(r'^(.*?)\s*(\d+)\s*[~-]\s*(\d+)$', name_pattern)
     if match:
-        prefix, start, end = match.group(1).strip(), int(match.group(2)), int(match.group(3))
-        if (end - start + 1) != quantity: end = start + quantity - 1
-        return [f"{prefix}{i}" for i in range(start, end + 1)]
-    return [f"{name_pattern} {i+1}" if name_pattern else f"GPIO_{i+1}" for i in range(quantity)]
+        prefix = match.group(1).strip() # 去除空白，讓 "AO " 變成 "AO"
+        start = int(match.group(2))
+        
+        # 依照 Quantity 生成對應數量的名稱 (忽略結束數字，以 Quantity 為準，確保分配數量正確)
+        # 例如 Quantity=4, Start=1 -> 1, 2, 3, 4
+        names = []
+        for i in range(quantity):
+            names.append(f"{prefix}{start + i}")
+        return names
+
+    # 3. 單一名稱自動編號 (例如: "PWM" -> PWM1, PWM2...)
+    return [f"{name_pattern}{i+1}" for i in range(quantity)]
 
 # ================= 配色引擎 =================
 class ColorEngine:
@@ -313,7 +324,7 @@ class DashboardController:
                 manual_remark = preserved.get(p, '')
                 auto_label = d.get('group_label', '')
                 
-                # Remark 組合邏輯：如果已有名稱則填入，若有手動備註則接在後面
+                # Remark 組合邏輯
                 final_remark = manual_remark
                 if auto_label:
                     if auto_label not in manual_remark:
@@ -321,15 +332,13 @@ class DashboardController:
                     else:
                         final_remark = manual_remark
                 
-                # ✨ [修改 3] 強制將 Pin Define 欄位 (index 4) 設為空字串 ""
-                # d.get('mode', '') 是 Mode 欄位
-                # 之後是空字串 "" 作為 Pin Define
+                # Pin Define 欄位 (index 4) 強制清空
                 row_data = [
                     p, 
                     usage, 
                     spec, 
                     d.get('mode', '') if isinstance(d, dict) else '', 
-                    "",  # Pin Define 欄位：依需求不填值
+                    "",  # Pin Define 不填值
                     final_remark
                 ] + dashboard.gpio_af_data.get(p, [""]*16)
                 
@@ -385,7 +394,10 @@ class GPIOPlanner:
         candidates.sort(key=lambda x: x['cost'])
         if len(candidates) < count: return f"❌ 可用腳位不足 ({len(candidates)}/{count})"
         selected = candidates[:count]
+        
+        # 使用強化的名稱擴展函式
         names = expand_pin_names(pin_define, count)
+        
         for i in range(count):
             self.assignments[selected[i]['pin']] = {'desc': f"[GPIO] {names[i]}", 'row': row_idx, 'mode': 'Smart GPIO', 'note': names[i], 'group_label': names[i]}
         return f"✅ Smart Allocated ({count})"
@@ -431,8 +443,9 @@ class GPIOPlanner:
         opt_clean = self.normalize_option(option_str)
         search_range = range(1, 15); target_instances = None
         
-        # ✨ [確認點] 這裡已經有處理逗號分隔的邏輯，保留即可
-        group_labels = [x.strip() for x in pin_define.split(',')] if pin_define else []
+        # ✨ [修改 2] 在這裡呼叫名稱擴展函式，而不是只用逗號切割
+        # 這樣就能支援 AO 1~4 的語法分配給 PWM/ADC 等功能
+        group_labels = expand_pin_names(pin_define, count)
         
         if "PWM" in peri_type: target_instances = ["TIM2", "TIM5"] if "32BIT" in opt_clean else ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
         elif "ETH" in peri_type: target_instances = ["ETH1"] if "ETH1" in opt_clean else ["ETH2"]
@@ -447,7 +460,7 @@ class GPIOPlanner:
             if target_instances and ("ETH" in peri_type):
                  if inst_name not in target_instances: continue
 
-            # ✨ [確認點] 依照成功組數 (success_groups) 取得對應名稱
+            # 取得對應順序的名稱 (AO1, AO2...)
             current_label = group_labels[success_groups] if success_groups < len(group_labels) else ""
 
             required = {}
@@ -475,7 +488,6 @@ class GPIOPlanner:
             
             if possible:
                 for p, f in temp_assign.items():
-                    # 將 current_label 存入 group_label
                     self.assignments[p] = {'desc': f"[Auto] {inst_name} ({f})", 'row': row_idx, 'mode': 'Auto', 'note': pin_define, 'group_label': current_label}
                 success_groups += 1
                 results.append(f"✅ {inst_name}")
@@ -499,7 +511,7 @@ def filter_map_by_sheet(xml_map, dashboard):
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V41 - Pin Define Split Fix)...")
+    log("🚀 程式啟動 (V42 - Auto-Expand Names for All Peripherals)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
