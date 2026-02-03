@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import re
+import csv
+import io
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from collections import defaultdict
@@ -11,7 +13,7 @@ from datetime import datetime
 SPREADSHEET_NAME = 'STM32_GPIO_Planner'
 WORKSHEET_CONFIG = 'Config_Panel'
 WORKSHEET_RESULT = 'Pinout_View'
-WORKSHEET_GPIO = 'GPIO' # 資料來源與同步目標
+WORKSHEET_GPIO = 'GPIO' 
 
 TIMER_METADATA = {
     "TIM1": "16-bit, Advanced", "TIM8": "16-bit, Advanced",
@@ -37,7 +39,6 @@ class DashboardController:
             return True
         except: return False
     
-    # ✨ V20: 讀取 GPIO Sheet 資料庫
     def get_gpio_sheet_data(self):
         try:
             ws = self.sheet.worksheet(WORKSHEET_GPIO)
@@ -46,7 +47,6 @@ class DashboardController:
             log(f"❌ 找不到工作表 '{WORKSHEET_GPIO}'，請確認名稱是否正確！")
             sys.exit(1)
 
-    # ✨ V20: 同步結果回 GPIO Sheet
     def sync_to_gpio(self, assignments):
         log("🔄 同步資料至 'GPIO' 工作表...")
         try:
@@ -54,21 +54,13 @@ class DashboardController:
             rows = ws.get_all_values()
             if not rows: return
 
-            # 1. 建立 Pin Name 對應的 Row Index (從 0 開始算)
             pin_row_map = {}
             for idx, row in enumerate(rows):
-                if idx == 0: continue # Skip header
-                if row and row[0]: # Column A is Name
+                if idx == 0: continue 
+                if row and row[0]: 
                     pin_row_map[row[0].strip().upper()] = idx
 
-            # 2. 準備更新資料 (C欄=Gateway, D欄=Remark)
-            # 先讀取現有資料以免覆蓋其他欄位? 
-            # 為了效能，我們只針對 C 和 D 欄做 Batch Update
-            
             updates = []
-            
-            # 清除舊資料 (C2:D_MAX)
-            # 這裡我們直接在寫入迴圈中覆蓋，未分配的腳位填空
             
             for pin, row_idx in pin_row_map.items():
                 gateway_val = ""
@@ -76,21 +68,22 @@ class DashboardController:
                 
                 if pin in assignments:
                     data = assignments[pin]
-                    # Gateway = Assigned Function (去除 [Auto]/[Manual] 標籤)
-                    raw_func = data['desc']
-                    if "]" in raw_func: 
-                        gateway_val = raw_func.split(']')[1].strip()
-                        # 去除括號內的詳細定義 (ex: "(SDMMC1_D0)") 讓表格更乾淨，如果需要可以保留
-                        if "(" in gateway_val: gateway_val = gateway_val.split('(')[0].strip()
-                    else:
-                        gateway_val = raw_func
                     
-                    # Remark = Pin Define (User Note)
-                    remark_val = data.get('note', '')
+                    # ✨ V20.1 安全檢查：確保 data 是字典
+                    if isinstance(data, dict):
+                        raw_func = data.get('desc', '')
+                        if "]" in raw_func: 
+                            gateway_val = raw_func.split(']')[1].strip()
+                            if "(" in gateway_val: gateway_val = gateway_val.split('(')[0].strip()
+                        else:
+                            gateway_val = raw_func
+                        
+                        remark_val = data.get('note', '')
+                    else:
+                        # 如果意外是字串，直接當作功能名稱
+                        gateway_val = str(data)
+                        remark_val = ""
 
-                # 轉換為 A1 Notation
-                # C欄 = Column 3, D欄 = Column 4
-                # Row index (0-based) + 1 = Excel Row Number
                 sheet_row = row_idx + 1
                 updates.append({'range': f'C{sheet_row}', 'values': [[gateway_val]]})
                 updates.append({'range': f'D{sheet_row}', 'values': [[remark_val]]})
@@ -127,6 +120,7 @@ class DashboardController:
                     {"setDataValidation": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 50, "startColumnIndex": 1, "endColumnIndex": 2}, "rule": rule_peri}}]
             self.sheet.batch_update({"requests": reqs})
         except: pass
+    
     def read_config(self):
         try:
             ws = self.sheet.worksheet(WORKSHEET_CONFIG)
@@ -142,6 +136,7 @@ class DashboardController:
                 elif 'Define' in text: col_map['def'] = idx
             
             if 'peri' not in col_map or 'opt' not in col_map: return []
+
             data_list = []
             for row in raw_rows[1:]:
                 while len(row) < len(headers): row.append("")
@@ -157,6 +152,7 @@ class DashboardController:
         except Exception as e:
             log(f"❌ 讀取失敗: {e}")
             return []
+
     def write_status_back(self, status_list):
         try:
             ws = self.sheet.worksheet(WORKSHEET_CONFIG)
@@ -164,6 +160,7 @@ class DashboardController:
             range_str = f"E2:E{1 + len(status_list)}"
             ws.update(range_name=range_str, values=cell_list)
         except: pass
+    
     def generate_pinout_view(self, planner, parser):
         try:
             try: ws = self.sheet.worksheet(WORKSHEET_RESULT)
@@ -176,28 +173,44 @@ class DashboardController:
             af_headers = [f"AF{i}" for i in range(16)]
             headers = ["Pin Name", "Assigned Function", "Detail Spec", "Mode", "Pin Define"] + af_headers
             rows = [headers]
-            sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p]['row'], p))
+            
+            sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p].get('row', 999) if isinstance(assignments[p], dict) else 999, p))
+            
             for pin in sorted_pins:
-                data = assignments[pin]; usage = data['desc']; mode = data['mode']; spec = "-"
-                note = data.get('note', '')
+                raw_data = assignments[pin]
+                # ✨ V20.1 安全檢查
+                if isinstance(raw_data, dict):
+                    usage = raw_data.get('desc', '')
+                    mode = raw_data.get('mode', '')
+                    note = raw_data.get('note', '')
+                else:
+                    usage = str(raw_data)
+                    mode = "Unknown"
+                    note = ""
+                    
+                spec = "-"
                 if "TIM" in usage:
                     match = re.search(r'(TIM\d+)', usage)
                     if match: spec = TIMER_METADATA.get(match.group(1), "")
+                
                 af_data = parser.pin_af_data.get(pin, [""] * 16)
                 rows.append([pin, usage, spec, mode, note] + af_data)
+                
             if planner.failed_reports:
                 rows.append(["--- FAILED / MISSING ---", "", "", "", ""] + [""]*16)
                 for report in planner.failed_reports:
                     rows.append([report['pin'], report['desc'], "-", report['mode'], ""] + [""]*16)
+            
             ws.update(values=rows, range_name='A6')
             ws.format('A6:U6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
             if planner.failed_reports:
                 start_row = 6 + len(assignments) + 1
                 end_row = start_row + len(planner.failed_reports)
                 ws.format(f'A{start_row}:E{end_row}', {'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8}})
-        except Exception as e: log(f"❌ 寫入結果失敗: {e}")
+        except Exception as e:
+            log(f"❌ 寫入結果失敗: {e}")
 
-# ================= Sheet 解析器 (V20: 讀取 GPIO Sheet) =================
+# ================= Sheet 解析器 =================
 class STM32SheetParser:
     def __init__(self, dashboard):
         self.dashboard = dashboard
@@ -209,18 +222,13 @@ class STM32SheetParser:
         log(f"📖 讀取 'GPIO' 工作表資料庫...")
         rows = self.dashboard.get_gpio_sheet_data()
         
-        # 假設第一列是標題，格式: Name, Position, AH GATEWAY, Remark, AF0...AF15
-        # Name=0, AF0=4 (E欄)
-        
         for row in rows[1:]: # Skip header
             if len(row) < 1: continue
             pin_name = row[0].strip().upper()
             if not pin_name: continue
             
-            # 確保 row 長度足夠，以免 index error
             while len(row) < 20: row.append("")
             
-            # AF0 在 Index 4 (E欄)
             af_data = row[4:20] 
             self.pin_af_data[pin_name] = af_data
             
@@ -295,7 +303,13 @@ class GPIOPlanner:
             for func in funcs:
                 if re.match(signal_regex, func):
                     if pin in self.assignments:
-                        occupier = self.assignments[pin]['desc']
+                        # ✨ V20.1 安全檢查
+                        data = self.assignments[pin]
+                        if isinstance(data, dict):
+                            occupier = data.get('desc', 'Unknown')
+                        else:
+                            occupier = str(data)
+                            
                         if "]" in occupier: occupier = occupier.split(']')[1].strip().split('(')[0]
                         return f"{occupier} on {pin}"
         return "HW Limitation"
@@ -329,6 +343,7 @@ class GPIOPlanner:
                             elif is_4bit:
                                 if any(x in func for x in ["_D4", "_D5", "_D6", "_D7"]): continue 
                         match = True; break
+                
                 if match:
                     self.assignments[pin] = {'desc': f"[System] {peri_type} ({func})", 'row': row_idx, 'mode': 'Critical', 'note': pin_define}
                     locked_count += 1
@@ -449,15 +464,15 @@ class GPIOPlanner:
                 return "✅ Locked"
             else: 
                 conflict_desc = self.assignments[pin]['desc']
+                if isinstance(conflict_desc, dict): conflict_desc = str(conflict_desc) # V20.1 安全
                 return f"❌ Conflict ({conflict_desc})"
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V20 - GPIO Sync)...")
+    log("🚀 程式啟動 (V20.1 - Type Safe Fix)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
-    # 1. 解析資料庫 (從 GPIO sheet)
     parser = STM32SheetParser(dashboard); parser.parse()
     menu_data, all_peris = parser.get_organized_menu_data()
     
@@ -496,7 +511,6 @@ if __name__ == "__main__":
 
     log("📝 寫回結果 (Pinout View)..."); dashboard.write_status_back(status_results); dashboard.generate_pinout_view(planner, parser)
     
-    # 2. 同步回 GPIO Sheet
     dashboard.sync_to_gpio(planner.assignments)
     
     log("🎉 執行成功！")
