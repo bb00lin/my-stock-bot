@@ -113,24 +113,18 @@ class DashboardController:
                     data = assignments[pin]
                     if isinstance(data, dict):
                         raw_func = data.get('desc', '')
-                        
-                        # ✨ V25 修改邏輯：保留括號及內部所有內容
-                        # 1. 去除前面的標籤 [Auto] / [Manual]
                         if "]" in raw_func: 
                             content = raw_func.split(']')[1].strip()
                         else:
                             content = raw_func
-                            
-                        # 2. 尋找第一個左括號 '('
-                        start_index = content.find('(')
-                        if start_index != -1:
-                            # 找到了！直接截取從 '(' 開始到最後的所有內容
-                            # 例如: "PWM (TIM2_CH1 [32-bit])" -> "(TIM2_CH1 [32-bit])"
-                            gateway_val = content[start_index:].strip()
+                        if "(" in content and ")" in content:
+                            start_index = content.find('(')
+                            if start_index != -1:
+                                gateway_val = content[start_index:].strip()
+                            else:
+                                gateway_val = content
                         else:
-                            # 沒括號 (例如 "Reserved" 或純腳位名)，直接用原本的
                             gateway_val = content
-                            
                         remark_val = data.get('note', '')
                     else:
                         gateway_val = str(data)
@@ -225,6 +219,7 @@ class DashboardController:
             
             sorted_pins = sorted(assignments.keys(), key=lambda p: (assignments[p].get('row', 999) if isinstance(assignments[p], dict) else 999, p))
             
+            # --- 處理成功分配的腳位 ---
             for i, pin in enumerate(sorted_pins):
                 raw_data = assignments[pin]
                 if isinstance(raw_data, dict):
@@ -244,6 +239,7 @@ class DashboardController:
                 af_data = parser.pin_af_data.get(pin, [""] * 16)
                 rows.append([pin, usage, spec, mode, note] + af_data)
                 
+                # 計算顏色
                 func_key = usage
                 if "]" in usage: func_key = usage.split(']')[1].strip().split('(')[0].strip()
                 bg_color = self.color_engine.get_color(func_key)
@@ -264,13 +260,15 @@ class DashboardController:
 
             if planner.failed_reports:
                 rows.append(["--- FAILED / MISSING ---", "", "", "", ""] + [""]*16)
-                fail_start = start_row_idx + len(sorted_pins)
+                
+                # --- FAILED 分隔線 (紅色) ---
+                sep_row = start_row_idx + len(sorted_pins)
                 format_requests.append({
                     "repeatCell": {
                         "range": {
                             "sheetId": sheet_id,
-                            "startRowIndex": fail_start,
-                            "endRowIndex": fail_start + 1 + len(planner.failed_reports),
+                            "startRowIndex": sep_row,
+                            "endRowIndex": sep_row + 1,
                             "startColumnIndex": 0,
                             "endColumnIndex": 21
                         },
@@ -278,8 +276,32 @@ class DashboardController:
                         "fields": "userEnteredFormat.backgroundColor"
                     }
                 })
-                for report in planner.failed_reports:
+                
+                # --- 處理失敗項目 (依群組上色) ---
+                fail_start_row = sep_row + 1
+                for i, report in enumerate(planner.failed_reports):
                     rows.append([report['pin'], report['desc'], "-", report['mode'], ""] + [""]*16)
+                    
+                    # ✨ V26: 讓失敗項目也跟隨群組顏色
+                    # report['desc'] 通常是訊號名稱，例如 "SPI1_MISO"
+                    sig_name = report['desc']
+                    func_key = sig_name.split('_')[0] if '_' in sig_name else sig_name # 取出 "SPI1"
+                    
+                    bg_color = self.color_engine.get_color(func_key)
+                    
+                    format_requests.append({
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": fail_start_row + i,
+                                "endRowIndex": fail_start_row + i + 1,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": 21
+                            },
+                            "cell": {"userEnteredFormat": {"backgroundColor": bg_color}},
+                            "fields": "userEnteredFormat.backgroundColor"
+                        }
+                    })
             
             ws.update(values=rows, range_name='A6')
             ws.format('A6:U6', {'textFormat': {'bold': True}, 'backgroundColor': {'red': 0.7, 'green': 0.85, 'blue': 1.0}})
@@ -534,7 +556,7 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V25 - Detail Preservation)...")
+    log("🚀 程式啟動 (V26 - Full Color Sync)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     parser = STM32SheetParser(dashboard); parser.parse()
