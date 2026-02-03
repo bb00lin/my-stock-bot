@@ -296,19 +296,17 @@ class DashboardController:
 
             ws.clear()
             
-            # ✨ V32: 計算雙重統計資料
-            # 1. XML 統計
+            # ✨ V32.1 Fix: 正確定義 assignments 變數
+            assignments = planner.assignments 
+            
             xml_total = len(planner.pin_map)
-            xml_used = len(planner.assignments)
+            xml_used = len(assignments) # 這裡用到 assignments
             xml_free = xml_total - xml_used
             
-            # 2. GPIO Sheet 統計
             sheet_total = len(dashboard.gpio_af_data)
-            # 只有當分配的腳位 "真的存在於" GPIO Sheet 中，才算 Sheet Used
-            sheet_used = len([p for p in planner.assignments if p in dashboard.gpio_af_data])
+            sheet_used = len([p for p in assignments if p in dashboard.gpio_af_data])
             sheet_free = sheet_total - sheet_used
 
-            # 更新 Header (雙欄位)
             ws.update(values=[
                 ['Resource Summary', 'XML Spec', 'GPIO Sheet'], 
                 ['Total GPIO', xml_total, sheet_total], 
@@ -641,7 +639,7 @@ class GPIOPlanner:
         else: return "❌ Invalid Pin"
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V32 - Dual Summary Comparison)...")
+    log("🚀 程式啟動 (V32.1 - Hotfix Assignments)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     
