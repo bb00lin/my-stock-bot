@@ -486,7 +486,6 @@ class GPIOPlanner:
             if "I2C" in peri_type: required = {"SCL": f"{inst_name}_SCL", "SDA": f"{inst_name}_SDA"}
             elif "SPI" in peri_type: required = {"SCK": f"{inst_name}_SCK", "MISO": f"{inst_name}_MISO", "MOSI": f"{inst_name}_MOSI"}
             
-            # ✨ [修改重點] UART 邏輯升級: 偵測 RTS CTS
             elif "UART" in peri_type or "USART" in peri_type: 
                 required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
                 if "RTS" in opt_clean and "CTS" in opt_clean:
@@ -530,19 +529,29 @@ class GPIOPlanner:
     def allocate_system_critical(self, peri, row, option, define):
         return "✅ Reserved"
 
+# ✨ [修改 1] 關鍵修正：確保 GPIO Sheet 中所有的腳位都被納入候選名單 (即使是空白的)
 def filter_map_by_sheet(xml_map, dashboard):
-    log("🧹 過濾 XML Map (Smart Filter)...")
+    log("🧹 過濾 XML Map (Smart Filter & Sheet Merge)...")
     filtered = defaultdict(list)
+    
+    # 1. 先處理 XML 中有的，且 Sheet 中也有的功能
     for pin, funcs in xml_map.items():
         sheet_funcs = dashboard.sheet_capabilities.get(pin, set())
         sheet_norm = {dashboard.normalize_name(f) for f in sheet_funcs}
         for f in funcs:
             if any(x in f for x in ["GPIO", "ADC", "DAC", "DEBUG", "WKUP", "RESET", "BOOT", "VBUS"]): filtered[pin].append(f); continue
             if dashboard.normalize_name(f) in sheet_norm: filtered[pin].append(f)
+            
+    # 2. ✨ 強制加入：Sheet 中存在，但可能因為沒功能而被 XML 邏輯忽略的腳位
+    for pin in dashboard.gpio_af_data.keys():
+        if pin not in filtered:
+            # 加入為空白列表，這樣 calculate_pin_cost 會算它 cost=0 (最優先使用)
+            filtered[pin] = [] 
+            
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V47 - UART Flow Control + Full Integration)...")
+    log("🚀 程式啟動 (V48 - Empty GPIOs Support)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
