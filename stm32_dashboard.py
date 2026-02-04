@@ -378,13 +378,24 @@ class GPIOPlanner:
     def is_pin_free(self, pin): return pin not in self.assignments
     def normalize_option(self, text): return re.sub(r'[\s_\-,/]+', '', str(text).upper()) if text else ""
 
+    # ✨ [修改 2] 大幅放寬 Cost 計算，不再因為 AF 功能名稱 (如 PWR) 而禁用腳位
     def calculate_pin_cost(self, pin, current_peripherals):
         funcs = self.pin_map.get(pin, [])
-        FORBIDDEN = ["DDR", "RESET", "NRST", "NJTRST", "JTAG", "SWD", "BOOT", "OSC", "VBUS", "VDD", "VSS", "PZ", "PWR", "CPU", "WAKEUP", "REG"]
-        if any(bad in pin.upper() for bad in FORBIDDEN): return 999999
-        for f in funcs:
-            if any(bad in f.upper() for bad in FORBIDDEN): return 999999
+        
+        # 1. 只有這些 "Pin Name" 本身是絕對禁止的 (電源、Reset 腳等)
+        # 注意：不再檢查 "PZ", "PWR" 等字眼，避免誤殺有效 GPIO
+        STRICT_FORBIDDEN = ["DDR", "NRST", "NJTRST", "JTAG", "SWD", "BOOT", "OSC", "VBUS", "VDD", "VSS", "VCAP", "PZ"]
+        
+        pin_u = pin.upper()
+        # 嚴格檢查：如果腳位名稱 *包含* 這些字 (例如 VDD_3V3)，直接禁用
+        if any(bad in pin_u for bad in STRICT_FORBIDDEN): 
+            # 例外：如果腳位只是 "GPIO_PZ1"，也許可以用，但這裡為了安全先保守處理
+            # 如果您確定 PZ 可以用，可以從上面的 list 移除 "PZ"
+            return 999999
+
         cost = len(funcs) * 5 
+        
+        # 2. 權重計算 (保持原樣，優先選比較少功能的腳)
         for f in funcs:
             match = re.match(r'([A-Z]+)', f)
             if match:
@@ -529,12 +540,10 @@ class GPIOPlanner:
     def allocate_system_critical(self, peri, row, option, define):
         return "✅ Reserved"
 
-# ✨ [修改 1] 關鍵修正：確保 GPIO Sheet 中所有的腳位都被納入候選名單 (即使是空白的)
 def filter_map_by_sheet(xml_map, dashboard):
     log("🧹 過濾 XML Map (Smart Filter & Sheet Merge)...")
     filtered = defaultdict(list)
     
-    # 1. 先處理 XML 中有的，且 Sheet 中也有的功能
     for pin, funcs in xml_map.items():
         sheet_funcs = dashboard.sheet_capabilities.get(pin, set())
         sheet_norm = {dashboard.normalize_name(f) for f in sheet_funcs}
@@ -542,16 +551,14 @@ def filter_map_by_sheet(xml_map, dashboard):
             if any(x in f for x in ["GPIO", "ADC", "DAC", "DEBUG", "WKUP", "RESET", "BOOT", "VBUS"]): filtered[pin].append(f); continue
             if dashboard.normalize_name(f) in sheet_norm: filtered[pin].append(f)
             
-    # 2. ✨ 強制加入：Sheet 中存在，但可能因為沒功能而被 XML 邏輯忽略的腳位
     for pin in dashboard.gpio_af_data.keys():
         if pin not in filtered:
-            # 加入為空白列表，這樣 calculate_pin_cost 會算它 cost=0 (最優先使用)
             filtered[pin] = [] 
             
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V48 - Empty GPIOs Support)...")
+    log("🚀 程式啟動 (V49 - Fixed Cost Logic for Special Pins)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
