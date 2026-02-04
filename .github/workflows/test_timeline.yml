@@ -1,0 +1,27 @@
+name: Test Timeline Modification
+
+on:
+  workflow_dispatch: # 這代表可以手動按按鈕觸發
+
+jobs:
+  run-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 python-dateutil lxml
+
+      - name: Run Test Script
+        env:
+          CONF_URL: ${{ secrets.CONF_URL }}
+          CONF_USER: ${{ secrets.CONF_USER }}
+          CONF_PASS: ${{ secrets.CONF_PASS }}
+        run: python test_timeline.py
