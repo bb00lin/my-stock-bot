@@ -375,27 +375,29 @@ class GPIOPlanner:
     def __init__(self, pin_map):
         self.pin_map = pin_map; self.assignments = {}; self.failed_reports = []
 
+    # ✨ [新增功能] 取得目前所有已分配的訊號 (如 TIM2_CH1)，避免重複分配
+    def get_used_signals(self):
+        used = set()
+        for data in self.assignments.values():
+            desc = data.get('desc', '')
+            # 嘗試抓取括號內的內容 (通常是訊號名)
+            if "(" in desc and ")" in desc:
+                sig = desc.split('(')[1].split(')')[0].strip()
+                if sig: used.add(sig)
+        return used
+
     def is_pin_free(self, pin): return pin not in self.assignments
     def normalize_option(self, text): return re.sub(r'[\s_\-,/]+', '', str(text).upper()) if text else ""
 
-    # ✨ [修改 2] 大幅放寬 Cost 計算，不再因為 AF 功能名稱 (如 PWR) 而禁用腳位
     def calculate_pin_cost(self, pin, current_peripherals):
         funcs = self.pin_map.get(pin, [])
-        
-        # 1. 只有這些 "Pin Name" 本身是絕對禁止的 (電源、Reset 腳等)
-        # 注意：不再檢查 "PZ", "PWR" 等字眼，避免誤殺有效 GPIO
         STRICT_FORBIDDEN = ["DDR", "NRST", "NJTRST", "JTAG", "SWD", "BOOT", "OSC", "VBUS", "VDD", "VSS", "VCAP", "PZ"]
         
         pin_u = pin.upper()
-        # 嚴格檢查：如果腳位名稱 *包含* 這些字 (例如 VDD_3V3)，直接禁用
         if any(bad in pin_u for bad in STRICT_FORBIDDEN): 
-            # 例外：如果腳位只是 "GPIO_PZ1"，也許可以用，但這裡為了安全先保守處理
-            # 如果您確定 PZ 可以用，可以從上面的 list 移除 "PZ"
             return 999999
 
         cost = len(funcs) * 5 
-        
-        # 2. 權重計算 (保持原樣，優先選比較少功能的腳)
         for f in funcs:
             match = re.match(r'([A-Z]+)', f)
             if match:
@@ -478,6 +480,9 @@ class GPIOPlanner:
         elif "ETH" in peri_type: 
              target_instances = ["ETH1"] if "ETH1" in opt_clean else ["ETH2"]
 
+        # ✨ [修改重點] 初始化已使用訊號列表 (包含之前已分配的 + 本次迴圈剛分配的)
+        current_used_signals = self.get_used_signals()
+
         for i in search_range:
             if success_groups >= count: break
             
@@ -509,13 +514,18 @@ class GPIOPlanner:
 
             temp_assign = {}; possible = True
             
+            # ✨ [修改重點] 尋找訊號時，傳入 exclude_signals=current_used_signals
             if "PWM" in peri_type:
-                 pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
-                 if pin: temp_assign[pin] = func
+                 pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances, exclude_signals=current_used_signals)
+                 if pin: 
+                     temp_assign[pin] = func
+                     current_used_signals.add(func) # 立即加入黑名單
                  else: possible = False
             elif "CNT" in peri_type or "COUNTER" in peri_type:
-                 pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
-                 if pin: temp_assign[pin] = func
+                 pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances, exclude_signals=current_used_signals)
+                 if pin: 
+                     temp_assign[pin] = func
+                     current_used_signals.add(func) # 立即加入黑名單
                  else: possible = False
             elif "ADC" in peri_type:
                  pin, func = self.find_pin_for_signal(r"ADC\d+_IN(P)?\d+")
@@ -558,7 +568,7 @@ def filter_map_by_sheet(xml_map, dashboard):
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V49 - Fixed Cost Logic for Special Pins)...")
+    log("🚀 程式啟動 (V50 - Fix Duplicate Timer Channel Issue)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
