@@ -37,7 +37,7 @@ AF_WEIGHTS = {
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# 強力名稱解析函式：支援 "AO 1~4" -> AO1, AO2, AO3, AO4
+# 強力名稱解析函式
 def expand_pin_names(name_pattern, quantity):
     if not name_pattern:
         return [f"Dev_{i+1}" for i in range(quantity)]
@@ -74,6 +74,9 @@ class ColorEngine:
             "FDCAN":  {"red": 1.0, "green": 0.8, "blue": 1.0},
             "USB":    {"red": 0.8, "green": 0.8, "blue": 1.0},
             "GPIO":   {"red": 0.9, "green": 0.9, "blue": 0.9},
+            # ✨ 新增 Counter 配色 (與 Timer 相同)
+            "COUNTER": {"red": 0.95, "green": 0.95, "blue": 0.95},
+            "CNT":     {"red": 0.95, "green": 0.95, "blue": 0.95},
         }
         self.special_palette = {
             "Reserved": {"red": 0.9, "green": 0.9, "blue": 0.9},
@@ -84,6 +87,12 @@ class ColorEngine:
         func_name = str(func_name).strip().upper()
         if any(k in func_name for k in ["RESERVED", "SYSTEM", "DDR", "RESET"]): return self.special_palette["System"]
         if "GPIO" in func_name: return self.family_palette["GPIO"]
+        
+        # 直接比對 Family
+        for key in self.family_palette:
+            if key in func_name:
+                return self.family_palette[key]
+
         match = re.match(r'^([A-Z]+)(\d+)?', func_name)
         if match:
             peri_type = match.group(1)
@@ -228,10 +237,8 @@ class DashboardController:
                     if isinstance(d, dict):
                         desc = d.get('desc', '')
                         
-                        # 處理 Function Name (去除 [Auto] 等前綴, 保留括號內容)
                         clean_func = desc.split(']')[1].strip() if "]" in desc else desc
                         
-                        # 處理 Detail Spec
                         spec_text = ""
                         if "TIM" in desc:
                             match = re.search(r'(TIM\d+)', desc)
@@ -239,13 +246,11 @@ class DashboardController:
                                 tim_inst = match.group(1)
                                 spec_text = TIMER_METADATA.get(tim_inst, "")
 
-                        # 組合: "PWM (TIM5_CH3) 32-bit, General"
                         if spec_text:
                             gw_val = f"{clean_func} {spec_text}"
                         else:
                             gw_val = clean_func
 
-                        # 處理 Remark
                         sheet_remark = preserved_remarks.get(pin, '')
                         assigned_lbl = d.get('group_label', d.get('note', ''))
                         if assigned_lbl and assigned_lbl not in sheet_remark:
@@ -333,7 +338,6 @@ class DashboardController:
                 manual_remark = preserved.get(p, '')
                 auto_label = d.get('group_label', '')
                 
-                # Remark 組合邏輯
                 final_remark = manual_remark
                 if auto_label:
                     if auto_label not in manual_remark:
@@ -341,7 +345,6 @@ class DashboardController:
                     else:
                         final_remark = manual_remark
                 
-                # Pin Define 欄位 (index 4) 強制清空
                 row_data = [
                     p, 
                     usage, 
@@ -404,7 +407,6 @@ class GPIOPlanner:
         if len(candidates) < count: return f"❌ 可用腳位不足 ({len(candidates)}/{count})"
         selected = candidates[:count]
         
-        # 使用強化的名稱擴展函式
         names = expand_pin_names(pin_define, count)
         
         for i in range(count):
@@ -452,11 +454,9 @@ class GPIOPlanner:
         opt_clean = self.normalize_option(option_str)
         search_range = range(1, 15); target_instances = None
         
-        # ✨ [修改 1] 自動正規化名稱：將 CAN, CANFD 統一視為 FDCAN 以匹配 XML
         search_type = peri_type
         if "CAN" in peri_type: search_type = "FDCAN"
         
-        # 在這裡呼叫名稱擴展函式
         group_labels = expand_pin_names(pin_define, count)
         
         if "PWM" in peri_type: target_instances = ["TIM2", "TIM5"] if "32BIT" in opt_clean else ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
@@ -465,12 +465,13 @@ class GPIOPlanner:
         for i in search_range:
             if success_groups >= count: break
             
-            # 使用 search_type 來建立名稱，例如 FDCAN1, FDCAN2
             inst_name = f"{search_type}{i}"
             
             if "PWM" in peri_type: inst_name = "PWM"
             elif "ADC" in peri_type: inst_name = "ADC"
             elif "ETH" in peri_type: inst_name = f"ETH{i}"
+            # ✨ 新增: Counter 命名
+            elif "CNT" in peri_type or "COUNTER" in peri_type: inst_name = "COUNTER"
             
             if target_instances and ("ETH" in peri_type):
                  if inst_name not in target_instances: continue
@@ -483,13 +484,16 @@ class GPIOPlanner:
             elif "UART" in peri_type or "USART" in peri_type: required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
             elif "ETH" in peri_type: required = {"MDC": f"{inst_name}_MDC", "MDIO": f"{inst_name}_MDIO", "REF_CLK": f"{inst_name}_RMII_REF_CLK"}
             elif "ADC" in peri_type: required = {"IN": r"ADC\d+_IN(P)?\d+"}
-            # ✨ [修改 2] 新增 CAN / FDCAN 的腳位定義
-            elif "FDCAN" in search_type:
-                 required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
+            elif "FDCAN" in search_type: required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
 
             temp_assign = {}; possible = True
             
             if "PWM" in peri_type:
+                 pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
+                 if pin: temp_assign[pin] = func
+                 else: possible = False
+            # ✨ 新增: Counter 搜尋邏輯 (與 PWM 相同，找 TIM_CH)
+            elif "CNT" in peri_type or "COUNTER" in peri_type:
                  pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
                  if pin: temp_assign[pin] = func
                  else: possible = False
@@ -528,7 +532,7 @@ def filter_map_by_sheet(xml_map, dashboard):
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V44 - CANFD Support Added)...")
+    log("🚀 程式啟動 (V45 - Added Counter Support)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
