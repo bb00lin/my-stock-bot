@@ -74,7 +74,6 @@ class ColorEngine:
             "FDCAN":  {"red": 1.0, "green": 0.8, "blue": 1.0},
             "USB":    {"red": 0.8, "green": 0.8, "blue": 1.0},
             "GPIO":   {"red": 0.9, "green": 0.9, "blue": 0.9},
-            # ✨ 新增 Counter 配色 (與 Timer 相同)
             "COUNTER": {"red": 0.95, "green": 0.95, "blue": 0.95},
             "CNT":     {"red": 0.95, "green": 0.95, "blue": 0.95},
         }
@@ -88,7 +87,6 @@ class ColorEngine:
         if any(k in func_name for k in ["RESERVED", "SYSTEM", "DDR", "RESET"]): return self.special_palette["System"]
         if "GPIO" in func_name: return self.family_palette["GPIO"]
         
-        # 直接比對 Family
         for key in self.family_palette:
             if key in func_name:
                 return self.family_palette[key]
@@ -459,8 +457,15 @@ class GPIOPlanner:
         
         group_labels = expand_pin_names(pin_define, count)
         
-        if "PWM" in peri_type: target_instances = ["TIM2", "TIM5"] if "32BIT" in opt_clean else ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
-        elif "ETH" in peri_type: target_instances = ["ETH1"] if "ETH1" in opt_clean else ["ETH2"]
+        # 定義 Timer 位元寬度
+        tim_32bit = ["TIM2", "TIM5"]
+        tim_16bit = ["TIM1", "TIM3", "TIM4", "TIM8", "TIM12", "TIM13", "TIM14", "TIM6", "TIM7"]
+        is_32bit_req = "32BIT" in opt_clean
+
+        if "PWM" in peri_type or "CNT" in peri_type or "COUNTER" in peri_type:
+             target_instances = tim_32bit if is_32bit_req else tim_16bit
+        elif "ETH" in peri_type: 
+             target_instances = ["ETH1"] if "ETH1" in opt_clean else ["ETH2"]
 
         for i in search_range:
             if success_groups >= count: break
@@ -470,7 +475,6 @@ class GPIOPlanner:
             if "PWM" in peri_type: inst_name = "PWM"
             elif "ADC" in peri_type: inst_name = "ADC"
             elif "ETH" in peri_type: inst_name = f"ETH{i}"
-            # ✨ 新增: Counter 命名
             elif "CNT" in peri_type or "COUNTER" in peri_type: inst_name = "COUNTER"
             
             if target_instances and ("ETH" in peri_type):
@@ -481,7 +485,14 @@ class GPIOPlanner:
             required = {}
             if "I2C" in peri_type: required = {"SCL": f"{inst_name}_SCL", "SDA": f"{inst_name}_SDA"}
             elif "SPI" in peri_type: required = {"SCK": f"{inst_name}_SCK", "MISO": f"{inst_name}_MISO", "MOSI": f"{inst_name}_MOSI"}
-            elif "UART" in peri_type or "USART" in peri_type: required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
+            
+            # ✨ [修改重點] UART 邏輯升級: 偵測 RTS CTS
+            elif "UART" in peri_type or "USART" in peri_type: 
+                required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
+                if "RTS" in opt_clean and "CTS" in opt_clean:
+                    required["RTS"] = f"{inst_name}_RTS"
+                    required["CTS"] = f"{inst_name}_CTS"
+            
             elif "ETH" in peri_type: required = {"MDC": f"{inst_name}_MDC", "MDIO": f"{inst_name}_MDIO", "REF_CLK": f"{inst_name}_RMII_REF_CLK"}
             elif "ADC" in peri_type: required = {"IN": r"ADC\d+_IN(P)?\d+"}
             elif "FDCAN" in search_type: required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
@@ -492,7 +503,6 @@ class GPIOPlanner:
                  pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
                  if pin: temp_assign[pin] = func
                  else: possible = False
-            # ✨ 新增: Counter 搜尋邏輯 (與 PWM 相同，找 TIM_CH)
             elif "CNT" in peri_type or "COUNTER" in peri_type:
                  pin, func = self.find_pin_for_signal(r"TIM\d+_CH\d+", preferred_instances=target_instances)
                  if pin: temp_assign[pin] = func
@@ -532,7 +542,7 @@ def filter_map_by_sheet(xml_map, dashboard):
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V45 - Added Counter Support)...")
+    log("🚀 程式啟動 (V47 - UART Flow Control + Full Integration)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
