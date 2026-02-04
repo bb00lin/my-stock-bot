@@ -214,7 +214,6 @@ class DashboardController:
             if format_requests: self.sheet.batch_update({"requests": format_requests})
         except: pass
 
-    # ✨ [修改 1] 強化同步邏輯：合併 Function 與 Spec，並移除不必要的截斷
     def sync_to_gpio(self, assignments, preserved_remarks):
         log("🔄 同步至 GPIO 表...")
         try:
@@ -229,11 +228,10 @@ class DashboardController:
                     if isinstance(d, dict):
                         desc = d.get('desc', '')
                         
-                        # 1. 處理 Function Name (去除 [Auto] 等前綴)
-                        # 注意：這裡拿掉了之前的 split('(')[0]，保留完整括號內容
+                        # 處理 Function Name (去除 [Auto] 等前綴, 保留括號內容)
                         clean_func = desc.split(']')[1].strip() if "]" in desc else desc
                         
-                        # 2. 處理 Detail Spec (參考 TIMER_METADATA)
+                        # 處理 Detail Spec
                         spec_text = ""
                         if "TIM" in desc:
                             match = re.search(r'(TIM\d+)', desc)
@@ -241,8 +239,7 @@ class DashboardController:
                                 tim_inst = match.group(1)
                                 spec_text = TIMER_METADATA.get(tim_inst, "")
 
-                        # 3. 組合 (如果有 Spec 就加在後面)
-                        # 結果範例: "PWM (TIM5_CH3) 32-bit, General"
+                        # 組合: "PWM (TIM5_CH3) 32-bit, General"
                         if spec_text:
                             gw_val = f"{clean_func} {spec_text}"
                         else:
@@ -455,6 +452,10 @@ class GPIOPlanner:
         opt_clean = self.normalize_option(option_str)
         search_range = range(1, 15); target_instances = None
         
+        # ✨ [修改 1] 自動正規化名稱：將 CAN, CANFD 統一視為 FDCAN 以匹配 XML
+        search_type = peri_type
+        if "CAN" in peri_type: search_type = "FDCAN"
+        
         # 在這裡呼叫名稱擴展函式
         group_labels = expand_pin_names(pin_define, count)
         
@@ -463,7 +464,10 @@ class GPIOPlanner:
 
         for i in search_range:
             if success_groups >= count: break
-            inst_name = f"{peri_type}{i}"
+            
+            # 使用 search_type 來建立名稱，例如 FDCAN1, FDCAN2
+            inst_name = f"{search_type}{i}"
+            
             if "PWM" in peri_type: inst_name = "PWM"
             elif "ADC" in peri_type: inst_name = "ADC"
             elif "ETH" in peri_type: inst_name = f"ETH{i}"
@@ -471,7 +475,6 @@ class GPIOPlanner:
             if target_instances and ("ETH" in peri_type):
                  if inst_name not in target_instances: continue
 
-            # 取得對應順序的名稱 (AO1, AO2...)
             current_label = group_labels[success_groups] if success_groups < len(group_labels) else ""
 
             required = {}
@@ -480,6 +483,9 @@ class GPIOPlanner:
             elif "UART" in peri_type or "USART" in peri_type: required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
             elif "ETH" in peri_type: required = {"MDC": f"{inst_name}_MDC", "MDIO": f"{inst_name}_MDIO", "REF_CLK": f"{inst_name}_RMII_REF_CLK"}
             elif "ADC" in peri_type: required = {"IN": r"ADC\d+_IN(P)?\d+"}
+            # ✨ [修改 2] 新增 CAN / FDCAN 的腳位定義
+            elif "FDCAN" in search_type:
+                 required = {"TX": f"{inst_name}_TX", "RX": f"{inst_name}_RX"}
 
             temp_assign = {}; possible = True
             
@@ -522,7 +528,7 @@ def filter_map_by_sheet(xml_map, dashboard):
     return filtered
 
 if __name__ == "__main__":
-    log("🚀 程式啟動 (V43 - GPIO Sync Enhanced)...")
+    log("🚀 程式啟動 (V44 - CANFD Support Added)...")
     dashboard = DashboardController()
     if not dashboard.connect(): sys.exit(1)
     xml_parser = STM32XMLParser(XML_FILENAME); xml_parser.parse()
