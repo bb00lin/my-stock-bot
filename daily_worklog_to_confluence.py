@@ -208,7 +208,6 @@ def fetch_all_recent_issues(min_date):
     jql = f'updated >= "{min_date_str}" ORDER BY updated DESC'
     all_issues = []
     
-    # ✅ 已修復：改用 startAt 無限翻頁，突破 100 筆限制
     start_at = 0
     max_results = 100
     
@@ -220,7 +219,8 @@ def fetch_all_recent_issues(min_date):
             "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate"]
         }
         try:
-            res = requests.post(f"{JIRA_URL}/rest/api/3/search/jql?expand=changelog", json=payload, auth=ADMIN_AUTH, timeout=20)
+            # ✅ 拔除多餘的 /jql，改用最穩定且完美支援 startAt 的傳統 search API
+            res = requests.post(f"{JIRA_URL}/rest/api/3/search?expand=changelog", json=payload, auth=ADMIN_AUTH, timeout=20)
             res.raise_for_status()
             data = res.json()
             issues = data.get('issues', [])
@@ -233,6 +233,8 @@ def fetch_all_recent_issues(min_date):
                 break
         except Exception as e:
             print(f"    ❌ 全域掃描 API 請求失敗: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"    📄 錯誤詳情: {e.response.text}")
             break
     return all_issues
 
