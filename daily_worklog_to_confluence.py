@@ -16,7 +16,7 @@ load_dotenv("jira_config.txt")
 # --- 1. 環境變數與金鑰設定 (對齊 GitHub Secrets) ---
 raw_url = os.environ.get("CONF_URL", "")
 parsed = urlparse(raw_url)
-# ✅ 網址清洗器：強制只保留主網域 (解決 404 雙重 /wiki/wiki 錯誤)
+# ✅ 網址清洗器：強制只保留主網域
 JIRA_URL = f"{parsed.scheme}://{parsed.netloc}"
 
 ADMIN_EMAIL = os.environ.get("CONF_USER")
@@ -49,7 +49,7 @@ class SettingsManager:
             "show_status": True, "show_comment": True, "minor_edit": True,
             "show_pending_inprogress": True, "show_pending_waiting": True,
             "show_pending_todo": False, "show_pending_candidate": False,
-            "show_pending_has_due": False, "compact_layout": False, "use_jira_macro": False,
+            "show_pending_has_due": False, "compact_layout": False, "use_jira_macro": True,
             "group_by_project": False, "hide_duplicate_transition": False,
             "show_confluence_links": True, "show_total_time": True, "show_write_time": True,
             "show_duedate": True, "show_due_tbd": False
@@ -436,11 +436,17 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         
         if SETTINGS.get("use_jira_macro"):
             macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
-            macro.append(soup.new_tag("ac:parameter", **{"ac:name": "server"}).append(soup.new_string("System JIRA")))
+            
+            # ✅ 修正 1：正確建立 Server 參數，解決 Jira Macro 失效問題
+            param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
+            param_server.string = "System JIRA"
+            macro.append(param_server)
+            
             param_key = soup.new_tag("ac:parameter", **{"ac:name": "key"})
             param_key.string = log['key']
             macro.append(param_key)
             p1.append(macro)
+            
             if SETTINGS.get("show_status"):
                 status_text = f" {log['transition']}" if log.get('transition') else f" {get_emoji(log['status'])}[{translate_status(log['status'])}]"
                 p1.append(soup.new_string(status_text))
@@ -522,10 +528,16 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
             if SETTINGS.get("use_jira_macro"):
                 macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
-                macro.append(soup.new_tag("ac:parameter", **{"ac:name": "server"}).append(soup.new_string("System JIRA")))
+                
+                # ✅ 同樣修正 Pending 區塊的 Macro Server 參數
+                param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
+                param_server.string = "System JIRA"
+                macro.append(param_server)
+                
                 param_key = soup.new_tag("ac:parameter", **{"ac:name": "key"})
                 param_key.string = pl['key']
                 macro.append(param_key)
+                
                 p_pend.append(macro)
                 p_pend.append(soup.new_string(f" {get_emoji(pl['status'])}[{translate_status(pl['status'])}]"))
             else:
@@ -645,7 +657,7 @@ def run_sync_logic():
         print("🚀 開始針對個別成員過濾並寫入資料...")
 
         for name, email in ACCOUNT_DICT.items():
-            if not email: continue
+            # ✅ 修正 2：拿掉 `if not email: continue`，讓程式乖乖用人名搜尋！
             acc_id = get_account_id(email, name)
             
             target_mention = None
@@ -656,12 +668,13 @@ def run_sync_logic():
             if not target_mention:
                 all_links = soup.find_all('ac:link')
                 for link in all_links:
-                    if name.lower() in str(link).lower() or email.split('@')[0].lower() in str(link).lower():
+                    # 加入防呆: email 若不存在就不執行 split
+                    if name.lower() in str(link).lower() or (email and email.split('@')[0].lower() in str(link).lower()):
                         target_mention = link; break
             
             if not target_mention:
                 target_mention = soup.find(string=re.compile(f"@{name}", re.I))
-                if not target_mention:
+                if not target_mention and email:
                     target_mention = soup.find(string=re.compile(f"@{email.split('@')[0]}", re.I))
             if not target_mention: continue
 
