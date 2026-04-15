@@ -369,8 +369,28 @@ def extract_logs_from_issues(name, email, account_id, target_date, all_issues):
                 start_dt_tz8 = None
                 started_date_tz8 = raw_started[:10]
 
-            is_valid = (SETTINGS.get("filter_started") and started_date_tz8 == target_date_str) or \
-                       (SETTINGS.get("filter_comment") and comment_text.startswith(target_short))
+            is_target_day = (started_date_tz8 == target_date_str)
+            
+            # ✅ V49.3 核心升級：精準擷取 Comment 開頭的明確日期 (如 "4/14" 或 "04/14")
+            date_match = re.match(r'^(\d{1,2}/\d{1,2})', comment_text)
+            explicit_date_str = date_match.group(1) if date_match else None
+
+            is_valid = False
+            
+            # ✅ 優先權邏輯實作
+            if SETTINGS.get("filter_comment"):
+                if explicit_date_str:
+                    # 只要有寫，手寫日期就是「絕對真理」，徹底無視 Jira 的開始時間
+                    if explicit_date_str == target_short:
+                        is_valid = True
+                else:
+                    # 如果忘記寫日期，且有開啟「防呆」，才去抓 Jira 的開始時間
+                    if SETTINGS.get("filter_started") and is_target_day:
+                        is_valid = True
+            elif SETTINGS.get("filter_started"):
+                # 如果只開啟「防呆」，徹底無視手寫日期，只相信 Jira 的開始時間
+                if is_target_day:
+                    is_valid = True
 
             if is_valid:
                 raw_mins = parse_duration_to_minutes(wl.get('timeSpent', '0m'))
@@ -436,8 +456,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         
         if SETTINGS.get("use_jira_macro"):
             macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
-            
-            # ✅ 修正 1：正確建立 Server 參數，解決 Jira Macro 失效問題
             param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
             param_server.string = "System JIRA"
             macro.append(param_server)
@@ -528,12 +546,9 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
             if SETTINGS.get("use_jira_macro"):
                 macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
-                
-                # ✅ 同樣修正 Pending 區塊的 Macro Server 參數
                 param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
                 param_server.string = "System JIRA"
                 macro.append(param_server)
-                
                 param_key = soup.new_tag("ac:parameter", **{"ac:name": "key"})
                 param_key.string = pl['key']
                 macro.append(param_key)
@@ -597,7 +612,6 @@ def run_sync_logic():
         print(f"🔍 正在 Confluence 搜尋頁面...")
         res = requests.get(api_endpoint, params={"title": target_title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
         
-        # ✅ HTTP 狀態碼防護網與真實錯誤攔截
         if res.status_code != 200:
             print(f"❌ API 請求被 Confluence 拒絕！(狀態碼: {res.status_code})")
             print(f"💡 錯誤診斷提示：")
@@ -657,7 +671,6 @@ def run_sync_logic():
         print("🚀 開始針對個別成員過濾並寫入資料...")
 
         for name, email in ACCOUNT_DICT.items():
-            # ✅ 修正 2：拿掉 `if not email: continue`，讓程式乖乖用人名搜尋！
             acc_id = get_account_id(email, name)
             
             target_mention = None
@@ -668,7 +681,6 @@ def run_sync_logic():
             if not target_mention:
                 all_links = soup.find_all('ac:link')
                 for link in all_links:
-                    # 加入防呆: email 若不存在就不執行 split
                     if name.lower() in str(link).lower() or (email and email.split('@')[0].lower() in str(link).lower()):
                         target_mention = link; break
             
