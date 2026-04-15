@@ -1,4 +1,4 @@
-name: Confluence Weekly Report (Auto Sync)
+name: worklog_to_confluence (Auto Sync)
 
 on:
   workflow_dispatch: # 允許在 GitHub 網頁上手動按鈕觸發
