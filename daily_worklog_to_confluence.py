@@ -208,7 +208,6 @@ def fetch_all_recent_issues(min_date):
     jql = f'updated >= "{min_date_str}" ORDER BY updated DESC'
     all_issues = []
     
-    # ✅ 修正：改用新版 API 的 nextPageToken 翻頁機制
     next_page_token = None 
     
     while True:
@@ -216,7 +215,7 @@ def fetch_all_recent_issues(min_date):
             "jql": jql, 
             "maxResults": 100, 
             "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate"],
-            "expand": ["changelog"] # ✅ 修正：將 expand 放進 JSON payload，符合最新 API 規範
+            "expand": "changelog" # ✅ 終極修復：拿掉中括號，改為純字串，滿足 Jira 嚴格型別檢查
         }
         
         if next_page_token:
