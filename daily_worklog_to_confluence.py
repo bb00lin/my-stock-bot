@@ -4,12 +4,14 @@ import json
 import re
 import sys
 import time
-import threading
-import customtkinter as ctk
 from datetime import datetime, timezone, timedelta
 from requests.auth import HTTPBasicAuth
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup, Tag, NavigableString
+from dotenv import load_dotenv
+
+# 載入自訂的環境變數檔案 (本地端測試用，GitHub Actions 會自動忽略)
+load_dotenv("jira_config.txt")
 
 # --- 1. 環境變數與金鑰設定 (對齊 GitHub Secrets) ---
 raw_url = os.environ.get("CONF_URL", "")
@@ -35,10 +37,11 @@ ACCOUNT_DICT = {
     "SF Hsieh": os.environ.get("SF_EMAIL")
 }
 
-# --- 2. 設定檔載入引擎 (取代 GUI 變數) ---
+# --- 2. 設定檔載入引擎 (取代舊有 GUI 變數) ---
 class SettingsManager:
     def __init__(self, filepath="settings_daily.json"):
         self.filepath = filepath
+        # 預設值
         self.config = {
             "filter_comment": True, "filter_started": True, "day_yesterday": False,
             "day_auto": True, "day_mon": True, "day_tue": True, "day_wed": True,
@@ -58,11 +61,11 @@ class SettingsManager:
             try:
                 with open(self.filepath, "r", encoding="utf-8") as f:
                     self.config.update(json.load(f))
-                print("⚙️ 成功讀取 settings_daily.json 設定檔")
+                print(f"⚙️ 成功讀取 {self.filepath} 設定檔")
             except Exception as e:
                 print(f"⚠️ 讀取設定檔失敗，將使用預設值 ({e})")
         else:
-            print("⚠️ 找不到 settings_daily.json，將使用預設值")
+            print(f"⚠️ 找不到 {self.filepath}，將使用預設值")
 
     def get(self, key):
         return self.config.get(key)
@@ -156,12 +159,11 @@ def get_selected_dates():
     
     if SETTINGS.get("day_auto") and not SETTINGS.get("day_yesterday"):
         weekday = now_tpe.weekday()
-        config_update = {
+        SETTINGS.config.update({
             "day_mon": weekday >= 0, "day_tue": weekday >= 1,
             "day_wed": weekday >= 2, "day_thu": weekday >= 3,
             "day_fri": weekday >= 4
-        }
-        SETTINGS.config.update(config_update)
+        })
 
     if SETTINGS.get("day_yesterday"): 
         if now_tpe.weekday() == 0: return [now_tpe - timedelta(days=3)]
