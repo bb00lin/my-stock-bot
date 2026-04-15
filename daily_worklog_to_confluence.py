@@ -28,7 +28,7 @@ ACCOUNT_DICT = {
     "SF Hsieh": os.environ.get("SF_EMAIL")
 }
 
-# --- 2. 設定檔載入引擎 (取代 GUI 變數) ---
+# --- 2. 設定檔載入引擎 ---
 class SettingsManager:
     def __init__(self, filepath="settings_daily.json"):
         self.filepath = filepath
@@ -572,24 +572,25 @@ def run_sync_logic():
 
         target_title = get_target_report_title(selected_dates[0])
         print(f"\n=========================================\n🎯 目標週報頁面: {target_title}\n=========================================\n")
-       print(f"🔍 正在 Confluence 搜尋頁面...")
-            res = requests.get(api_endpoint, params={"title": target_title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
-            
-            # ✅ 新增：HTTP 狀態碼防護網與真實錯誤攔截
-            if res.status_code != 200:
-                print(f"❌ API 請求被 Confluence 拒絕！(狀態碼: {res.status_code})")
-                print(f"💡 錯誤診斷提示：")
-                if res.status_code == 401:
-                    print("   👉 [401 未授權]: 請檢查 GitHub Secrets 的 CONF_USER 與 CONF_PASS。注意：CONF_PASS 必須是 Atlassian API Token，不能是登入密碼！")
-                elif res.status_code == 403:
-                    print("   👉 [403 權限不足]: 你的帳號沒有權限讀取此頁面，或 API Token 權限不足。")
-                elif res.status_code == 404:
-                    print(f"   👉 [404 找不到]: 請檢查 CONF_URL ({JIRA_URL}) 是否正確。")
-                print(f"📄 伺服器原始回傳內容: {res.text[:300]}")
-                return
+        
+        print(f"🔍 正在 Confluence 搜尋頁面...")
+        res = requests.get(api_endpoint, params={"title": target_title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
+        
+        # ✅ HTTP 狀態碼防護網與真實錯誤攔截
+        if res.status_code != 200:
+            print(f"❌ API 請求被 Confluence 拒絕！(狀態碼: {res.status_code})")
+            print(f"💡 錯誤診斷提示：")
+            if res.status_code == 401:
+                print("   👉 [401 未授權]: 請檢查 GitHub Secrets 的 CONF_USER 與 CONF_PASS。注意：CONF_PASS 必須是 Atlassian API Token，不能是登入密碼！")
+            elif res.status_code == 403:
+                print("   👉 [403 權限不足]: 你的帳號沒有權限讀取此頁面，或 API Token 權限不足。")
+            elif res.status_code == 404:
+                print(f"   👉 [404 找不到]: 請檢查 CONF_URL ({JIRA_URL}) 是否正確。")
+            print(f"📄 伺服器原始回傳內容: {res.text[:300]}")
+            return
 
-            pages = res.json().get('results', [])
-            if not pages: return print(f"❌ 找不到目標頁面 {target_title}，請先確保週報已建立！")
+        pages = res.json().get('results', [])
+        if not pages: return print(f"❌ 找不到目標頁面 {target_title}，請先確保週報已建立！")
             
         page_data = pages[0]
         page_id = page_data['id']
