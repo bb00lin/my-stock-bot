@@ -1,10 +1,11 @@
 name: Confluence Weekly Report (Auto Sync)
 
 on:
-  workflow_dispatch: # 允許在 GitHub 網頁上手動按鈕觸發
+  workflow_dispatch: # 允許手動按鈕觸發
   schedule:
-    # 台灣時間週一 16:00 = UTC 時間週一 08:00 (可依需求調整)
-    - cron: '0 8 * * 1'
+    # 台灣時間 (CST) 週一至週五 08:00 = UTC 時間 00:00
+    # 分 時 日 月 週
+    - cron: '0 0 * * 1-5'
 
 jobs:
   build:
@@ -39,7 +40,7 @@ jobs:
         SAM_EMAIL: ${{ secrets.SAM_EMAIL }}
         VIC_EMAIL: ${{ secrets.VIC_EMAIL }}
         SF_EMAIL: ${{ secrets.SF_EMAIL }}
-      # ✅ 這裡已經幫你替換成新的檔名 daily_worklog_to_confluence.py
+      # 執行你指定的 Python 檔名
       run: |
         python daily_worklog_to_confluence.py 2>&1 | tee output.txt
 
@@ -72,6 +73,6 @@ jobs:
         to: bb00lin@gmail.com
         from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
         body: |
-          Confluence 自動週報執行失敗。
+          Confluence 自動日誌寫入執行失敗。
           
           請檢查 GitHub Actions Log 了解詳情。
