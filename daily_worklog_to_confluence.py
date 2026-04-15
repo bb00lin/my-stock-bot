@@ -4,16 +4,23 @@ import json
 import re
 import sys
 import time
+import threading
+import customtkinter as ctk
 from datetime import datetime, timezone, timedelta
 from requests.auth import HTTPBasicAuth
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup, Tag, NavigableString
 
 # --- 1. 環境變數與金鑰設定 (對齊 GitHub Secrets) ---
-JIRA_URL = os.environ.get("CONF_URL", "").rstrip('/')
+raw_url = os.environ.get("CONF_URL", "")
+parsed = urlparse(raw_url)
+# ✅ 網址清洗器：強制只保留主網域 (解決 404 雙重 /wiki/wiki 錯誤)
+JIRA_URL = f"{parsed.scheme}://{parsed.netloc}"
+
 ADMIN_EMAIL = os.environ.get("CONF_USER")
 ADMIN_TOKEN = os.environ.get("CONF_PASS")
 
-if not JIRA_URL or not ADMIN_EMAIL or not ADMIN_TOKEN:
+if not raw_url or not ADMIN_EMAIL or not ADMIN_TOKEN:
     print("❌ 錯誤：找不到環境變數 CONF_URL, CONF_USER 或 CONF_PASS")
     sys.exit(1)
 
@@ -28,7 +35,7 @@ ACCOUNT_DICT = {
     "SF Hsieh": os.environ.get("SF_EMAIL")
 }
 
-# --- 2. 設定檔載入引擎 ---
+# --- 2. 設定檔載入引擎 (取代 GUI 變數) ---
 class SettingsManager:
     def __init__(self, filepath="settings_daily.json"):
         self.filepath = filepath
