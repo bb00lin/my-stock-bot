@@ -207,22 +207,30 @@ def fetch_all_recent_issues(min_date):
     min_date_str = min_date.strftime("%Y-%m-%d")
     jql = f'updated >= "{min_date_str}" ORDER BY updated DESC'
     all_issues = []
-    next_page_token = None 
+    
+    # ✅ 已修復：改用 startAt 無限翻頁，突破 100 筆限制
+    start_at = 0
+    max_results = 100
     
     while True:
         payload = {
-            "jql": jql, "maxResults": 100, 
+            "jql": jql, 
+            "startAt": start_at,
+            "maxResults": max_results, 
             "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate"]
         }
-        if next_page_token: payload["nextPageToken"] = next_page_token
         try:
             res = requests.post(f"{JIRA_URL}/rest/api/3/search/jql?expand=changelog", json=payload, auth=ADMIN_AUTH, timeout=20)
             res.raise_for_status()
             data = res.json()
             issues = data.get('issues', [])
             all_issues.extend(issues)
-            next_page_token = data.get('nextPageToken')
-            if not next_page_token or not issues: break
+            
+            total = data.get('total', 0)
+            start_at += len(issues)
+            
+            if start_at >= total or not issues:
+                break
         except Exception as e:
             print(f"    ❌ 全域掃描 API 請求失敗: {e}")
             break
@@ -371,24 +379,20 @@ def extract_logs_from_issues(name, email, account_id, target_date, all_issues):
 
             is_target_day = (started_date_tz8 == target_date_str)
             
-            # ✅ V49.3 核心升級：精準擷取 Comment 開頭的明確日期 (如 "4/14" 或 "04/14")
             date_match = re.match(r'^(\d{1,2}/\d{1,2})', comment_text)
             explicit_date_str = date_match.group(1) if date_match else None
 
             is_valid = False
             
-            # ✅ 優先權邏輯實作
             if SETTINGS.get("filter_comment"):
                 if explicit_date_str:
-                    # 只要有寫，手寫日期就是「絕對真理」，徹底無視 Jira 的開始時間
-                    if explicit_date_str == target_short:
+                    clean_explicit = explicit_date_str.lstrip("0").replace("/0", "/")
+                    if clean_explicit == target_short:
                         is_valid = True
                 else:
-                    # 如果忘記寫日期，且有開啟「防呆」，才去抓 Jira 的開始時間
                     if SETTINGS.get("filter_started") and is_target_day:
                         is_valid = True
             elif SETTINGS.get("filter_started"):
-                # 如果只開啟「防呆」，徹底無視手寫日期，只相信 Jira 的開始時間
                 if is_target_day:
                     is_valid = True
 
@@ -456,6 +460,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         
         if SETTINGS.get("use_jira_macro"):
             macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
+            
             param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
             param_server.string = "System JIRA"
             macro.append(param_server)
@@ -534,8 +539,16 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_spacer_before_pending.append(soup.new_tag("br"))
         container.append(p_spacer_before_pending)
 
+    # ✅ 區塊計數器：用來插入 Shift+Enter 的間距
+    rendered_pending_sections = [0]
+
     def append_pending_tasks(task_list, title_text, title_color):
         if not task_list: return
+        
+        # ✅ 如果不是第一個 Pending 區塊，插入空白換行 <br>
+        if rendered_pending_sections[0] > 0:
+            container.append(soup.new_tag("br"))
+
         p_divider = soup.new_tag("p", style=f"margin-top: 10px; margin-bottom: 5px; font-weight: bold; color: {title_color};")
         p_divider.string = title_text
         container.append(p_divider)
@@ -546,15 +559,17 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
             if SETTINGS.get("use_jira_macro"):
                 macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
+                
                 param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
                 param_server.string = "System JIRA"
                 macro.append(param_server)
+                
                 param_key = soup.new_tag("ac:parameter", **{"ac:name": "key"})
                 param_key.string = pl['key']
                 macro.append(param_key)
                 
                 p_pend.append(macro)
-                p_pend.append(soup.new_string(f" {get_emoji(pl['status'])}[{translate_status(pl['status'])}]"))
+                # ✅ 待辦區塊極簡排版版：Macro 模式下隱藏手寫狀態字串
             else:
                 a_key = soup.new_tag("a", href=f"{JIRA_URL}/browse/{pl['key']}")
                 a_key.string = pl['key']
@@ -584,6 +599,8 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     p_pend.append(a_conf)
                 
             container.append(p_pend)
+            
+        rendered_pending_sections[0] += 1
 
     if SETTINGS.get("show_pending_inprogress"): append_pending_tasks(pending_in_progress, "🔄 進行中且尚未更新進度的任務：", "#d35400")
     if SETTINGS.get("show_pending_waiting"): append_pending_tasks(pending_waiting, "⏳ Waiting 狀態的任務：", "#8e44ad")
