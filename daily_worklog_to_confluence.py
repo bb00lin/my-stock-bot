@@ -8,19 +8,20 @@ from datetime import datetime, timezone, timedelta
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup, Tag, NavigableString
 
-# --- 1. 環境變數與金鑰設定 ---
-JIRA_URL = os.environ.get("JIRA_URL", "https://qsiaiot.atlassian.net").rstrip('/')
-ADMIN_EMAIL = os.environ.get("JIRA_EMAIL")
-ADMIN_TOKEN = os.environ.get("JIRA_TOKEN")
+# --- 1. 環境變數與金鑰設定 (對齊 GitHub Secrets) ---
+JIRA_URL = os.environ.get("CONF_URL", "").rstrip('/')
+ADMIN_EMAIL = os.environ.get("CONF_USER")
+ADMIN_TOKEN = os.environ.get("CONF_PASS")
 
-if not ADMIN_EMAIL or not ADMIN_TOKEN:
-    print("❌ 錯誤：找不到環境變數 JIRA_EMAIL 或 JIRA_TOKEN")
+if not JIRA_URL or not ADMIN_EMAIL or not ADMIN_TOKEN:
+    print("❌ 錯誤：找不到環境變數 CONF_URL, CONF_USER 或 CONF_PASS")
     sys.exit(1)
 
 ADMIN_AUTH = HTTPBasicAuth(ADMIN_EMAIL, ADMIN_TOKEN)
 
+# 這裡的 Email 就算在 Github Secrets 沒設定，程式也會自動切換成人名搜尋，非常安全
 ACCOUNT_DICT = {
-    "Bob Lin": os.environ.get("JIRA_EMAIL"),
+    "Bob Lin": os.environ.get("CONF_USER"),
     "shannonchang": os.environ.get("SHANNON_EMAIL"),
     "sam.chang": os.environ.get("SAM_EMAIL"),
     "Vic Wu": os.environ.get("VIC_EMAIL"),
@@ -61,7 +62,7 @@ class SettingsManager:
 
 SETTINGS = SettingsManager()
 
-# --- 3. 核心輔助函式 (完全移植自 V49) ---
+# --- 3. 核心輔助函式 ---
 EMOJI_MAP = {
     "TO DO": "📋", "待辦事項": "📋", "IN PROGRESS": "🔄", "進行中": "🔄",
     "DONE": "✅", "完成": "✅", "BLOCKED": "🛑", "CANDIDATE": "🎯",
@@ -146,7 +147,6 @@ def calculate_working_days(start_date, end_date):
 def get_selected_dates():
     now_tpe = datetime.now(timezone(timedelta(hours=8)))
     
-    # 判斷 Auto-Days
     if SETTINGS.get("day_auto") and not SETTINGS.get("day_yesterday"):
         weekday = now_tpe.weekday()
         config_update = {
