@@ -1,7 +1,7 @@
 name: Confluence Weekly Report (Auto Sync)
 
 on:
-  workflow_dispatch: # 允許手動按鈕觸發
+  workflow_dispatch: # 允許在 GitHub 網頁上手動按鈕觸發
   schedule:
     # 台灣時間 (CST) 週一至週五 08:00 = UTC 時間 00:00
     # 分 時 日 月 週
@@ -22,7 +22,7 @@ jobs:
       with:
         python-version: '3.9'
 
-    # 3. 安裝必要套件 
+    # 3. 安裝必要套件 (移除了 customtkinter，只保留網路與解析套件)
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -32,14 +32,17 @@ jobs:
     - name: Run Confluence Script
       id: run_script
       env:
-        # 請確保在 GitHub Repo 的 Settings -> Secrets 裡設定這些參數
-        JIRA_URL: ${{ secrets.JIRA_URL }}
-        JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-        JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+        # 將 GitHub Secrets 對應到腳本所需的環境變數
+        CONF_URL: ${{ secrets.CONF_URL }}
+        CONF_USER: ${{ secrets.CONF_USER }}
+        CONF_PASS: ${{ secrets.CONF_PASS }}
+        
+        # 團隊成員信箱 (如果在 Secrets 沒有設定，腳本會自動改用人名去 Jira 搜尋)
         SHANNON_EMAIL: ${{ secrets.SHANNON_EMAIL }}
         SAM_EMAIL: ${{ secrets.SAM_EMAIL }}
         VIC_EMAIL: ${{ secrets.VIC_EMAIL }}
         SF_EMAIL: ${{ secrets.SF_EMAIL }}
+      
       # 執行你指定的 Python 檔名
       run: |
         python daily_worklog_to_confluence.py 2>&1 | tee output.txt
