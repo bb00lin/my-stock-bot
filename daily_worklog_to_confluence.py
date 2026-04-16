@@ -476,10 +476,8 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
     project_box = None
     log_counter = 1
 
-    # ✅ 使用 Confluence 官方的 Panel 巨集來產生絕對不會消失的黑框
     def create_confluence_panel():
         macro = soup.new_tag("ac:structured-macro", **{"ac:name": "panel", "ac:schema-version": "1"})
-        # 設定為黑框白底
         for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", "#ffffff")]:
             param = soup.new_tag("ac:parameter", **{"ac:name": p_name})
             param.string = p_val
@@ -510,20 +508,15 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
 
         p1 = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 2px;")
         
-        # ✅ 黑字粗體編號加上半形空格
         num_span = soup.new_tag("span", style="color: black; font-weight: bold;")
         num_span.string = f"{log_counter}. "
         p1.append(num_span)
         
         if SETTINGS.get("use_jira_macro"):
-            macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
-            param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
-            param_server.string = "System JIRA"
-            macro.append(param_server)
-            param_key = soup.new_tag("ac:parameter", **{"ac:name": "key"})
-            param_key.string = log['key']
-            macro.append(param_key)
-            p1.append(macro)
+            # ✅ 終極修復 1：放棄舊版 macro，全面改用 Smart Link 語法喚醒 Hover 預覽面板！
+            smart_link = soup.new_tag("a", href=f"{JIRA_URL}/browse/{log['key']}", **{"data-card-appearance": "inline"})
+            smart_link.string = f"{JIRA_URL}/browse/{log['key']}"
+            p1.append(smart_link)
             
             if SETTINGS.get("show_status"):
                 status_text = f" {log['transition']}" if log.get('transition') else f" {get_emoji(log['status'])}[{translate_status(log['status'])}]"
@@ -555,8 +548,9 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         if log.get('confluence_links'):
             for cl in log['confluence_links']:
                 p1.append(soup.new_string(" "))
-                a_conf = soup.new_tag("a", href=cl['url'], **{"data-card-appearance": "inline"})
-                a_conf.string = cl['url']
+                # ✅ 終極修復 2：將 Confluence 連結改為顯示標題而非長網址
+                a_conf = soup.new_tag("a", href=cl['url'])
+                a_conf.string = f"📄 {cl['title']}"
                 p1.append(a_conf)
 
         parts = []
@@ -608,7 +602,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_divider.string = title_text
         container.append(p_divider)
         
-        # ✅ 待辦區塊同樣使用 Confluence 官方黑框巨集
         panel_macro, pending_box = create_confluence_panel()
         container.append(panel_macro)
 
@@ -616,7 +609,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         for pl in task_list:
             p_pend = soup.new_tag("p", style="margin-top: 4px; margin-bottom: 4px; color: #7f8c8d;")
             
-            # ✅ 待辦任務改為黑色數字編號與空格
             num_span = soup.new_tag("span", style="color: black; font-weight: bold;")
             num_span.string = f"{task_counter}. "
             p_pend.append(num_span)
@@ -624,15 +616,12 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             p_pend.append(soup.new_string(f"[{pl['project']}] "))
             
             if SETTINGS.get("use_jira_macro"):
-                macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
-                param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
-                param_server.string = "System JIRA"
-                macro.append(param_server)
-                param_key = soup.new_tag("ac:parameter", **{"ac:name": "key"})
-                param_key.string = pl['key']
-                macro.append(param_key)
+                # ✅ 終極修復 1：改用 Smart Link
+                smart_link = soup.new_tag("a", href=f"{JIRA_URL}/browse/{pl['key']}", **{"data-card-appearance": "inline"})
+                smart_link.string = f"{JIRA_URL}/browse/{pl['key']}"
+                p_pend.append(smart_link)
                 
-                p_pend.append(macro)
+                p_pend.append(soup.new_string(f" {get_emoji(pl['status'])}[{translate_status(pl['status'])}]"))
             else:
                 a_key = soup.new_tag("a", href=f"{JIRA_URL}/browse/{pl['key']}")
                 a_key.string = pl['key']
@@ -657,8 +646,9 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             if pl.get('confluence_links'):
                 for cl in pl['confluence_links']:
                     p_pend.append(soup.new_string(" "))
-                    a_conf = soup.new_tag("a", href=cl['url'], **{"data-card-appearance": "inline"})
-                    a_conf.string = cl['url']
+                    # ✅ 終極修復 2：改用標題
+                    a_conf = soup.new_tag("a", href=cl['url'])
+                    a_conf.string = f"📄 {cl['title']}"
                     p_pend.append(a_conf)
                 
             pending_box.append(p_pend)
