@@ -477,7 +477,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
     project_box = None
     log_counter = 1
 
-    # 如果沒有啟動群組，且有日誌，則建立單一的大框框
     if logs and not SETTINGS.get("group_by_project"):
         project_box = soup.new_tag("div", style="border: 1px solid #dfe1e6; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.02);")
         container.append(project_box)
@@ -502,7 +501,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
 
         p1 = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 2px;")
         
-        # ✅ 調整 2: 將藍色菱形 🔹 換成紅色數字編號 (例: 1. , 2. )
+        # ✅ 調整 2: 將藍色菱形換成紅色數字編號
         num_span = soup.new_tag("span", style="color: #e74c3c; font-weight: bold; margin-right: 5px;")
         num_span.string = f"{log_counter}."
         p1.append(num_span)
@@ -563,12 +562,12 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             span_parts = soup.new_tag("span", style="margin-left: 10px; color: #7f8c8d;")
             span_parts.string = f" {parts_str}"
             p1.append(span_parts)
-            project_box.append(p1) # 改為寫入 box 中
+            project_box.append(p1)
         else:
-            project_box.append(p1) # 改為寫入 box 中
+            project_box.append(p1)
             p2 = soup.new_tag("p", style="margin-left: 20px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
             p2.string = f"　 └ " + parts_str
-            project_box.append(p2) # 改為寫入 box 中
+            project_box.append(p2)
         
         p3 = soup.new_tag("p", style="margin-left: 20px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
         if SETTINGS.get("show_comment"):
@@ -577,7 +576,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         else:
             if log['duration'] != "-": p3.string = f"　 └ ⏱️ 耗時: {log['duration']}"
             
-        project_box.append(p3) # 改為寫入 box 中
+        project_box.append(p3)
         log_counter += 1
 
     has_any_pending = bool((SETTINGS.get("show_pending_inprogress") and pending_in_progress) or
@@ -602,7 +601,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_divider.string = title_text
         container.append(p_divider)
         
-        # ✅ 待辦區塊同樣使用邊框包裝，保持視覺一致性
+        # ✅ 待辦區塊同樣使用邊框包裝
         pending_box = soup.new_tag("div", style="border: 1px solid #dfe1e6; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #fafbfc;")
         container.append(pending_box)
 
@@ -655,7 +654,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     a_conf.string = cl['url']
                     p_pend.append(a_conf)
                 
-            pending_box.append(p_pend) # 改為寫入 pending_box 中
+            pending_box.append(p_pend)
             task_counter += 1
             
         rendered_pending_sections[0] += 1
