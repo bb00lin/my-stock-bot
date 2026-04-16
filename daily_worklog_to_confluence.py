@@ -41,9 +41,10 @@ ACCOUNT_DICT = {
 class SettingsManager:
     def __init__(self, filepath="settings_daily.json"):
         self.filepath = filepath
-        # 預設值
+        # 預設值 (✅ 新增 auto_clear_first 與 exclude_keywords 預設設定)
         self.config = {
             "filter_comment": True, "filter_started": True, "day_yesterday": False,
+            "exclude_keywords": "DailyMeeting", "auto_clear_first": False,
             "day_auto": True, "day_mon": True, "day_tue": True, "day_wed": True,
             "day_thu": True, "day_fri": True, "show_label": True, "show_parent": True,
             "show_status": True, "show_comment": True, "minor_edit": True,
@@ -215,7 +216,7 @@ def fetch_all_recent_issues(min_date):
             "jql": jql, 
             "maxResults": 100, 
             "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate"],
-            "expand": "changelog" # ✅ 終極修復：拿掉中括號，改為純字串，滿足 Jira 嚴格型別檢查
+            "expand": "changelog" 
         }
         
         if next_page_token:
@@ -270,17 +271,29 @@ def fetch_pending_tasks(account_id, updated_keys):
     try:
         res = requests.post(f"{JIRA_URL}/rest/api/3/search/jql", json=payload, auth=ADMIN_AUTH, timeout=10)
         if res.status_code == 200:
-            for issue in res.json().get('issues', []):
+            issues = res.json().get('issues', [])
+            
+            # ✅ 新增：取得關鍵字過濾清單
+            exclude_kws = [kw.strip().lower() for kw in SETTINGS.get("exclude_keywords", "").split(',') if kw.strip()]
+            
+            for issue in issues:
                 key = issue['key']
+                summary_text = issue['fields'].get('summary', 'NA')
+                project_text = issue['fields'].get('project', {}).get('name', 'NA')
+                
                 if key not in updated_keys:
+                    # ✅ 新增：檢查標題與專案是否包含排除關鍵字
+                    is_excluded = any(kw in summary_text.lower() or kw in project_text.lower() for kw in exclude_kws)
+                    if is_excluded:
+                        continue
+                        
                     status_str = issue['fields'].get('status', {}).get('name', 'NA')
-                    project_name = issue['fields'].get('project', {}).get('name', 'NA')
                     duedate_str, duedate_dt = format_due_date(issue['fields'].get('duedate'))
                     confluence_links = get_remote_links(key) if SETTINGS.get("show_confluence_links") else []
 
                     task_data = {
-                        "key": key, "summary": issue['fields']['summary'], "status": status_str,
-                        "project": project_name, "duedate": duedate_str, "duedate_dt": duedate_dt,
+                        "key": key, "summary": summary_text, "status": status_str,
+                        "project": project_text, "duedate": duedate_str, "duedate_dt": duedate_dt,
                         "confluence_links": confluence_links
                     }
                     
@@ -338,14 +351,24 @@ def extract_logs_from_issues(name, email, account_id, target_date, all_issues):
     target_short = target_date.strftime("%m/%d").lstrip("0").replace("/0", "/")
     collected_logs = []
     
+    # ✅ 新增：獲取排除關鍵字清單
+    exclude_kws = [kw.strip().lower() for kw in SETTINGS.get("exclude_keywords", "").split(',') if kw.strip()]
+    
     for issue in all_issues:
         key = issue['key']
         fields = issue['fields']
+        
+        summary = fields.get('summary', 'NA')
+        project_name = fields.get('project', {}).get('name', 'NA')
+        
+        # ✅ 新增：檢查標題或專案名稱是否包含排除關鍵字 (如會議等)
+        is_excluded = any(kw in summary.lower() or kw in project_name.lower() for kw in exclude_kws)
+        if is_excluded:
+            continue
+            
         parent = fields.get('parent', {}).get('fields', {}).get('summary', 'NA')
         label_str = fields.get('labels', ['NA'])[0] if fields.get('labels') else "NA"
-        project_name = fields.get('project', {}).get('name', 'NA')
         current_status = fields.get('status', {}).get('name', 'NA')
-        summary = fields.get('summary', 'NA')
         duedate_str, duedate_dt = format_due_date(fields.get('duedate'))
 
         status_transition_str = get_user_status_transition_for_day(key, account_id, email, target_date_str, issue)
@@ -545,13 +568,11 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_spacer_before_pending.append(soup.new_tag("br"))
         container.append(p_spacer_before_pending)
 
-    # ✅ 區塊計數器：用來插入 Shift+Enter 的間距
     rendered_pending_sections = [0]
 
     def append_pending_tasks(task_list, title_text, title_color):
         if not task_list: return
         
-        # ✅ 如果不是第一個 Pending 區塊，插入空白換行 <br>
         if rendered_pending_sections[0] > 0:
             container.append(soup.new_tag("br"))
 
@@ -575,7 +596,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                 macro.append(param_key)
                 
                 p_pend.append(macro)
-                # ✅ 待辦區塊極簡排版版：Macro 模式下隱藏手寫狀態字串
             else:
                 a_key = soup.new_tag("a", href=f"{JIRA_URL}/browse/{pl['key']}")
                 a_key.string = pl['key']
@@ -619,9 +639,119 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
     return container
 
+# ✅ 新增：Headless 版的一鍵清除邏輯 (由自動清除參數觸發)
+def run_clear_logic():
+    try:
+        api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
+        selected_dates = get_selected_dates()
+        if not selected_dates: return print("⚠️ 未選擇任何要更新的日期(無法判斷目標頁面)。")
+
+        target_title = get_target_report_title(selected_dates[0])
+        print(f"\n=========================================\n🎯 目標週報頁面: {target_title} (清除模式)\n=========================================\n")
+        print(f"🔍 正在 Confluence 搜尋頁面...")
+        res = requests.get(api_endpoint, params={"title": target_title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
+        pages = res.json().get('results', [])
+        if not pages: return print(f"❌ 找不到目標頁面 {target_title}！")
+            
+        page_data = pages[0]
+        page_id = page_data['id']
+        html_content = page_data['body']['storage']['value']
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        page_needs_update = False
+        cleaned_count = 0
+
+        for element in soup.find_all(lambda tag: tag.has_attr('class') and any(c.startswith('daily-worklog-') for c in tag['class'])):
+            element.extract()
+            page_needs_update = True
+            cleaned_count += 1
+        
+        for name, email in ACCOUNT_DICT.items():
+            acc_id = get_account_id(email, name)
+            target_mention = None
+            if acc_id:
+                ri_user = soup.find('ri:user', attrs={'ri:account-id': acc_id})
+                if ri_user: target_mention = ri_user.find_parent('ac:link')
+            if not target_mention:
+                all_links = soup.find_all('ac:link')
+                for link in all_links:
+                    if name.lower() in str(link).lower() or (email and email.split('@')[0].lower() in str(link).lower()):
+                        target_mention = link; break
+            if not target_mention:
+                target_mention = soup.find(string=re.compile(f"@{name}", re.I))
+                if not target_mention and email:
+                    target_mention = soup.find(string=re.compile(f"@{email.split('@')[0]}", re.I))
+            if not target_mention: continue
+
+            mention_container = target_mention.find_parent(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div'])
+            if not mention_container: mention_container = target_mention
+
+            if isinstance(mention_container, Tag) and mention_container.name in ['p', 'div', 'li', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                mention_container.name = 'h1'
+                page_needs_update = True
+
+            user_nodes = []
+            current_node = mention_container.next_sibling
+            while current_node:
+                if isinstance(current_node, NavigableString) and str(current_node).strip().startswith('@'): break 
+                if isinstance(current_node, Tag):
+                    if current_node.name == 'ac:link' or current_node.find('ac:link'): break 
+                    if current_node.name in ['h1', 'h2', 'hr']: break 
+                    if str(current_node.get_text()).strip().startswith('@'): break
+                user_nodes.append(current_node)
+                current_node = current_node.next_sibling
+
+            nodes_to_remove = []
+            i = 0
+            while i < len(user_nodes):
+                node = user_nodes[i]
+                text = node.get_text(strip=True) if isinstance(node, Tag) else str(node).strip()
+                if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', text):
+                    nodes_to_remove.append(node)
+                    i += 1
+                    while i < len(user_nodes):
+                        next_node = user_nodes[i]
+                        next_text = next_node.get_text(strip=True) if isinstance(next_node, Tag) else str(next_node).strip()
+                        if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', next_text): break
+                        nodes_to_remove.append(next_node)
+                        i += 1
+                else:
+                    i += 1
+
+            for node in nodes_to_remove:
+                node.extract()
+                page_needs_update = True
+                cleaned_count += 1
+        
+        if page_needs_update:
+            print(f"🧹 發現 {cleaned_count} 個日誌區塊/殘留，正在更新至 Confluence...")
+            url = f"{api_endpoint}/{page_id}"
+            payload = {
+                "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
+                "title": page_data['title'],
+                "type": "page",
+                "body": {"storage": {"value": str(soup), "representation": "storage"}}
+            }
+            update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
+            if update_res.status_code == 200:
+                print("🎉 大功告成！已成功清除本頁所有舊日誌。")
+            else: print(f"❌ 儲存至 Confluence 失敗: {update_res.text}")
+        else:
+            print("📭 頁面乾淨無殘留，無需清除。")
+
+    except Exception as e: print(f"\n❌ 程式發生意外錯誤: {e}")
+
 def run_sync_logic():
     start_time = time.time()
     try:
+        # ✅ 新增：在正式抓取前，判斷是否需要執行自動清除
+        if SETTINGS.get("auto_clear_first"):
+            print("=========================================")
+            print("🧹 [排程任務] 執行批次寫入前的前置自動清除作業")
+            print("=========================================")
+            run_clear_logic()
+            print("\n✅ 前置清除作業完成，準備開始批次寫入...\n")
+
         if not SETTINGS.get("filter_comment") and not SETTINGS.get("filter_started"):
             return print("❌ 錯誤：請至少在 settings_daily.json 啟用一種「智慧過濾機制」。")
 
