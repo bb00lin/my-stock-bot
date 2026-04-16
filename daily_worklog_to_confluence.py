@@ -476,10 +476,21 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
     project_box = None
     log_counter = 1
 
+    # ✅ 使用 Confluence 官方的 Panel 巨集來產生絕對不會消失的黑框
+    def create_confluence_panel():
+        macro = soup.new_tag("ac:structured-macro", **{"ac:name": "panel", "ac:schema-version": "1"})
+        # 設定為黑框白底
+        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", "#ffffff")]:
+            param = soup.new_tag("ac:parameter", **{"ac:name": p_name})
+            param.string = p_val
+            macro.append(param)
+        body = soup.new_tag("ac:rich-text-body")
+        macro.append(body)
+        return macro, body
+
     if logs and not SETTINGS.get("group_by_project"):
-        # ✅ 使用純黑實心框
-        project_box = soup.new_tag("div", style="border: 1px solid black; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.02);")
-        container.append(project_box)
+        panel_macro, project_box = create_confluence_panel()
+        container.append(panel_macro)
 
     for log in logs:
         if SETTINGS.get("group_by_project") and log['project'] != current_project:
@@ -492,26 +503,23 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             p_proj.string = f"---- 專案: {current_project} ----"
             container.append(p_proj)
             
-            # ✅ 使用純黑實心框
-            project_box = soup.new_tag("div", style="border: 1px solid black; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.02);")
-            container.append(project_box)
+            panel_macro, project_box = create_confluence_panel()
+            container.append(panel_macro)
             
             log_counter = 1
 
         p1 = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 2px;")
         
-        # ✅ 編號改為黑字粗體，並在後面加一個半形空格
+        # ✅ 黑字粗體編號加上半形空格
         num_span = soup.new_tag("span", style="color: black; font-weight: bold;")
         num_span.string = f"{log_counter}. "
         p1.append(num_span)
         
         if SETTINGS.get("use_jira_macro"):
             macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
-            
             param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
             param_server.string = "System JIRA"
             macro.append(param_server)
-            
             param_key = soup.new_tag("ac:parameter", **{"ac:name": "key"})
             param_key.string = log['key']
             macro.append(param_key)
@@ -600,15 +608,15 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_divider.string = title_text
         container.append(p_divider)
         
-        # ✅ 待辦區塊同樣使用純黑實心框
-        pending_box = soup.new_tag("div", style="border: 1px solid black; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #fafbfc;")
-        container.append(pending_box)
+        # ✅ 待辦區塊同樣使用 Confluence 官方黑框巨集
+        panel_macro, pending_box = create_confluence_panel()
+        container.append(panel_macro)
 
         task_counter = 1
         for pl in task_list:
             p_pend = soup.new_tag("p", style="margin-top: 4px; margin-bottom: 4px; color: #7f8c8d;")
             
-            # ✅ 待辦任務加入黑色數字編號與空格，並移除舊的菱形符號
+            # ✅ 待辦任務改為黑色數字編號與空格
             num_span = soup.new_tag("span", style="color: black; font-weight: bold;")
             num_span.string = f"{task_counter}. "
             p_pend.append(num_span)
@@ -848,7 +856,7 @@ def run_sync_logic():
 
         min_date = min(selected_dates)
         min_date_tag = min_date.strftime("[%Y/%m/%d]")
-        print(f"\n📡 啟提全域雷達：一次性掃描 Jira 自 {min_date_tag} 起的所有變更紀錄...")
+        print(f"\n📡 啟動全域雷達：一次性掃描 Jira 自 {min_date_tag} 起的所有變更紀錄...")
         all_issues_pool = fetch_all_recent_issues(min_date)
         print(f"  └ 掃描完畢，大池子共找到 {len(all_issues_pool)} 筆曾被觸碰過的任務。")
 
