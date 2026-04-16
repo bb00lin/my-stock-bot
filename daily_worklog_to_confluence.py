@@ -41,7 +41,7 @@ ACCOUNT_DICT = {
 class SettingsManager:
     def __init__(self, filepath="settings_daily.json"):
         self.filepath = filepath
-        # 預設值 (✅ 新增 auto_clear_first 與 exclude_keywords 預設設定)
+        # 預設值
         self.config = {
             "filter_comment": True, "filter_started": True, "day_yesterday": False,
             "exclude_keywords": "DailyMeeting", "auto_clear_first": False,
@@ -68,8 +68,9 @@ class SettingsManager:
         else:
             print(f"⚠️ 找不到 {self.filepath}，將使用預設值")
 
-    def get(self, key):
-        return self.config.get(key)
+    # ✅ 關鍵修復：加入 default=None，讓程式能正確處理帶有預設值的請求
+    def get(self, key, default=None):
+        return self.config.get(key, default)
 
 SETTINGS = SettingsManager()
 
@@ -273,7 +274,6 @@ def fetch_pending_tasks(account_id, updated_keys):
         if res.status_code == 200:
             issues = res.json().get('issues', [])
             
-            # ✅ 新增：取得關鍵字過濾清單
             exclude_kws = [kw.strip().lower() for kw in SETTINGS.get("exclude_keywords", "").split(',') if kw.strip()]
             
             for issue in issues:
@@ -282,7 +282,6 @@ def fetch_pending_tasks(account_id, updated_keys):
                 project_text = issue['fields'].get('project', {}).get('name', 'NA')
                 
                 if key not in updated_keys:
-                    # ✅ 新增：檢查標題與專案是否包含排除關鍵字
                     is_excluded = any(kw in summary_text.lower() or kw in project_text.lower() for kw in exclude_kws)
                     if is_excluded:
                         continue
@@ -351,7 +350,6 @@ def extract_logs_from_issues(name, email, account_id, target_date, all_issues):
     target_short = target_date.strftime("%m/%d").lstrip("0").replace("/0", "/")
     collected_logs = []
     
-    # ✅ 新增：獲取排除關鍵字清單
     exclude_kws = [kw.strip().lower() for kw in SETTINGS.get("exclude_keywords", "").split(',') if kw.strip()]
     
     for issue in all_issues:
@@ -361,7 +359,6 @@ def extract_logs_from_issues(name, email, account_id, target_date, all_issues):
         summary = fields.get('summary', 'NA')
         project_name = fields.get('project', {}).get('name', 'NA')
         
-        # ✅ 新增：檢查標題或專案名稱是否包含排除關鍵字 (如會議等)
         is_excluded = any(kw in summary.lower() or kw in project_name.lower() for kw in exclude_kws)
         if is_excluded:
             continue
@@ -586,11 +583,9 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
             if SETTINGS.get("use_jira_macro"):
                 macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
-                
                 param_server = soup.new_tag("ac:parameter", **{"ac:name": "server"})
                 param_server.string = "System JIRA"
                 macro.append(param_server)
-                
                 param_key = soup.new_tag("ac:parameter", **{"ac:name": "key"})
                 param_key.string = pl['key']
                 macro.append(param_key)
@@ -639,7 +634,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
     return container
 
-# ✅ 新增：Headless 版的一鍵清除邏輯 (由自動清除參數觸發)
 def run_clear_logic():
     try:
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
@@ -744,7 +738,6 @@ def run_clear_logic():
 def run_sync_logic():
     start_time = time.time()
     try:
-        # ✅ 新增：在正式抓取前，判斷是否需要執行自動清除
         if SETTINGS.get("auto_clear_first"):
             print("=========================================")
             print("🧹 [排程任務] 執行批次寫入前的前置自動清除作業")
@@ -879,20 +872,24 @@ def run_sync_logic():
             while i < len(user_nodes):
                 node = user_nodes[i]
                 if node in nodes_to_remove: 
-                    i += 1; continue
+                    i += 1
+                    continue
                 
                 text = node.get_text(strip=True) if isinstance(node, Tag) else str(node).strip()
                 matched_target = next((tdt for tdt in target_date_tags if text.startswith(tdt)), None)
                         
                 if matched_target:
-                    nodes_to_remove.append(node); i += 1
+                    nodes_to_remove.append(node)
+                    i += 1
                     while i < len(user_nodes):
                         next_node = user_nodes[i]
                         if next_node in nodes_to_remove: break
                         next_text = next_node.get_text(strip=True) if isinstance(next_node, Tag) else str(next_node).strip()
                         if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', next_text): break
-                        nodes_to_remove.append(next_node); i += 1
-                else: i += 1
+                        nodes_to_remove.append(next_node)
+                        i += 1
+                else:
+                    i += 1
 
             for node in nodes_to_remove:
                 node.extract()
@@ -903,6 +900,7 @@ def run_sync_logic():
                 safe_date_class = target_date.strftime("%Y%m%d")
                 
                 logs = extract_logs_from_issues(name, email, acc_id, target_date, all_issues_pool)
+                
                 total_mins = sum(log.get('duration_mins', 0) for log in logs)
 
                 pending_in_progress, pending_waiting, pending_todo, pending_candidate = [], [], [], []
