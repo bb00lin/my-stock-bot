@@ -68,7 +68,6 @@ class SettingsManager:
         else:
             print(f"⚠️ 找不到 {self.filepath}，將使用預設值")
 
-    # ✅ 關鍵修復：加入 default=None，讓程式能正確處理帶有預設值的請求
     def get(self, key, default=None):
         return self.config.get(key, default)
 
@@ -720,11 +719,19 @@ def run_clear_logic():
         if page_needs_update:
             print(f"🧹 發現 {cleaned_count} 個日誌區塊/殘留，正在更新至 Confluence...")
             url = f"{api_endpoint}/{page_id}"
+            
+            # ✅ 新增：在寫入更新的同時，將排版設定為全螢幕寬度 (Full-width)
             payload = {
                 "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
                 "title": page_data['title'],
                 "type": "page",
-                "body": {"storage": {"value": str(soup), "representation": "storage"}}
+                "body": {"storage": {"value": str(soup), "representation": "storage"}},
+                "metadata": {
+                    "properties": {
+                        "content-appearance-published": {"value": "full-width"},
+                        "content-appearance-draft": {"value": "full-width"}
+                    }
+                }
             }
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
@@ -872,24 +879,20 @@ def run_sync_logic():
             while i < len(user_nodes):
                 node = user_nodes[i]
                 if node in nodes_to_remove: 
-                    i += 1
-                    continue
+                    i += 1; continue
                 
                 text = node.get_text(strip=True) if isinstance(node, Tag) else str(node).strip()
                 matched_target = next((tdt for tdt in target_date_tags if text.startswith(tdt)), None)
                         
                 if matched_target:
-                    nodes_to_remove.append(node)
-                    i += 1
+                    nodes_to_remove.append(node); i += 1
                     while i < len(user_nodes):
                         next_node = user_nodes[i]
                         if next_node in nodes_to_remove: break
                         next_text = next_node.get_text(strip=True) if isinstance(next_node, Tag) else str(next_node).strip()
                         if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', next_text): break
-                        nodes_to_remove.append(next_node)
-                        i += 1
-                else:
-                    i += 1
+                        nodes_to_remove.append(next_node); i += 1
+                else: i += 1
 
             for node in nodes_to_remove:
                 node.extract()
@@ -900,7 +903,6 @@ def run_sync_logic():
                 safe_date_class = target_date.strftime("%Y%m%d")
                 
                 logs = extract_logs_from_issues(name, email, acc_id, target_date, all_issues_pool)
-                
                 total_mins = sum(log.get('duration_mins', 0) for log in logs)
 
                 pending_in_progress, pending_waiting, pending_todo, pending_candidate = [], [], [], []
@@ -946,11 +948,19 @@ def run_sync_logic():
         if page_needs_update:
             print(f"\n💾 發現頁面有變動，正在將最終結果儲存至 Confluence...")
             url = f"{api_endpoint}/{page_id}"
+            
+            # ✅ 新增：在寫入更新的同時，將排版設定為全螢幕寬度 (Full-width)
             payload = {
                 "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
                 "title": page_data['title'],
                 "type": "page",
-                "body": {"storage": {"value": str(soup), "representation": "storage"}}
+                "body": {"storage": {"value": str(soup), "representation": "storage"}},
+                "metadata": {
+                    "properties": {
+                        "content-appearance-published": {"value": "full-width"},
+                        "content-appearance-draft": {"value": "full-width"}
+                    }
+                }
             }
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
