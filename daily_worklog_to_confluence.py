@@ -1,3 +1,14 @@
+這個要求真的把排版的質感推向了另一個層次！加入「邊框收納」與「數字編號」後，週報看起來會更像是一份結構嚴謹的專業報表，而不再只是散落的文字。
+
+針對你的三個需求，我為你打造了 **V49.12 精品框線與編號版**：
+
+1. **集中在同一個框框**：我為每一組專案（以及下方的待辦任務區）加入了一個帶有圓角的淡灰色邊框 `border: 1px solid #dfe1e6`，這正是 Jira/Confluence 官方設計系統最喜歡用的高質感邊框顏色。
+2. **圖案換成數字編號**：移除了原本的 `🔹` 和 `🔸`，改為自動遞增的紅色粗體數字 `1.`、`2.`、`3.`。且**每個專案框框都會自動從 1 開始重新計數**！
+3. **寬度再縮小一點點**：由於我們上一版把頁面強制設定為「全寬 (Full-width)」，導致在大螢幕上文字會被拉得非常長。這次我在最外層的容器加上了 `max-width: 1000px;`。這樣一來，不管你的螢幕有多寬，日誌區塊都會保持在一個「最舒適的閱讀寬度」，不會被無限拉長，同時也不會被擠壓到換行。
+
+請直接**全選並覆蓋**你 GitHub 上的 `daily_worklog_to_confluence.py` 代碼：
+
+```python
 import os
 import requests
 import json
@@ -448,7 +459,12 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
     weekday_en = target_date.strftime("%A")
     safe_date_class = target_date.strftime("%Y%m%d")
     
-    container = soup.new_tag("div", **{"class": f"daily-worklog-{safe_date_class}"})
+    # ✅ 調整 3: 將最大寬度限制在 1000px，保持舒適的閱讀寬度
+    container = soup.new_tag("div", **{
+        "class": f"daily-worklog-{safe_date_class}", 
+        "style": "max-width: 1000px; margin-bottom: 25px;"
+    })
+    
     p_date = soup.new_tag("p")
     strong_date = soup.new_tag("strong")
     
@@ -467,21 +483,40 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_date.append(strong_date)
         
     container.append(p_date)
+    
     current_project = None
+    project_box = None
+    log_counter = 1
+
+    # 如果沒有啟動群組，且有日誌，則建立單一的大框框
+    if logs and not SETTINGS.get("group_by_project"):
+        project_box = soup.new_tag("div", style="border: 1px solid #dfe1e6; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.02);")
+        container.append(project_box)
 
     for log in logs:
+        # ✅ 調整 1: 當專案變更時，產生新的邊框框框
         if SETTINGS.get("group_by_project") and log['project'] != current_project:
             if current_project is not None:
                 p_empty = soup.new_tag("p")
                 p_empty.append(soup.new_tag("br"))
                 container.append(p_empty)
             current_project = log['project']
-            p_proj = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 5px; font-weight: bold; color: #2980b9;")
+            p_proj = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 8px; font-weight: bold; color: #2980b9;")
             p_proj.string = f"---- 專案: {current_project} ----"
             container.append(p_proj)
+            
+            project_box = soup.new_tag("div", style="border: 1px solid #dfe1e6; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.02);")
+            container.append(project_box)
+            
+            # ✅ 調整 2: 重置計數器
+            log_counter = 1
 
         p1 = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 2px;")
-        p1.append(soup.new_string("🔹 "))
+        
+        # ✅ 調整 2: 將藍色菱形 🔹 換成紅色數字編號 (例: 1. , 2. )
+        num_span = soup.new_tag("span", style="color: #e74c3c; font-weight: bold; margin-right: 5px;")
+        num_span.string = f"{log_counter}."
+        p1.append(num_span)
         
         if SETTINGS.get("use_jira_macro"):
             macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
@@ -539,12 +574,12 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             span_parts = soup.new_tag("span", style="margin-left: 10px; color: #7f8c8d;")
             span_parts.string = f" {parts_str}"
             p1.append(span_parts)
-            container.append(p1)
+            project_box.append(p1) # 改為寫入 box 中
         else:
-            container.append(p1)
+            project_box.append(p1) # 改為寫入 box 中
             p2 = soup.new_tag("p", style="margin-left: 20px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
             p2.string = f"　 └ " + parts_str
-            container.append(p2)
+            project_box.append(p2) # 改為寫入 box 中
         
         p3 = soup.new_tag("p", style="margin-left: 20px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
         if SETTINGS.get("show_comment"):
@@ -552,7 +587,9 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             p3.string = f"　 └ 📝 {dur_text}{log['comment']}"
         else:
             if log['duration'] != "-": p3.string = f"　 └ ⏱️ 耗時: {log['duration']}"
-        container.append(p3)
+            
+        project_box.append(p3) # 改為寫入 box 中
+        log_counter += 1
 
     has_any_pending = bool((SETTINGS.get("show_pending_inprogress") and pending_in_progress) or
                            (SETTINGS.get("show_pending_waiting") and pending_waiting) or
@@ -572,13 +609,24 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         if rendered_pending_sections[0] > 0:
             container.append(soup.new_tag("br"))
 
-        p_divider = soup.new_tag("p", style=f"margin-top: 10px; margin-bottom: 5px; font-weight: bold; color: {title_color};")
+        p_divider = soup.new_tag("p", style=f"margin-top: 10px; margin-bottom: 8px; font-weight: bold; color: {title_color};")
         p_divider.string = title_text
         container.append(p_divider)
+        
+        # ✅ 待辦區塊同樣使用邊框包裝，保持視覺一致性
+        pending_box = soup.new_tag("div", style="border: 1px solid #dfe1e6; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #fafbfc;")
+        container.append(pending_box)
 
+        task_counter = 1
         for pl in task_list:
-            p_pend = soup.new_tag("p", style="margin-top: 2px; margin-bottom: 2px; color: #7f8c8d;")
-            p_pend.append(soup.new_string(f"🔸 [{pl['project']}] "))
+            p_pend = soup.new_tag("p", style="margin-top: 4px; margin-bottom: 4px; color: #7f8c8d;")
+            
+            # ✅ 待辦任務也加入紅色數字編號
+            num_span = soup.new_tag("span", style="color: #e74c3c; font-weight: bold; margin-right: 5px;")
+            num_span.string = f"{task_counter}."
+            p_pend.append(num_span)
+            
+            p_pend.append(soup.new_string(f"[{pl['project']}] "))
             
             if SETTINGS.get("use_jira_macro"):
                 macro = soup.new_tag("ac:structured-macro", **{"ac:name": "jira", "ac:schema-version": "1"})
@@ -618,7 +666,8 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     a_conf.string = cl['url']
                     p_pend.append(a_conf)
                 
-            container.append(p_pend)
+            pending_box.append(p_pend) # 改為寫入 pending_box 中
+            task_counter += 1
             
         rendered_pending_sections[0] += 1
 
@@ -720,7 +769,6 @@ def run_clear_logic():
             print(f"🧹 發現 {cleaned_count} 個日誌區塊/殘留，正在更新至 Confluence...")
             url = f"{api_endpoint}/{page_id}"
             
-            # ✅ 新增：在寫入更新的同時，將排版設定為全螢幕寬度 (Full-width)
             payload = {
                 "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
                 "title": page_data['title'],
@@ -949,7 +997,6 @@ def run_sync_logic():
             print(f"\n💾 發現頁面有變動，正在將最終結果儲存至 Confluence...")
             url = f"{api_endpoint}/{page_id}"
             
-            # ✅ 新增：在寫入更新的同時，將排版設定為全螢幕寬度 (Full-width)
             payload = {
                 "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
                 "title": page_data['title'],
@@ -980,3 +1027,4 @@ def run_sync_logic():
 if __name__ == "__main__":
     print("=== Confluence 自動填表機 (GitHub Actions Headless 版) ===")
     run_sync_logic()
+```
