@@ -448,7 +448,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
     weekday_en = target_date.strftime("%A")
     safe_date_class = target_date.strftime("%Y%m%d")
     
-    # ✅ 調整 3: 將最大寬度限制在 1000px，保持舒適的閱讀寬度
     container = soup.new_tag("div", **{
         "class": f"daily-worklog-{safe_date_class}", 
         "style": "max-width: 1000px; margin-bottom: 25px;"
@@ -478,11 +477,11 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
     log_counter = 1
 
     if logs and not SETTINGS.get("group_by_project"):
-        project_box = soup.new_tag("div", style="border: 1px solid #dfe1e6; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.02);")
+        # ✅ 使用純黑實心框
+        project_box = soup.new_tag("div", style="border: 1px solid black; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.02);")
         container.append(project_box)
 
     for log in logs:
-        # ✅ 調整 1: 當專案變更時，產生新的邊框框框
         if SETTINGS.get("group_by_project") and log['project'] != current_project:
             if current_project is not None:
                 p_empty = soup.new_tag("p")
@@ -493,17 +492,17 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             p_proj.string = f"---- 專案: {current_project} ----"
             container.append(p_proj)
             
-            project_box = soup.new_tag("div", style="border: 1px solid #dfe1e6; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.02);")
+            # ✅ 使用純黑實心框
+            project_box = soup.new_tag("div", style="border: 1px solid black; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.02);")
             container.append(project_box)
             
-            # ✅ 調整 2: 重置計數器
             log_counter = 1
 
         p1 = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 2px;")
         
-        # ✅ 調整 2: 將藍色菱形換成紅色數字編號
-        num_span = soup.new_tag("span", style="color: #e74c3c; font-weight: bold; margin-right: 5px;")
-        num_span.string = f"{log_counter}."
+        # ✅ 編號改為黑字粗體，並在後面加一個半形空格
+        num_span = soup.new_tag("span", style="color: black; font-weight: bold;")
+        num_span.string = f"{log_counter}. "
         p1.append(num_span)
         
         if SETTINGS.get("use_jira_macro"):
@@ -601,17 +600,17 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_divider.string = title_text
         container.append(p_divider)
         
-        # ✅ 待辦區塊同樣使用邊框包裝
-        pending_box = soup.new_tag("div", style="border: 1px solid #dfe1e6; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #fafbfc;")
+        # ✅ 待辦區塊同樣使用純黑實心框
+        pending_box = soup.new_tag("div", style="border: 1px solid black; padding: 12px 16px; border-radius: 8px; margin-bottom: 15px; background-color: #fafbfc;")
         container.append(pending_box)
 
         task_counter = 1
         for pl in task_list:
             p_pend = soup.new_tag("p", style="margin-top: 4px; margin-bottom: 4px; color: #7f8c8d;")
             
-            # ✅ 待辦任務也加入紅色數字編號
-            num_span = soup.new_tag("span", style="color: #e74c3c; font-weight: bold; margin-right: 5px;")
-            num_span.string = f"{task_counter}."
+            # ✅ 待辦任務加入黑色數字編號與空格，並移除舊的菱形符號
+            num_span = soup.new_tag("span", style="color: black; font-weight: bold;")
+            num_span.string = f"{task_counter}. "
             p_pend.append(num_span)
             
             p_pend.append(soup.new_string(f"[{pl['project']}] "))
@@ -849,7 +848,7 @@ def run_sync_logic():
 
         min_date = min(selected_dates)
         min_date_tag = min_date.strftime("[%Y/%m/%d]")
-        print(f"\n📡 啟動全域雷達：一次性掃描 Jira 自 {min_date_tag} 起的所有變更紀錄...")
+        print(f"\n📡 啟提全域雷達：一次性掃描 Jira 自 {min_date_tag} 起的所有變更紀錄...")
         all_issues_pool = fetch_all_recent_issues(min_date)
         print(f"  └ 掃描完畢，大池子共找到 {len(all_issues_pool)} 筆曾被觸碰過的任務。")
 
