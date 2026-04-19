@@ -390,6 +390,11 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
         if any(kw in summary.lower() or kw in project_name.lower() for kw in exclude_kws): continue
             
         parent = fields.get('parent', {}).get('fields', {}).get('summary', 'NA')
+        
+        # ✅ 強效正則替換：不論大小寫或有沒有黏在一起，強制在任何英數字與 NPI 之間加上 " - "
+        if isinstance(parent, str) and parent != "NA":
+            parent = re.sub(r'([a-zA-Z0-9])\s*NPI', r'\1 - NPI', parent, flags=re.IGNORECASE)
+            
         label_str = fields.get('labels', ['NA'])[0] if fields.get('labels') else "NA"
         current_status = fields.get('status', {}).get('name', 'NA')
         duedate_str, duedate_dt = format_due_date(fields.get('duedate'))
@@ -646,6 +651,14 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     span_diff.string = f" {warning_icon}({sign}{diff_days})"
                     p1.append(span_diff)
         
+        # ✅ 將 Confluence 連結接回第一行
+        if log.get('confluence_links'):
+            for cl in log['confluence_links']:
+                p1.append(soup.new_string(" "))
+                a_conf = soup.new_tag("a", href=cl['url'])
+                a_conf.string = f"🔗 {cl['title']}"
+                p1.append(a_conf)
+
         parts = []
         if SETTINGS.get("show_label"): parts.append(f"標籤: {log['label']}")
         if not SETTINGS.get("group_by_project"): parts.append(f"專案: {log['project']}")
@@ -667,20 +680,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
             p2.append(soup.new_string(f"└ " + parts_str))
             project_box.append(p2)
-            
-        # ✅ 獨立的 Confluence 連結列 (隱形縮排)
-        if log.get('confluence_links'):
-            for cl in log['confluence_links']:
-                p_link = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 4px; color: #555555;")
-                spacer_link = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-                spacer_link.string = "----"
-                p_link.append(spacer_link)
-                
-                a_conf = soup.new_tag("a", href=cl['url'])
-                a_conf.string = f"🔗 {cl['title']}"
-                p_link.append(a_conf)
-                
-                project_box.append(p_link)
         
         p3 = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 10px; color: #555555;")
         
@@ -770,11 +769,12 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                         span_diff.string = f" {warning_icon}({sign}{diff_days})"
                         p_pend.append(span_diff)
 
+            # ✅ 將 Confluence 連結接回同一行
             if pl.get('confluence_links'):
                 for cl in pl['confluence_links']:
                     p_pend.append(soup.new_string(" "))
                     a_conf = soup.new_tag("a", href=cl['url'])
-                    a_conf.string = f"📄 {cl['title']}"
+                    a_conf.string = f"🔗 {cl['title']}"
                     p_pend.append(a_conf)
             
             pending_box.append(p_pend)
@@ -890,7 +890,6 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             p_header.append(span_parent)
             
         if SETTINGS.get("show_label") and log['label'] != "NA":
-            # ✅ 物理防禦：直接加上字串分隔符號，不再依賴 CSS margin
             p_header.append(soup.new_string(" - "))
             span_label = soup.new_tag("span", style="color: #e67e22; font-size: 85%; border: 1px solid #e67e22; border-radius: 3px; padding: 0 3px;")
             span_label.string = log['label']
@@ -902,21 +901,15 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             span_total.string = f'"Total: {log["issue_total_str"]}"'
             p_header.append(span_total)
 
-        project_box.append(p_header)
-        
-        # ✅ 獨立的 Confluence 連結列 (隱形縮排)
+        # ✅ 將 Confluence 連結接回同一行
         if log.get('confluence_links'):
             for cl in log['confluence_links']:
-                p_link = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 4px; color: #555555;")
-                spacer_link = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-                spacer_link.string = "----"
-                p_link.append(spacer_link)
-                
+                p_header.append(soup.new_string(" "))
                 a_conf = soup.new_tag("a", href=cl['url'])
                 a_conf.string = f"🔗 {cl['title']}"
-                p_link.append(a_conf)
-                
-                project_box.append(p_link)
+                p_header.append(a_conf)
+
+        project_box.append(p_header)
         
         days_to_render = log['daily_days']
         if SETTINGS.get("sort_desc"):
@@ -1053,22 +1046,15 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                         span_diff.string = f" {warning_icon}({sign}{diff_days})"
                         p_pend.append(span_diff)
 
-            pending_box.append(p_pend)
-
-            # ✅ 獨立的 Confluence 連結列 (隱形縮排)
+            # ✅ 將 Confluence 連結接回同一行
             if pl.get('confluence_links'):
                 for cl in pl['confluence_links']:
-                    p_link = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 4px; color: #555555;")
-                    spacer_link = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-                    spacer_link.string = "----"
-                    p_link.append(spacer_link)
-                    
+                    p_pend.append(soup.new_string(" "))
                     a_conf = soup.new_tag("a", href=cl['url'])
                     a_conf.string = f"🔗 {cl['title']}"
-                    p_link.append(a_conf)
-                    
-                    pending_box.append(p_link)
+                    p_pend.append(a_conf)
             
+            pending_box.append(p_pend)
             task_counter += 1
         rendered_pending_sections[0] += 1
 
