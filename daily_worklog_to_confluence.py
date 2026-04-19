@@ -663,12 +663,13 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             project_box.append(p1)
         else:
             project_box.append(p1)
-            # ✅ 風格 2 也直接下在 p 標籤上確保生效
-            p2 = soup.new_tag("p", style="margin-left: 24px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
+            # ✅ 改用 padding-left 避免被 Confluence 吃掉
+            p2 = soup.new_tag("p", style="margin: 0 0 2px 0; padding-left: 24px; color: #555555;")
             p2.string = f"　 └ " + parts_str
             project_box.append(p2)
         
-        p3 = soup.new_tag("p", style="margin-left: 24px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
+        # ✅ 改用 padding-left 避免被 Confluence 吃掉
+        p3 = soup.new_tag("p", style="margin: 0 0 10px 0; padding-left: 24px; color: #555555;")
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
             p3.string = f"　 └ 📝 {dur_text}{log['comment']}"
@@ -896,11 +897,11 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             
             if not d_info['has_log']: continue
                 
-            # ✅ V50.15 終極修復：把縮排設定在內部的 p 標籤上，確保 Confluence 絕對渲染出階層感
             div_row = soup.new_tag("div", style="margin-bottom: 12px;")
 
-            # 💡 第二行：Meta 資訊 (縮排 24px，對齊勾選框)
-            p_meta = soup.new_tag("p", style="margin: 0 0 2px 24px; color: #555555;")
+            # ✅ V50.16 終極修復：不再依賴 margin-left，改用 Confluence 絕對相容的 padding-left
+            # 💡 第二行：Meta 資訊 (精準縮排 24px，對齊上方勾選框)
+            p_meta = soup.new_tag("p", style="margin: 0 0 2px 0; padding-left: 24px; color: #555555;")
             dur_text = f"({d_info['dur_str']}) " if d_info['dur_str'] else ""
             
             p_meta.append(soup.new_string(f"{d_info['day_short']} {d_info['day_name']} {dur_text}"))
@@ -919,9 +920,9 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             p_meta.append(soup.new_string(trans_text))
             div_row.append(p_meta)
 
-            # 💡 第三行：└ 📝 留言內容 (再往內縮排至 44px，產生子項目層次)
+            # 💡 第三行：└ 📝 留言內容 (再往內縮排至 44px，產生子項目層次，且自動換行時也會完美對齊 44px！)
             if SETTINGS.get("show_comment"):
-                p_comment = soup.new_tag("p", style="margin: 0 0 0 44px; color: #555555;")
+                p_comment = soup.new_tag("p", style="margin: 0 0 0 0; padding-left: 44px; color: #555555;")
                 
                 is_target = d_info['date'].date() in [sd.date() for sd in selected_dates]
                 color_style = "color: #e74c3c; font-weight: bold;" if is_target else "color: #555555;"
@@ -1362,5 +1363,5 @@ def run_sync_logic():
         print(f"\n🏁 任務結束。 (總耗時: {time_str})")
 
 if __name__ == "__main__":
-    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.15 階梯縮排版) ===")
+    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.16 完美內縮排版) ===")
     run_sync_logic()
