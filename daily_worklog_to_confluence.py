@@ -660,7 +660,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     span_diff.string = f" {warning_icon}({sign}{diff_days})"
                     p1.append(span_diff)
         
-        # ✅ 將 Confluence 連結接回同一行
+        # ✅ 將 Confluence 連結接回第一行
         if log.get('confluence_links'):
             for cl in log['confluence_links']:
                 p1.append(soup.new_string(" "))
@@ -693,7 +693,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             if SETTINGS.get("show_parent") and log['parent'] != "NA": parts.append(f"父系: {log['parent']}")
             parts_str = " | ".join(parts)
             
-            # ✅ 應用 " - 標籤 - " 的顯示邏輯
             if parts_str: p2.append(soup.new_string(f"└ " + parts_str))
             else: p2.append(soup.new_string("└ "))
             
@@ -920,7 +919,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             span_label.string = log['label']
             p_header.append(span_label)
             
-        if getattr(self.var_show_issue_total_time, 'get', lambda: False)() and log.get('issue_total_str'):
+        if SETTINGS.get("show_issue_total_time") and log.get('issue_total_str'):
             p_header.append(soup.new_string(" - "))
             span_total = soup.new_tag("span", style="color: gray; font-size: 90%;")
             span_total.string = f'"Total: {log["issue_total_str"]}"'
