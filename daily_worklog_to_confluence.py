@@ -215,7 +215,6 @@ def get_account_id(email, name):
     except: pass
     return None
 
-# ✅ V50.12 深度預載快取引擎
 def fetch_all_recent_issues(min_date):
     min_date_str = min_date.strftime("%Y-%m-%d")
     jql = f'updated >= "{min_date_str}" ORDER BY updated DESC'
@@ -351,7 +350,6 @@ def fetch_pending_tasks(account_id, updated_keys):
 
 def get_user_status_transition_for_day(key, account_id, email, target_date_str, issue_data):
     day_status_changes = []
-    # 直接從記憶體取用
     histories = issue_data.get('changelog', {}).get('histories', [])
 
     for history in histories:
@@ -694,6 +692,16 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
 
     rendered_pending_sections = [0]
 
+    def create_confluence_panel():
+        macro = soup.new_tag("ac:structured-macro", **{"ac:name": "panel", "ac:schema-version": "1"})
+        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", "#ffffff")]:
+            param = soup.new_tag("ac:parameter", **{"ac:name": p_name})
+            param.string = p_val
+            macro.append(param)
+        body = soup.new_tag("ac:rich-text-body")
+        macro.append(body)
+        return macro, body
+
     def append_pending_tasks(task_list, title_text, title_color):
         if not task_list: return
         if rendered_pending_sections[0] > 0:
@@ -765,7 +773,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
     return container
 
-# ✅ 風格 3 的 HTML 渲染邏輯 (全週合併覆蓋版)
 def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0, weekend_mins=0):
     date_str_tag = target_date.strftime("[%Y/%m/%d]")
     weekday_en = target_date.strftime("%A")
@@ -911,7 +918,6 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             if SETTINGS.get("show_comment"):
                 p_comment = soup.new_tag("p", style="margin: 0 0 0 0; color: #555555;")
                 
-                # ✅ 絕對精準的紅字判定，只對 selected_dates 標紅
                 is_target = d_info['date'].date() in [sd.date() for sd in selected_dates]
                 color_style = "color: #e74c3c; font-weight: bold;" if is_target else "color: #555555;"
 
@@ -1032,6 +1038,115 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
 
     return container
 
+# ✅ 補回遺失的清除引擎
+def run_clear_logic():
+    try:
+        api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
+        selected_dates = get_selected_dates()
+        if not selected_dates: return print("⚠️ 未選擇任何要更新的日期(無法判斷目標頁面)。")
+
+        target_title = get_target_report_title(selected_dates[0])
+        print(f"\n=========================================\n🎯 目標週報頁面: {target_title} (清除模式)\n=========================================\n")
+        print(f"🔍 正在 Confluence 搜尋頁面...")
+        res = requests.get(api_endpoint, params={"title": target_title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
+        pages = res.json().get('results', [])
+        if not pages: return print(f"❌ 找不到目標頁面 {target_title}！")
+            
+        page_data = pages[0]
+        page_id = page_data['id']
+        html_content = page_data['body']['storage']['value']
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        page_needs_update = False
+        cleaned_count = 0
+
+        for element in soup.find_all(lambda tag: tag.has_attr('class') and any(c.startswith('daily-worklog-') for c in tag['class'])):
+            element.extract()
+            page_needs_update = True
+            cleaned_count += 1
+        
+        for name, email in ACCOUNT_DICT.items():
+            acc_id = get_account_id(email, name)
+            target_mention = None
+            if acc_id:
+                ri_user = soup.find('ri:user', attrs={'ri:account-id': acc_id})
+                if ri_user: target_mention = ri_user.find_parent('ac:link')
+            if not target_mention:
+                all_links = soup.find_all('ac:link')
+                for link in all_links:
+                    if name.lower() in str(link).lower() or (email and email.split('@')[0].lower() in str(link).lower()):
+                        target_mention = link; break
+            if not target_mention:
+                target_mention = soup.find(string=re.compile(f"@{name}", re.I))
+                if not target_mention and email:
+                    target_mention = soup.find(string=re.compile(f"@{email.split('@')[0]}", re.I))
+            if not target_mention: continue
+
+            mention_container = target_mention.find_parent(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div'])
+            if not mention_container: mention_container = target_mention
+
+            if isinstance(mention_container, Tag) and mention_container.name in ['p', 'div', 'li', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                mention_container.name = 'h1'
+                page_needs_update = True
+
+            user_nodes = []
+            current_node = mention_container.next_sibling
+            while current_node:
+                if isinstance(current_node, NavigableString) and str(current_node).strip().startswith('@'): break 
+                if isinstance(current_node, Tag):
+                    if current_node.name == 'ac:link' or current_node.find('ac:link'): break 
+                    if current_node.name in ['h1', 'h2', 'hr']: break 
+                    if str(current_node.get_text()).strip().startswith('@'): break
+                user_nodes.append(current_node)
+                current_node = current_node.next_sibling
+
+            nodes_to_remove = []
+            i = 0
+            while i < len(user_nodes):
+                node = user_nodes[i]
+                text = node.get_text(strip=True) if isinstance(node, Tag) else str(node).strip()
+                if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', text):
+                    nodes_to_remove.append(node)
+                    i += 1
+                    while i < len(user_nodes):
+                        next_node = user_nodes[i]
+                        next_text = next_node.get_text(strip=True) if isinstance(next_node, Tag) else str(next_node).strip()
+                        if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', next_text): break
+                        nodes_to_remove.append(next_node)
+                        i += 1
+                else:
+                    i += 1
+
+            for node in nodes_to_remove:
+                node.extract()
+                page_needs_update = True
+                cleaned_count += 1
+        
+        if page_needs_update:
+            print(f"🧹 發現 {cleaned_count} 個日誌區塊/殘留，正在更新至 Confluence...")
+            url = f"{api_endpoint}/{page_id}"
+            
+            payload = {
+                "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
+                "title": page_data['title'],
+                "type": "page",
+                "body": {"storage": {"value": str(soup), "representation": "storage"}},
+                "metadata": {
+                    "properties": {
+                        "content-appearance-published": {"value": "full-width"},
+                        "content-appearance-draft": {"value": "full-width"}
+                    }
+                }
+            }
+            update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
+            if update_res.status_code == 200:
+                print("🎉 大功告成！已成功清除本頁所有舊日誌。")
+            else: print(f"❌ 儲存至 Confluence 失敗: {update_res.text}")
+        else:
+            print("📭 頁面乾淨無殘留，無需清除。")
+
+    except Exception as e: print(f"\n❌ 程式發生意外錯誤: {e}")
+
 def run_sync_logic():
     start_time = time.time()
     try:
@@ -1075,7 +1190,6 @@ def run_sync_logic():
         page_needs_update = False
         total_logs_written = 0
 
-        # ✅ 改版：不再逐天處理，一律採用「全區間合併覆蓋」
         week_start = selected_dates[0] - timedelta(days=selected_dates[0].weekday())
         days_to_process = [week_start + timedelta(days=i) for i in range(7)]
         week_strs = [d.strftime("%Y%m%d") for d in days_to_process]
@@ -1165,9 +1279,6 @@ def run_sync_logic():
                 node.extract()
                 page_needs_update = True
 
-            # ====================================================
-            # ✅ 核心寫入邏輯：直接一次性整週輸出！
-            # ====================================================
             date_str_tag = target_date.strftime("[%Y/%m/%d]")
             safe_date_class = target_date.strftime("%Y%m%d")
             
@@ -1175,7 +1286,6 @@ def run_sync_logic():
             
             if SETTINGS.get("style_weekly") and logs:
                 daily_aggregated_logs = enrich_with_weekly_data(logs, name, email, acc_id, days_to_process, all_issues_pool)
-                # 總工時計算 (針對 selected_dates)
                 total_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].date() in [sd.date() for sd in selected_dates])
                 weekend_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].weekday() >= 5 and d['date'].date() in [sd.date() for sd in selected_dates])
             else:
