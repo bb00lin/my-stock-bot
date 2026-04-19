@@ -154,13 +154,16 @@ def calculate_working_days(start_date, end_date):
     start = start_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
     end = end_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
     if start == end: return 0
+        
     step = timedelta(days=1) if start < end else timedelta(days=-1)
     current = start + step
     working_days = 0
+    
     while True:
         if current.weekday() < 5: working_days += 1
         if current == end: break
         current += step
+        
     return working_days if start < end else -working_days
 
 # --- 4. 核心邏輯引擎 ---
@@ -755,6 +758,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
                     span_due.string = f" {pl['duedate']}"
                     p_pend.append(span_due)
+                    
                     if not is_tbd and pl.get('duedate_dt'):
                         diff_days = calculate_working_days(target_date, pl['duedate_dt'])
                         color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
