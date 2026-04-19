@@ -663,12 +663,10 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             project_box.append(p1)
         else:
             project_box.append(p1)
-            # ✅ 風格2：縮排歸零
             p2 = soup.new_tag("p", style="margin-left: 0px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
             p2.string = f"　 └ " + parts_str
             project_box.append(p2)
         
-        # ✅ 風格2：縮排歸零
         p3 = soup.new_tag("p", style="margin-left: 0px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
@@ -712,7 +710,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_divider = soup.new_tag("p", style=f"margin-top: 10px; margin-bottom: 8px; font-weight: bold; color: {title_color};")
         p_divider.string = title_text
         container.append(p_divider)
-        
+
         panel_macro, pending_box = create_confluence_panel()
         container.append(panel_macro)
 
@@ -741,8 +739,9 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
                     span_due.string = f" {pl['duedate']}"
                     p_pend.append(span_due)
+                    
                     if not is_tbd and pl.get('duedate_dt'):
-                        diff_days = calculate_working_days(target_date, pl['duedate_dt'])
+                        diff_days = calculate_working_days(target_date, pl.get('duedate_dt'))
                         color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
                         sign = "+" if diff_days >= 0 else ""
                         warning_icon = "❗" if diff_days <= 2 else ""
@@ -896,7 +895,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             
             if not d_info['has_log']: continue
                 
-            # ✅ 風格3：縮排歸零 (讓內容直接靠左貼齊數字序號)
+            # ✅ 真正把縮排歸零的地方在這裡！將原本的 margin-left: 20px 改為 0px
             div_row = soup.new_tag("div", style="margin-left: 0px; margin-bottom: 12px;")
 
             p_meta = soup.new_tag("p", style="margin: 0 0 2px 0; color: #555555;")
@@ -1360,5 +1359,5 @@ def run_sync_logic():
         print(f"\n🏁 任務結束。 (總耗時: {time_str})")
 
 if __name__ == "__main__":
-    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.12 全週合併版) ===")
+    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.13 縮排歸零版) ===")
     run_sync_logic()
