@@ -387,6 +387,11 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
         if any(kw in summary.lower() or kw in project_name.lower() for kw in exclude_kws): continue
             
         parent = fields.get('parent', {}).get('fields', {}).get('summary', 'NA')
+        
+        # ✅ 針對特定父系名稱的排版優化：在 Robot 跟 NPI 之間加上 " - "
+        if parent != "NA":
+            parent = parent.replace("RobotNPI", "Robot - NPI")
+            
         label_str = fields.get('labels', ['NA'])[0] if fields.get('labels') else "NA"
         current_status = fields.get('status', {}).get('name', 'NA')
         duedate_str, duedate_dt = format_due_date(fields.get('duedate'))
