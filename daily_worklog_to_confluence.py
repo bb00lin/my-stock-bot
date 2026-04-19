@@ -663,12 +663,12 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             project_box.append(p1)
         else:
             project_box.append(p1)
-            # ✅ 風格2：修改為 18px 對齊勾選框
-            p2 = soup.new_tag("p", style="margin-left: 18px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
+            # ✅ 風格 2 也直接下在 p 標籤上確保生效
+            p2 = soup.new_tag("p", style="margin-left: 24px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
             p2.string = f"　 └ " + parts_str
             project_box.append(p2)
         
-        p3 = soup.new_tag("p", style="margin-left: 18px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
+        p3 = soup.new_tag("p", style="margin-left: 24px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
             p3.string = f"　 └ 📝 {dur_text}{log['comment']}"
@@ -711,7 +711,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_divider = soup.new_tag("p", style=f"margin-top: 10px; margin-bottom: 8px; font-weight: bold; color: {title_color};")
         p_divider.string = title_text
         container.append(p_divider)
-        
+
         panel_macro, pending_box = create_confluence_panel()
         container.append(panel_macro)
 
@@ -740,6 +740,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
                     span_due.string = f" {pl['duedate']}"
                     p_pend.append(span_due)
+                    
                     if not is_tbd and pl.get('duedate_dt'):
                         diff_days = calculate_working_days(target_date, pl['duedate_dt'])
                         color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
@@ -895,10 +896,11 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             
             if not d_info['has_log']: continue
                 
-            # ✅ 真正的完美縮排！修改為 18px，讓文字貼齊上方的勾選框 ☑️
-            div_row = soup.new_tag("div", style="margin-left: 18px; margin-bottom: 12px;")
+            # ✅ V50.15 終極修復：把縮排設定在內部的 p 標籤上，確保 Confluence 絕對渲染出階層感
+            div_row = soup.new_tag("div", style="margin-bottom: 12px;")
 
-            p_meta = soup.new_tag("p", style="margin: 0 0 2px 0; color: #555555;")
+            # 💡 第二行：Meta 資訊 (縮排 24px，對齊勾選框)
+            p_meta = soup.new_tag("p", style="margin: 0 0 2px 24px; color: #555555;")
             dur_text = f"({d_info['dur_str']}) " if d_info['dur_str'] else ""
             
             p_meta.append(soup.new_string(f"{d_info['day_short']} {d_info['day_name']} {dur_text}"))
@@ -917,8 +919,9 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             p_meta.append(soup.new_string(trans_text))
             div_row.append(p_meta)
 
+            # 💡 第三行：└ 📝 留言內容 (再往內縮排至 44px，產生子項目層次)
             if SETTINGS.get("show_comment"):
-                p_comment = soup.new_tag("p", style="margin: 0 0 0 0; color: #555555;")
+                p_comment = soup.new_tag("p", style="margin: 0 0 0 44px; color: #555555;")
                 
                 is_target = d_info['date'].date() in [sd.date() for sd in selected_dates]
                 color_style = "color: #e74c3c; font-weight: bold;" if is_target else "color: #555555;"
@@ -1037,7 +1040,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
     p_spacer = soup.new_tag("p")
     p_spacer.append(soup.new_tag("br"))
     container.append(p_spacer)
-
+            
     return container
 
 def run_clear_logic():
@@ -1359,5 +1362,5 @@ def run_sync_logic():
         print(f"\n🏁 任務結束。 (總耗時: {time_str})")
 
 if __name__ == "__main__":
-    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.14 精準縮排版) ===")
+    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.15 階梯縮排版) ===")
     run_sync_logic()
