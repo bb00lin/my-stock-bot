@@ -391,9 +391,9 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
             
         parent = fields.get('parent', {}).get('fields', {}).get('summary', 'NA')
         
-        # ✅ 強效正則替換：不論大小寫或有無空格，強制在 Robot 跟 NPI 之間加上 " - "
+        # ✅ 強效正則替換：不論大小寫或有沒有黏在一起，強制在任何英數字與 NPI 之間加上 " - "
         if isinstance(parent, str) and parent != "NA":
-            parent = re.sub(r'Robot\s*NPI', 'Robot - NPI', parent, flags=re.IGNORECASE)
+            parent = re.sub(r'([a-zA-Z0-9])\s*NPI', r'\1 - NPI', parent, flags=re.IGNORECASE)
             
         label_str = fields.get('labels', ['NA'])[0] if fields.get('labels') else "NA"
         current_status = fields.get('status', {}).get('name', 'NA')
@@ -665,40 +665,29 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         else:
             project_box.append(p1)
             p2 = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 2px; color: #555555;")
-            
-            spacer2 = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-            spacer2.string = "----"
-            p2.append(spacer2)
-            
-            p2.append(soup.new_string(f"└ " + parts_str))
+            # ✅ 使用 Unicode Non-Breaking Space 強制縮排 4 格
+            p2.append(soup.new_string(f"\u00A0\u00A0\u00A0\u00A0└ " + parts_str))
             project_box.append(p2)
             
-        # ✅ 獨立的 Confluence 連結列 (隱形縮排)，防止破壞排版
+        # ✅ 獨立的 Confluence 連結列，使用 Unicode 強制縮排 4 格
         if log.get('confluence_links'):
             for cl in log['confluence_links']:
                 p_link = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 4px; color: #555555;")
-                spacer_link = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-                spacer_link.string = "----"
-                p_link.append(spacer_link)
-                
+                p_link.append(soup.new_string("\u00A0\u00A0\u00A0\u00A0🔗 "))
                 a_conf = soup.new_tag("a", href=cl['url'])
-                a_conf.string = f"🔗 {cl['title']}"
+                a_conf.string = cl['title']
                 p_link.append(a_conf)
-                
                 project_box.append(p_link)
         
         p3 = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 10px; color: #555555;")
         
-        spacer3 = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-        spacer3.string = "--------"
-        p3.append(spacer3)
-        
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
-            p3.append(soup.new_string(f"└ 📝 {dur_text}{log['comment']}"))
+            # ✅ 使用 Unicode Non-Breaking Space 強制縮排 8 格
+            p3.append(soup.new_string(f"\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0└ 📝 {dur_text}{log['comment']}"))
         else:
             if log['duration'] != "-": 
-                p3.append(soup.new_string(f"└ ⏱️ 耗時: {log['duration']}"))
+                p3.append(soup.new_string(f"\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0└ ⏱️ 耗時: {log['duration']}"))
             
         project_box.append(p3)
         log_counter += 1
@@ -774,21 +763,17 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                         span_diff = soup.new_tag("span", style=f"color: {color}; font-size: 50%; margin-left: 4px;")
                         span_diff.string = f" {warning_icon}({sign}{diff_days})"
                         p_pend.append(span_diff)
-            
+
             pending_box.append(p_pend)
 
-            # ✅ 獨立的 Confluence 連結列 (隱形縮排)
+            # ✅ 獨立的 Confluence 連結列，使用 Unicode 強制縮排 4 格
             if pl.get('confluence_links'):
                 for cl in pl['confluence_links']:
                     p_link = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 4px; color: #555555;")
-                    spacer_link = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-                    spacer_link.string = "----"
-                    p_link.append(spacer_link)
-                    
+                    p_link.append(soup.new_string("\u00A0\u00A0\u00A0\u00A0🔗 "))
                     a_conf = soup.new_tag("a", href=cl['url'])
-                    a_conf.string = f"🔗 {cl['title']}"
+                    a_conf.string = cl['title']
                     p_link.append(a_conf)
-                    
                     pending_box.append(p_link)
             
             task_counter += 1
@@ -818,7 +803,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
         "style": "max-width: 1000px; margin-bottom: 25px;"
     })
     
-    # --- 大標題與精準工時更新 (需求 1: [2026/04/17] Friday - (8h) - "updated 2026/04/19 09:57") ---
+    # --- 大標題與精準工時更新 ---
     p_date = soup.new_tag("p")
     strong_date = soup.new_tag("strong")
     time_parts = []
@@ -912,21 +897,17 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             span_total = soup.new_tag("span", style="color: gray; font-size: 90%;")
             span_total.string = f'"Total: {log["issue_total_str"]}"'
             p_header.append(span_total)
-        
+
         project_box.append(p_header)
         
-        # ✅ 獨立的 Confluence 連結列 (隱形縮排)，防止破壞排版
+        # ✅ 獨立的 Confluence 連結列，使用 Unicode 強制縮排 4 格
         if log.get('confluence_links'):
             for cl in log['confluence_links']:
                 p_link = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 4px; color: #555555;")
-                spacer_link = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-                spacer_link.string = "----"
-                p_link.append(spacer_link)
-                
+                p_link.append(soup.new_string("\u00A0\u00A0\u00A0\u00A0🔗 "))
                 a_conf = soup.new_tag("a", href=cl['url'])
-                a_conf.string = f"🔗 {cl['title']}"
+                a_conf.string = cl['title']
                 p_link.append(a_conf)
-                
                 project_box.append(p_link)
         
         days_to_render = log['daily_days']
@@ -941,12 +922,9 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
 
             p_meta = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 2px; color: #555555;")
             
-            spacer_meta = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-            spacer_meta.string = "----"
-            p_meta.append(spacer_meta)
-            
             dur_text = f"({d_info['dur_str']}) " if d_info['dur_str'] else ""
-            p_meta.append(soup.new_string(f"{d_info['day_short']} {d_info['day_name']} {dur_text}"))
+            # ✅ 使用 Unicode Non-Breaking Space 強制縮排 4 格
+            p_meta.append(soup.new_string(f"\u00A0\u00A0\u00A0\u00A0{d_info['day_short']} {d_info['day_name']} {dur_text}"))
 
             if SETTINGS.get("show_duedate") and log['duedate'] and log['duedate'] != '"Due TBD"':
                 p_meta.append(soup.new_string(f'{log["duedate"]} '))
@@ -965,14 +943,11 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             if SETTINGS.get("show_comment"):
                 p_comment = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 0px; color: #555555;")
                 
-                spacer_comment = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-                spacer_comment.string = "--------"
-                p_comment.append(spacer_comment)
-                
                 is_target = d_info['date'].date() in [sd.date() for sd in selected_dates]
                 color_style = "color: #e74c3c; font-weight: bold;" if is_target else "color: #555555;"
 
-                p_comment.append(soup.new_string("└ 📝 "))
+                # ✅ 使用 Unicode Non-Breaking Space 強制縮排 8 格
+                p_comment.append(soup.new_string("\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0└ 📝 "))
                 
                 comment_text = d_info['comment']
                 if not comment_text:
@@ -1066,18 +1041,14 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
 
             pending_box.append(p_pend)
 
-            # ✅ 獨立的 Confluence 連結列 (隱形縮排)
+            # ✅ 獨立的 Confluence 連結列，使用 Unicode 強制縮排 4 格
             if pl.get('confluence_links'):
                 for cl in pl['confluence_links']:
                     p_link = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 4px; color: #555555;")
-                    spacer_link = soup.new_tag("span", style="color: #ffffff; user-select: none;")
-                    spacer_link.string = "----"
-                    p_link.append(spacer_link)
-                    
+                    p_link.append(soup.new_string("\u00A0\u00A0\u00A0\u00A0🔗 "))
                     a_conf = soup.new_tag("a", href=cl['url'])
-                    a_conf.string = f"🔗 {cl['title']}"
+                    a_conf.string = cl['title']
                     p_link.append(a_conf)
-                    
                     pending_box.append(p_link)
             
             task_counter += 1
