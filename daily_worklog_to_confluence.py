@@ -37,6 +37,15 @@ ACCOUNT_DICT = {
     "SF Hsieh": os.environ.get("SF_EMAIL")
 }
 
+# ✅ 成員專屬背景顏色設定 (提取自圖片的柔和色系)
+USER_BG_COLORS = {
+    "Bob Lin": "#F5E6FF",       # 紫色
+    "shannonchang": "#E8F0FF",  # 藍色
+    "sam.chang": "#FFF8E6",     # 黃色
+    "Vic Wu": "#FFEAE6",        # 粉色
+    "SF Hsieh": "#E0F8EA"       # 綠色
+}
+
 # --- 2. 設定檔載入引擎 (取代舊有 GUI 變數) ---
 class SettingsManager:
     def __init__(self, filepath="settings_daily.json"):
@@ -551,7 +560,7 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
         
     return enriched
 
-def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0):
+def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0, bg_color="#ffffff"):
     date_str_tag = target_date.strftime("[%Y/%m/%d]")
     weekday_en = target_date.strftime("%A")
     safe_date_class = target_date.strftime("%Y%m%d")
@@ -588,7 +597,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
 
     def create_confluence_panel():
         macro = soup.new_tag("ac:structured-macro", **{"ac:name": "panel", "ac:schema-version": "1"})
-        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", "#ffffff")]:
+        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", bg_color)]:
             param = soup.new_tag("ac:parameter", **{"ac:name": p_name})
             param.string = p_val
             macro.append(param)
@@ -651,7 +660,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     span_diff.string = f" {warning_icon}({sign}{diff_days})"
                     p1.append(span_diff)
         
-        # ✅ 將 Confluence 連結接回第一行
+        # ✅ 將 Confluence 連結接回同一行
         if log.get('confluence_links'):
             for cl in log['confluence_links']:
                 p1.append(soup.new_string(" "))
@@ -659,16 +668,17 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                 a_conf.string = f"🔗 {cl['title']}"
                 p1.append(a_conf)
 
-        parts = []
-        if SETTINGS.get("show_label"): parts.append(f"標籤: {log['label']}")
-        if not SETTINGS.get("group_by_project"): parts.append(f"專案: {log['project']}")
-        if SETTINGS.get("show_parent"): parts.append(f"父系: {log['parent']}")
-        parts_str = " | ".join(parts)
-        
         if SETTINGS.get("compact_layout"):
-            span_parts = soup.new_tag("span", style="margin-left: 10px; color: #7f8c8d;")
-            span_parts.string = f" {parts_str}"
-            p1.append(span_parts)
+            parts = []
+            if SETTINGS.get("show_label") and log['label'] != "NA": parts.append(f"標籤: {log['label']}")
+            if not SETTINGS.get("group_by_project"): parts.append(f"專案: {log['project']}")
+            if SETTINGS.get("show_parent") and log['parent'] != "NA": parts.append(f"父系: {log['parent']}")
+            parts_str = " | ".join(parts)
+            
+            if parts_str:
+                span_parts = soup.new_tag("span", style="margin-left: 10px; color: #7f8c8d;")
+                span_parts.string = f" {parts_str}"
+                p1.append(span_parts)
             project_box.append(p1)
         else:
             project_box.append(p1)
@@ -678,7 +688,21 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             spacer2.string = "----"
             p2.append(spacer2)
             
-            p2.append(soup.new_string(f"└ " + parts_str))
+            parts = []
+            if not SETTINGS.get("group_by_project"): parts.append(f"專案: {log['project']}")
+            if SETTINGS.get("show_parent") and log['parent'] != "NA": parts.append(f"父系: {log['parent']}")
+            parts_str = " | ".join(parts)
+            
+            # ✅ 應用 " - 標籤 - " 的顯示邏輯
+            if parts_str: p2.append(soup.new_string(f"└ " + parts_str))
+            else: p2.append(soup.new_string("└ "))
+            
+            if SETTINGS.get("show_label") and log['label'] != "NA":
+                if parts_str: p2.append(soup.new_string(" - "))
+                span_label = soup.new_tag("span", style="color: #e67e22; font-size: 85%; border: 1px solid #e67e22; border-radius: 3px; padding: 0 3px;")
+                span_label.string = log['label']
+                p2.append(span_label)
+                
             project_box.append(p2)
         
         p3 = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 10px; color: #555555;")
@@ -714,7 +738,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
 
     def create_confluence_panel():
         macro = soup.new_tag("ac:structured-macro", **{"ac:name": "panel", "ac:schema-version": "1"})
-        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", "#ffffff")]:
+        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", bg_color)]:
             param = soup.new_tag("ac:parameter", **{"ac:name": p_name})
             param.string = p_val
             macro.append(param)
@@ -795,7 +819,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
     return container
 
-def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0, weekend_mins=0):
+def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0, weekend_mins=0, bg_color="#ffffff"):
     date_str_tag = target_date.strftime("[%Y/%m/%d]")
     weekday_en = target_date.strftime("%A")
     safe_date_class = target_date.strftime("%Y%m%d")
@@ -838,7 +862,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
 
     def create_confluence_panel():
         macro = soup.new_tag("ac:structured-macro", **{"ac:name": "panel", "ac:schema-version": "1"})
-        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", "#ffffff")]:
+        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", bg_color)]:
             param = soup.new_tag("ac:parameter", **{"ac:name": p_name})
             param.string = p_val
             macro.append(param)
@@ -890,12 +914,13 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             p_header.append(span_parent)
             
         if SETTINGS.get("show_label") and log['label'] != "NA":
+            # ✅ 物理防禦：直接加上字串分隔符號，不再依賴 CSS margin
             p_header.append(soup.new_string(" - "))
             span_label = soup.new_tag("span", style="color: #e67e22; font-size: 85%; border: 1px solid #e67e22; border-radius: 3px; padding: 0 3px;")
             span_label.string = log['label']
             p_header.append(span_label)
             
-        if SETTINGS.get("show_issue_total_time") and log.get('issue_total_str'):
+        if getattr(self.var_show_issue_total_time, 'get', lambda: False)() and log.get('issue_total_str'):
             p_header.append(soup.new_string(" - "))
             span_total = soup.new_tag("span", style="color: gray; font-size: 90%;")
             span_total.string = f'"Total: {log["issue_total_str"]}"'
@@ -991,7 +1016,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
 
     def create_confluence_panel():
         macro = soup.new_tag("ac:structured-macro", **{"ac:name": "panel", "ac:schema-version": "1"})
-        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", "#ffffff")]:
+        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", bg_color)]:
             param = soup.new_tag("ac:parameter", **{"ac:name": p_name})
             param.string = p_val
             macro.append(param)
@@ -1257,6 +1282,9 @@ def run_sync_logic():
         for name, email in ACCOUNT_DICT.items():
             acc_id = get_account_id(email, name)
             
+            # ✅ 動態取得使用者的背景顏色
+            user_bg_color = USER_BG_COLORS.get(name, "#ffffff")
+            
             target_mention = None
             if acc_id:
                 ri_user = soup.find('ri:user', attrs={'ri:account-id': acc_id})
@@ -1349,9 +1377,9 @@ def run_sync_logic():
             
             if logs or has_pending_p or has_pending_w or has_pending_t or has_pending_c or has_pending_b or has_pending_a or has_pending_r:
                 if SETTINGS.get("style_weekly") and daily_aggregated_logs:
-                    new_html_block = generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, weekend_mins)
+                    new_html_block = generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, weekend_mins, bg_color=user_bg_color)
                 else:
-                    new_html_block = generate_style_2_html(soup, target_date, logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins)
+                    new_html_block = generate_style_2_html(soup, target_date, logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, bg_color=user_bg_color)
                 
                 mention_container.insert_after(new_html_block)
                 total_logs_written += (len(logs) + len(pending_in_progress) + len(pending_waiting) + len(pending_todo) + len(pending_candidate) + len(pending_blocked) + len(pending_abort) + len(pending_resume))
