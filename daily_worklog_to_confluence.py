@@ -663,18 +663,27 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             project_box.append(p1)
         else:
             project_box.append(p1)
-            # ✅ 改用 padding-left 避免被 Confluence 吃掉
-            p2 = soup.new_tag("p", style="margin: 0 0 2px 0; padding-left: 24px; color: #555555;")
-            p2.string = f"　 └ " + parts_str
+            p2 = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 2px; color: #555555;")
+            
+            spacer2 = soup.new_tag("span", style="color: #ffffff; user-select: none;")
+            spacer2.string = "----"
+            p2.append(spacer2)
+            
+            p2.append(soup.new_string(f"└ " + parts_str))
             project_box.append(p2)
         
-        # ✅ 改用 padding-left 避免被 Confluence 吃掉
-        p3 = soup.new_tag("p", style="margin: 0 0 10px 0; padding-left: 24px; color: #555555;")
+        p3 = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 10px; color: #555555;")
+        
+        spacer3 = soup.new_tag("span", style="color: #ffffff; user-select: none;")
+        spacer3.string = "--------"
+        p3.append(spacer3)
+        
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
-            p3.string = f"　 └ 📝 {dur_text}{log['comment']}"
+            p3.append(soup.new_string(f"└ 📝 {dur_text}{log['comment']}"))
         else:
-            if log['duration'] != "-": p3.string = f"　 └ ⏱️ 耗時: {log['duration']}"
+            if log['duration'] != "-": 
+                p3.append(soup.new_string(f"└ ⏱️ 耗時: {log['duration']}"))
             
         project_box.append(p3)
         log_counter += 1
@@ -712,7 +721,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_divider = soup.new_tag("p", style=f"margin-top: 10px; margin-bottom: 8px; font-weight: bold; color: {title_color};")
         p_divider.string = title_text
         container.append(p_divider)
-
+        
         panel_macro, pending_box = create_confluence_panel()
         container.append(panel_macro)
 
@@ -741,7 +750,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
                     span_due.string = f" {pl['duedate']}"
                     p_pend.append(span_due)
-                    
                     if not is_tbd and pl.get('duedate_dt'):
                         diff_days = calculate_working_days(target_date, pl['duedate_dt'])
                         color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
@@ -786,6 +794,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
         "style": "max-width: 1000px; margin-bottom: 25px;"
     })
     
+    # --- 大標題與精準工時更新 (需求 1: [2026/04/17] Friday - (8h) - "updated 2026/04/19 09:57") ---
     p_date = soup.new_tag("p")
     strong_date = soup.new_tag("strong")
     time_parts = []
@@ -899,11 +908,13 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                 
             div_row = soup.new_tag("div", style="margin-bottom: 12px;")
 
-            # ✅ V50.16 終極修復：不再依賴 margin-left，改用 Confluence 絕對相容的 padding-left
-            # 💡 第二行：Meta 資訊 (精準縮排 24px，對齊上方勾選框)
-            p_meta = soup.new_tag("p", style="margin: 0 0 2px 0; padding-left: 24px; color: #555555;")
-            dur_text = f"({d_info['dur_str']}) " if d_info['dur_str'] else ""
+            p_meta = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 2px; color: #555555;")
             
+            spacer_meta = soup.new_tag("span", style="color: #ffffff; user-select: none;")
+            spacer_meta.string = "----"
+            p_meta.append(spacer_meta)
+            
+            dur_text = f"({d_info['dur_str']}) " if d_info['dur_str'] else ""
             p_meta.append(soup.new_string(f"{d_info['day_short']} {d_info['day_name']} {dur_text}"))
 
             if SETTINGS.get("show_duedate") and log['duedate'] and log['duedate'] != '"Due TBD"':
@@ -920,9 +931,12 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             p_meta.append(soup.new_string(trans_text))
             div_row.append(p_meta)
 
-            # 💡 第三行：└ 📝 留言內容 (再往內縮排至 44px，產生子項目層次，且自動換行時也會完美對齊 44px！)
             if SETTINGS.get("show_comment"):
-                p_comment = soup.new_tag("p", style="margin: 0 0 0 0; padding-left: 44px; color: #555555;")
+                p_comment = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 0px; color: #555555;")
+                
+                spacer_comment = soup.new_tag("span", style="color: #ffffff; user-select: none;")
+                spacer_comment.string = "--------"
+                p_comment.append(spacer_comment)
                 
                 is_target = d_info['date'].date() in [sd.date() for sd in selected_dates]
                 color_style = "color: #e74c3c; font-weight: bold;" if is_target else "color: #555555;"
@@ -1044,6 +1058,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             
     return container
 
+# ✅ 補回遺失的清除引擎
 def run_clear_logic():
     try:
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
@@ -1119,8 +1134,8 @@ def run_clear_logic():
                         if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', next_text): break
                         nodes_to_remove.append(next_node)
                         i += 1
-                else:
-                    i += 1
+            else:
+                i += 1
 
             for node in nodes_to_remove:
                 node.extract()
@@ -1363,5 +1378,5 @@ def run_sync_logic():
         print(f"\n🏁 任務結束。 (總耗時: {time_str})")
 
 if __name__ == "__main__":
-    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.16 完美內縮排版) ===")
+    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.12 全週合併版) ===")
     run_sync_logic()
