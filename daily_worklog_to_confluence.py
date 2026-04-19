@@ -663,11 +663,12 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             project_box.append(p1)
         else:
             project_box.append(p1)
-            p2 = soup.new_tag("p", style="margin-left: 0px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
+            # ✅ 風格2：修改為 18px 對齊勾選框
+            p2 = soup.new_tag("p", style="margin-left: 18px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
             p2.string = f"　 └ " + parts_str
             project_box.append(p2)
         
-        p3 = soup.new_tag("p", style="margin-left: 0px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
+        p3 = soup.new_tag("p", style="margin-left: 18px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
             p3.string = f"　 └ 📝 {dur_text}{log['comment']}"
@@ -710,7 +711,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         p_divider = soup.new_tag("p", style=f"margin-top: 10px; margin-bottom: 8px; font-weight: bold; color: {title_color};")
         p_divider.string = title_text
         container.append(p_divider)
-
+        
         panel_macro, pending_box = create_confluence_panel()
         container.append(panel_macro)
 
@@ -739,9 +740,8 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
                     span_due.string = f" {pl['duedate']}"
                     p_pend.append(span_due)
-                    
                     if not is_tbd and pl.get('duedate_dt'):
-                        diff_days = calculate_working_days(target_date, pl.get('duedate_dt'))
+                        diff_days = calculate_working_days(target_date, pl['duedate_dt'])
                         color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
                         sign = "+" if diff_days >= 0 else ""
                         warning_icon = "❗" if diff_days <= 2 else ""
@@ -895,8 +895,8 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             
             if not d_info['has_log']: continue
                 
-            # ✅ 真正把縮排歸零的地方在這裡！將原本的 margin-left: 20px 改為 0px
-            div_row = soup.new_tag("div", style="margin-left: 0px; margin-bottom: 12px;")
+            # ✅ 真正的完美縮排！修改為 18px，讓文字貼齊上方的勾選框 ☑️
+            div_row = soup.new_tag("div", style="margin-left: 18px; margin-bottom: 12px;")
 
             p_meta = soup.new_tag("p", style="margin: 0 0 2px 0; color: #555555;")
             dur_text = f"({d_info['dur_str']}) " if d_info['dur_str'] else ""
@@ -1007,7 +1007,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                     p_pend.append(span_due)
                     
                     if not is_tbd and pl.get('duedate_dt'):
-                        diff_days = calculate_working_days(target_date, pl.get('duedate_dt'))
+                        diff_days = calculate_working_days(target_date, pl['duedate_dt'])
                         color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
                         sign = "+" if diff_days >= 0 else ""
                         warning_icon = "❗" if diff_days <= 2 else ""
@@ -1359,5 +1359,5 @@ def run_sync_logic():
         print(f"\n🏁 任務結束。 (總耗時: {time_str})")
 
 if __name__ == "__main__":
-    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.13 縮排歸零版) ===")
+    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.14 精準縮排版) ===")
     run_sync_logic()
