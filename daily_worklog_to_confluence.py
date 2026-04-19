@@ -663,11 +663,13 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             project_box.append(p1)
         else:
             project_box.append(p1)
-            p2 = soup.new_tag("p", style="margin-left: 20px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
+            # ✅ 風格2：縮排歸零
+            p2 = soup.new_tag("p", style="margin-left: 0px; margin-top: 0px; margin-bottom: 2px; color: #555555;")
             p2.string = f"　 └ " + parts_str
             project_box.append(p2)
         
-        p3 = soup.new_tag("p", style="margin-left: 20px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
+        # ✅ 風格2：縮排歸零
+        p3 = soup.new_tag("p", style="margin-left: 0px; margin-top: 0px; margin-bottom: 10px; color: #555555;")
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
             p3.string = f"　 └ 📝 {dur_text}{log['comment']}"
@@ -894,7 +896,8 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             
             if not d_info['has_log']: continue
                 
-            div_row = soup.new_tag("div", style="margin-left: 20px; margin-bottom: 12px;")
+            # ✅ 風格3：縮排歸零 (讓內容直接靠左貼齊數字序號)
+            div_row = soup.new_tag("div", style="margin-left: 0px; margin-bottom: 12px;")
 
             p_meta = soup.new_tag("p", style="margin: 0 0 2px 0; color: #555555;")
             dur_text = f"({d_info['dur_str']}) " if d_info['dur_str'] else ""
@@ -1038,7 +1041,6 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
 
     return container
 
-# ✅ 補回遺失的清除引擎
 def run_clear_logic():
     try:
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
