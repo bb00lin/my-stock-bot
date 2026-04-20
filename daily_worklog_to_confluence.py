@@ -404,7 +404,8 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
         if isinstance(parent, str) and parent != "NA":
             parent = re.sub(r'([a-zA-Z0-9])\s*NPI', r'\1 - NPI', parent, flags=re.IGNORECASE)
             
-        label_str = fields.get('labels', ['NA'])[0] if fields.get('labels') else "NA"
+        labels = fields.get('labels', [])
+        label_str = labels[0] if labels else "NA"
         current_status = fields.get('status', {}).get('name', 'NA')
         duedate_str, duedate_dt = format_due_date(fields.get('duedate'))
         
@@ -560,7 +561,7 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
         
     return enriched
 
-def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0, bg_color="#ffffff"):
+def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0, bg_color="#ffffff", update_source_tag="GitHub Update (Bob)"):
     date_str_tag = target_date.strftime("[%Y/%m/%d]")
     weekday_en = target_date.strftime("%A")
     safe_date_class = target_date.strftime("%Y%m%d")
@@ -576,8 +577,8 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
     time_parts = []
     if SETTINGS.get("show_total_time"): time_parts.append(f"({format_duration(total_mins)})")
     if SETTINGS.get("show_write_time"): 
-        write_time_str = datetime.now(timezone(timedelta(hours=8))).strftime('updated %Y/%m/%d %H:%M')
-        time_parts.append(f'"{write_time_str}"')
+        write_time_str = datetime.now(timezone(timedelta(hours=8))).strftime(f'"{update_source_tag} %Y/%m/%d %H:%M"')
+        time_parts.append(write_time_str)
 
     if time_parts:
         strong_date.string = f"{date_str_tag} {weekday_en} "
@@ -660,7 +661,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     span_diff.string = f" {warning_icon}({sign}{diff_days})"
                     p1.append(span_diff)
         
-        # ✅ 將 Confluence 連結接回第一行
         if log.get('confluence_links'):
             for cl in log['confluence_links']:
                 p1.append(soup.new_string(" "))
@@ -792,7 +792,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                         span_diff.string = f" {warning_icon}({sign}{diff_days})"
                         p_pend.append(span_diff)
 
-            # ✅ 將 Confluence 連結接回同一行
             if pl.get('confluence_links'):
                 for cl in pl['confluence_links']:
                     p_pend.append(soup.new_string(" "))
@@ -818,7 +817,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             
     return container
 
-def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0, weekend_mins=0, bg_color="#ffffff"):
+def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0, weekend_mins=0, bg_color="#ffffff", update_source_tag="GitHub Update (Bob)"):
     date_str_tag = target_date.strftime("[%Y/%m/%d]")
     weekday_en = target_date.strftime("%A")
     safe_date_class = target_date.strftime("%Y%m%d")
@@ -840,8 +839,8 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
         time_parts.append(time_str)
 
     if SETTINGS.get("show_write_time"):
-        write_time_str = datetime.now(timezone(timedelta(hours=8))).strftime('updated %Y/%m/%d %H:%M')
-        time_parts.append(f'"{write_time_str}"')
+        write_time_str = datetime.now(timezone(timedelta(hours=8))).strftime(f'"{update_source_tag} %Y/%m/%d %H:%M"')
+        time_parts.append(write_time_str)
 
     if time_parts:
         strong_date.string = f"{date_str_tag} {weekday_en} "
@@ -919,7 +918,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             span_label.string = log['label']
             p_header.append(span_label)
             
-        if SETTINGS.get("show_issue_total_time") and log.get('issue_total_str'):
+        if getattr(SETTINGS, 'get', lambda k: False)("show_issue_total_time") and log.get('issue_total_str'):
             p_header.append(soup.new_string(" - "))
             span_total = soup.new_tag("span", style="color: gray; font-size: 90%;")
             span_total.string = f'"Total: {log["issue_total_str"]}"'
@@ -1070,7 +1069,6 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                         span_diff.string = f" {warning_icon}({sign}{diff_days})"
                         p_pend.append(span_diff)
 
-            # ✅ 將 Confluence 連結接回同一行
             if pl.get('confluence_links'):
                 for cl in pl['confluence_links']:
                     p_pend.append(soup.new_string(" "))
@@ -1207,6 +1205,21 @@ def run_clear_logic():
 
 def run_sync_logic():
     start_time = time.time()
+    
+    # ✅ 動態判斷 GitHub 執行環境並決定標籤
+    is_github_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    github_event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    
+    if is_github_actions:
+        if github_event_name == "schedule":
+            update_source_tag = "Scheduled Update (Bob)"
+        elif github_event_name == "workflow_dispatch":
+            update_source_tag = "Manual Update (Bob)"
+        else:
+            update_source_tag = "GitHub Update (Bob)"
+    else:
+        update_source_tag = "Local Update (Bob)" # 預防萬一有人在本地直行此腳本
+        
     try:
         if SETTINGS.get("auto_clear_first"):
             print("=========================================")
@@ -1376,9 +1389,9 @@ def run_sync_logic():
             
             if logs or has_pending_p or has_pending_w or has_pending_t or has_pending_c or has_pending_b or has_pending_a or has_pending_r:
                 if SETTINGS.get("style_weekly") and daily_aggregated_logs:
-                    new_html_block = generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, weekend_mins, bg_color=user_bg_color)
+                    new_html_block = generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, weekend_mins, bg_color=user_bg_color, update_source_tag=update_source_tag)
                 else:
-                    new_html_block = generate_style_2_html(soup, target_date, logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, bg_color=user_bg_color)
+                    new_html_block = generate_style_2_html(soup, target_date, logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, bg_color=user_bg_color, update_source_tag=update_source_tag)
                 
                 mention_container.insert_after(new_html_block)
                 total_logs_written += (len(logs) + len(pending_in_progress) + len(pending_waiting) + len(pending_todo) + len(pending_candidate) + len(pending_blocked) + len(pending_abort) + len(pending_resume))
