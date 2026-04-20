@@ -1183,17 +1183,17 @@ def run_clear_logic():
             url = f"{api_endpoint}/{page_id}"
             
             payload = {
-                "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
-                "title": page_data['title'],
-                "type": "page",
-                "body": {"storage": {"value": str(soup), "representation": "storage"}},
-                "metadata": {
-                    "properties": {
-                        "content-appearance-published": {"value": "full-width"},
-                        "content-appearance-draft": {"value": "full-width"}
+                    "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
+                    "title": page_data['title'],
+                    "type": "page",
+                    "body": {"storage": {"value": str(soup), "representation": "storage"}},
+                    "metadata": {
+                        "properties": {
+                            "content-appearance-published": {"value": "full-width"},
+                            "content-appearance-draft": {"value": "full-width"}
+                        }
                     }
                 }
-            }
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
                 print("🎉 大功告成！已成功清除本頁所有舊日誌。")
