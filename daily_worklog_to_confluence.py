@@ -65,7 +65,8 @@ class SettingsManager:
             "hide_status_only": True, "style_weekly": True, "sort_desc": True, 
             "show_issue_total_time": True, "show_confluence_links": True, 
             "show_total_time": True, "show_write_time": True,
-            "show_duedate": True, "show_due_tbd": False
+            "show_duedate": True, "show_due_tbd": False,
+            "enable_newline": True, "newline_chars": "; ," # ✅ 新增換行引擎參數
         }
         self.load_settings()
 
@@ -355,8 +356,8 @@ def fetch_pending_tasks(account_id, updated_keys):
                         
             for task_list in [pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume]:
                 task_list.sort(key=lambda x: (1 if x.get('project', '').upper() == 'MEETING' else 0, x.get('project', ''), x.get('key', '')))
-            
-            return pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume
+        
+        return pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume
     except: pass
     return [], [], [], [], [], [], []
 
@@ -426,6 +427,9 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
                 def ex(n):
                     if n.get('type') == 'text': comment_texts.append(n.get('text', ''))
                     for child in n.get('content', []): ex(child)
+                    # 🌟 核心修復：解析 Jira ADF 格式時，遇到段落自動加上換行符號
+                    if n.get('type') in ['paragraph', 'listItem']:
+                        comment_texts.append('\n')
                 ex(comment_raw)
                 comment_text = "".join(comment_texts).strip()
             else: comment_text = str(comment_raw).strip() if comment_raw else "NA"
@@ -485,6 +489,7 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
     collected_logs.sort(key=lambda x: (1 if x.get('project', '').upper() == 'MEETING' else 0, x.get('project', ''), 0 if x.get('status', '').upper() in ['DONE', '完成'] else 1, x.get('key', '')))
     return collected_logs
 
+# ✅ 專注於全區間 (週一至週日) 的聚合邏輯
 def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process, all_issues):
     issue_dict = {issue['key']: issue for issue in all_issues}
     enriched = []
@@ -528,6 +533,9 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
                         def ex(n):
                             if n.get('type') == 'text': comment_texts.append(n.get('text', ''))
                             for child in n.get('content', []): ex(child)
+                            # 🌟 核心修復：一樣支援 ADF 段落換行
+                            if n.get('type') in ['paragraph', 'listItem']:
+                                comment_texts.append('\n')
                         ex(comment_raw)
                         comment_text = "".join(comment_texts).strip()
                     else: comment_text = str(comment_raw).strip() if comment_raw else ""
@@ -538,8 +546,14 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
             
             total_mins_day = sum(w.get('mins', 0) for w in wls)
             dur_str = format_duration(total_mins_day) if total_mins_day > 0 else ""
-            comments = [w['comment'] for w in wls if w['comment']]
-            joined_comment = " / ".join(comments) if comments else ""
+            
+            # ✅ 消除重複的 Comment (同一天同一任務，重複的留言只顯示一次)
+            unique_comments = []
+            for w in wls:
+                if w['comment'] and w['comment'] not in unique_comments:
+                    unique_comments.append(w['comment'])
+            
+            joined_comment = " / \n".join(unique_comments) if unique_comments else ""
             
             has_log = bool(wls or trans)
             if SETTINGS.get("hide_status_only"):
@@ -581,10 +595,10 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         time_parts.append(write_time_str)
 
     if time_parts:
-        strong_date.string = f"{date_str_tag} {weekday_en} "
+        strong_date.string = f"{date_str_tag} {weekday_en} - "
         p_date.append(strong_date)
         span_time = soup.new_tag("span", style="color: gray; font-size: 80%;")
-        span_time.string = "- " + " - ".join(time_parts)
+        span_time.string = " - ".join(time_parts)
         p_date.append(span_time)
     else:
         strong_date.string = f"{date_str_tag} {weekday_en}"
@@ -684,7 +698,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             project_box.append(p1)
             p2 = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 2px; color: #555555;")
             
-            spacer2 = soup.new_tag("span", style="color: #ffffff; user-select: none;")
+            spacer2 = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
             spacer2.string = "----"
             p2.append(spacer2)
             
@@ -706,13 +720,36 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         
         p3 = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 10px; color: #555555;")
         
-        spacer3 = soup.new_tag("span", style="color: #ffffff; user-select: none;")
+        spacer3 = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
         spacer3.string = "--------"
         p3.append(spacer3)
         
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
-            p3.append(soup.new_string(f"└ 📝 {dur_text}{log['comment']}"))
+            
+            comment_text = log['comment']
+            if SETTINGS.get("enable_newline"):
+                delimiters = [d for d in SETTINGS.get("newline_chars", "; ,").split(" ") if d]
+                for d in delimiters:
+                    comment_text = comment_text.replace(d, '\n')
+                lines = [l.strip() for l in comment_text.split('\n') if l.strip()]
+                
+                if not lines:
+                    p3.append(soup.new_string(f"└ 📝 {dur_text}"))
+                else:
+                    p3.append(soup.new_string(f"└ 📝 {dur_text}"))
+                    for idx, line in enumerate(lines):
+                        if idx == 0:
+                            p3.append(soup.new_string(line))
+                        else:
+                            p3.append(soup.new_tag("br"))
+                            align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
+                            align_spacer.string = "----------"
+                            p3.append(align_spacer)
+                            p3.append(soup.new_string(line))
+            else:
+                comment_text = comment_text.replace('\n', ' ').replace('\r', '')
+                p3.append(soup.new_string(f"└ 📝 {dur_text}{comment_text}"))
         else:
             if log['duration'] != "-": 
                 p3.append(soup.new_string(f"└ ⏱️ 耗時: {log['duration']}"))
@@ -720,101 +757,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         project_box.append(p3)
         log_counter += 1
 
-    has_any_pending = bool((SETTINGS.get("show_pending_inprogress") and pending_in_progress) or
-                           (SETTINGS.get("show_pending_waiting") and pending_waiting) or
-                           (SETTINGS.get("show_pending_todo") and pending_todo) or
-                           (SETTINGS.get("show_pending_candidate") and pending_candidate) or
-                           (SETTINGS.get("show_pending_blocked") and pending_blocked) or
-                           (SETTINGS.get("show_pending_abort") and pending_abort) or
-                           (SETTINGS.get("show_pending_resume") and pending_resume))
-
-    if logs and has_any_pending:
-        p_spacer_before_pending = soup.new_tag("p")
-        p_spacer_before_pending.append(soup.new_tag("br"))
-        container.append(p_spacer_before_pending)
-
-    rendered_pending_sections = [0]
-
-    def create_confluence_panel():
-        macro = soup.new_tag("ac:structured-macro", **{"ac:name": "panel", "ac:schema-version": "1"})
-        for p_name, p_val in [("borderWidth", "1"), ("borderStyle", "solid"), ("borderColor", "#000000"), ("bgColor", bg_color)]:
-            param = soup.new_tag("ac:parameter", **{"ac:name": p_name})
-            param.string = p_val
-            macro.append(param)
-        body = soup.new_tag("ac:rich-text-body")
-        macro.append(body)
-        return macro, body
-
-    def append_pending_tasks(task_list, title_text, title_color):
-        if not task_list: return
-        if rendered_pending_sections[0] > 0:
-            container.append(soup.new_tag("br"))
-
-        p_divider = soup.new_tag("p", style=f"margin-top: 10px; margin-bottom: 8px; font-weight: bold; color: {title_color};")
-        p_divider.string = title_text
-        container.append(p_divider)
-
-        panel_macro, pending_box = create_confluence_panel()
-        container.append(panel_macro)
-
-        task_counter = 1
-        for pl in task_list:
-            p_pend = soup.new_tag("p", style="margin-top: 4px; margin-bottom: 4px; color: #7f8c8d;")
-            num_span = soup.new_tag("span", style="color: black; font-weight: bold;")
-            num_span.string = f"{task_counter}. "
-            p_pend.append(num_span)
-            p_pend.append(soup.new_string(f"[{pl['project']}] "))
-            
-            if SETTINGS.get("use_jira_macro"):
-                smart_link = soup.new_tag("a", href=f"{JIRA_URL}/browse/{pl['key']}", **{"data-card-appearance": "inline"})
-                smart_link.string = f"{JIRA_URL}/browse/{pl['key']}"
-                p_pend.append(smart_link)
-                p_pend.append(soup.new_string(f" {get_emoji(pl['status'])}[{translate_status(pl['status'])}]"))
-            else:
-                a_key = soup.new_tag("a", href=f"{JIRA_URL}/browse/{pl['key']}")
-                a_key.string = pl['key']
-                p_pend.append(a_key)
-                p_pend.append(soup.new_string(f" : {pl['summary']} {get_emoji(pl['status'])}[{translate_status(pl['status'])}]"))
-
-            is_tbd = (pl.get('duedate') == '"Due TBD"')
-            if SETTINGS.get("show_duedate") and pl.get('duedate'):
-                if not (is_tbd and not SETTINGS.get("show_due_tbd")):
-                    span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
-                    span_due.string = f" {pl['duedate']}"
-                    p_pend.append(span_due)
-                    
-                    if not is_tbd and pl.get('duedate_dt'):
-                        diff_days = calculate_working_days(target_date, pl['duedate_dt'])
-                        color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
-                        sign = "+" if diff_days >= 0 else ""
-                        warning_icon = "❗" if diff_days <= 2 else ""
-                        span_diff = soup.new_tag("span", style=f"color: {color}; font-size: 50%; margin-left: 4px;")
-                        span_diff.string = f" {warning_icon}({sign}{diff_days})"
-                        p_pend.append(span_diff)
-
-            if pl.get('confluence_links'):
-                for cl in pl['confluence_links']:
-                    p_pend.append(soup.new_string(" "))
-                    a_conf = soup.new_tag("a", href=cl['url'])
-                    a_conf.string = f"🔗 {cl['title']}"
-                    p_pend.append(a_conf)
-            
-            pending_box.append(p_pend)
-            task_counter += 1
-        rendered_pending_sections[0] += 1
-
-    if SETTINGS.get("show_pending_inprogress"): append_pending_tasks(pending_in_progress, "🔄 進行中且尚未更新進度的任務：", "#d35400")
-    if SETTINGS.get("show_pending_waiting"): append_pending_tasks(pending_waiting, "⏳ Waiting 狀態的任務：", "#8e44ad")
-    if SETTINGS.get("show_pending_todo"): append_pending_tasks(pending_todo, "📋 待辦事項 (To Do) 任務：", "#2980b9")
-    if SETTINGS.get("show_pending_candidate"): append_pending_tasks(pending_candidate, "🎯 Candidate 狀態任務：", "#16a085")
-    if SETTINGS.get("show_pending_blocked"): append_pending_tasks(pending_blocked, "🛑 BLOCKED 任務：", "#c0392b")
-    if SETTINGS.get("show_pending_abort"): append_pending_tasks(pending_abort, "❌ ABORT 任務：", "#7f8c8d")
-    if SETTINGS.get("show_pending_resume"): append_pending_tasks(pending_resume, "▶️ RESUME 任務：", "#f39c12")
-
-    p_spacer = soup.new_tag("p")
-    p_spacer.append(soup.new_tag("br"))
-    container.append(p_spacer)
-            
+    _append_pending_tasks(soup, container, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, target_date, bg_color=bg_color)
     return container
 
 def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress=None, pending_waiting=None, pending_todo=None, pending_candidate=None, pending_blocked=None, pending_abort=None, pending_resume=None, total_mins=0, weekend_mins=0, bg_color="#ffffff", update_source_tag="GitHub Update (Bob)"):
@@ -827,7 +770,6 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
         "style": "max-width: 1000px; margin-bottom: 25px;"
     })
     
-    # --- 大標題與精準工時更新 ---
     p_date = soup.new_tag("p")
     strong_date = soup.new_tag("strong")
     time_parts = []
@@ -912,7 +854,6 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             p_header.append(span_parent)
             
         if SETTINGS.get("show_label") and log['label'] != "NA":
-            # ✅ 物理防禦：直接加上字串分隔符號，不再依賴 CSS margin
             p_header.append(soup.new_string(" - "))
             span_label = soup.new_tag("span", style="color: #e67e22; font-size: 85%; border: 1px solid #e67e22; border-radius: 3px; padding: 0 3px;")
             span_label.string = log['label']
@@ -924,7 +865,6 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             span_total.string = f'"Total: {log["issue_total_str"]}"'
             p_header.append(span_total)
 
-        # ✅ 將 Confluence 連結接回同一行
         if log.get('confluence_links'):
             for cl in log['confluence_links']:
                 p_header.append(soup.new_string(" "))
@@ -946,7 +886,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
 
             p_meta = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 2px; color: #555555;")
             
-            spacer_meta = soup.new_tag("span", style="color: #ffffff; user-select: none;")
+            spacer_meta = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
             spacer_meta.string = "----"
             p_meta.append(spacer_meta)
             
@@ -970,7 +910,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             if SETTINGS.get("show_comment"):
                 p_comment = soup.new_tag("p", style="margin-top: 0px; margin-bottom: 0px; color: #555555;")
                 
-                spacer_comment = soup.new_tag("span", style="color: #ffffff; user-select: none;")
+                spacer_comment = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
                 spacer_comment.string = "--------"
                 p_comment.append(spacer_comment)
                 
@@ -987,16 +927,42 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                         comment_text = "(僅狀態改變)"
                     else:
                         comment_text = "(無紀錄)"
-
-                comment_span = soup.new_tag("span", style=color_style)
-                comment_span.string = comment_text
-                p_comment.append(comment_span)
+                    
+                    comment_span = soup.new_tag("span", style=color_style)
+                    comment_span.string = comment_text
+                    p_comment.append(comment_span)
+                else:
+                    comment_span = soup.new_tag("span", style=color_style)
+                    
+                    if SETTINGS.get("enable_newline"):
+                        delimiters = [d for d in SETTINGS.get("newline_chars", "; ,").split(" ") if d]
+                        for d in delimiters:
+                            comment_text = comment_text.replace(d, '\n')
+                        
+                        lines = [l.strip() for l in comment_text.split('\n') if l.strip()]
+                        for idx, line in enumerate(lines):
+                            comment_span.append(soup.new_string(line))
+                            if idx < len(lines) - 1:
+                                comment_span.append(soup.new_tag("br"))
+                                align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
+                                align_spacer.string = "--------------"
+                                comment_span.append(align_spacer)
+                    else:
+                        comment_text = comment_text.replace('\n', ' ').replace('\r', '')
+                        comment_span.string = comment_text
+                        
+                    p_comment.append(comment_span)
+                    
                 div_row.append(p_comment)
 
             project_box.append(div_row)
             
         log_counter += 1
 
+    _append_pending_tasks(soup, container, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, target_date, bg_color=bg_color)
+    return container
+
+def _append_pending_tasks(soup, container, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, target_date, bg_color="#ffffff"):
     has_any_pending = bool((SETTINGS.get("show_pending_inprogress") and pending_in_progress) or
                            (SETTINGS.get("show_pending_waiting") and pending_waiting) or
                            (SETTINGS.get("show_pending_todo") and pending_todo) or
@@ -1005,7 +971,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                            (SETTINGS.get("show_pending_abort") and pending_abort) or
                            (SETTINGS.get("show_pending_resume") and pending_resume))
 
-    if daily_aggregated_logs and has_any_pending:
+    if has_any_pending:
         p_spacer_before_pending = soup.new_tag("p")
         p_spacer_before_pending.append(soup.new_tag("br"))
         container.append(p_spacer_before_pending)
@@ -1022,7 +988,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
         macro.append(body)
         return macro, body
 
-    def append_pending_tasks(task_list, title_text, title_color):
+    def append_ptasks(task_list, title_text, title_color):
         if not task_list: return
         if rendered_pending_sections[0] > 0:
             container.append(soup.new_tag("br"))
@@ -1080,21 +1046,18 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             task_counter += 1
         rendered_pending_sections[0] += 1
 
-    if SETTINGS.get("show_pending_inprogress"): append_pending_tasks(pending_in_progress, "🔄 進行中且尚未更新進度的任務：", "#d35400")
-    if SETTINGS.get("show_pending_waiting"): append_pending_tasks(pending_waiting, "⏳ Waiting 狀態的任務：", "#8e44ad")
-    if SETTINGS.get("show_pending_todo"): append_pending_tasks(pending_todo, "📋 待辦事項 (To Do) 任務：", "#2980b9")
-    if SETTINGS.get("show_pending_candidate"): append_pending_tasks(pending_candidate, "🎯 Candidate 狀態任務：", "#16a085")
-    if SETTINGS.get("show_pending_blocked"): append_pending_tasks(pending_blocked, "🛑 BLOCKED 任務：", "#c0392b")
-    if SETTINGS.get("show_pending_abort"): append_pending_tasks(pending_abort, "❌ ABORT 任務：", "#7f8c8d")
-    if SETTINGS.get("show_pending_resume"): append_pending_tasks(pending_resume, "▶️ RESUME 任務：", "#f39c12")
+    if SETTINGS.get("show_pending_inprogress"): append_ptasks(pending_in_progress, "🔄 進行中且尚未更新進度的任務：", "#d35400")
+    if SETTINGS.get("show_pending_waiting"): append_ptasks(pending_waiting, "⏳ Waiting 狀態的任務：", "#8e44ad")
+    if SETTINGS.get("show_pending_todo"): append_ptasks(pending_todo, "📋 待辦事項 (To Do) 任務：", "#2980b9")
+    if SETTINGS.get("show_pending_candidate"): append_ptasks(pending_candidate, "🎯 Candidate 狀態任務：", "#16a085")
+    if SETTINGS.get("show_pending_blocked"): append_ptasks(pending_blocked, "🛑 BLOCKED 任務：", "#c0392b")
+    if SETTINGS.get("show_pending_abort"): append_ptasks(pending_abort, "❌ ABORT 任務：", "#7f8c8d")
+    if SETTINGS.get("show_pending_resume"): append_ptasks(pending_resume, "▶️ RESUME 任務：", "#f39c12")
 
     p_spacer = soup.new_tag("p")
     p_spacer.append(soup.new_tag("br"))
     container.append(p_spacer)
-            
-    return container
 
-# ✅ 補回遺失的清除引擎
 def run_clear_logic():
     try:
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
@@ -1170,13 +1133,13 @@ def run_clear_logic():
                         if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', next_text): break
                         nodes_to_remove.append(next_node)
                         i += 1
-            else:
-                i += 1
+                else:
+                    i += 1
 
-            for node in nodes_to_remove:
-                node.extract()
-                page_needs_update = True
-                cleaned_count += 1
+        for node in nodes_to_remove:
+            node.extract()
+            page_needs_update = True
+            cleaned_count += 1
         
         if page_needs_update:
             print(f"🧹 發現 {cleaned_count} 個日誌區塊/殘留，正在更新至 Confluence...")
@@ -1218,7 +1181,7 @@ def run_sync_logic():
         else:
             update_source_tag = "GitHub Update (Bob)"
     else:
-        update_source_tag = "Local Update (Bob)" # 預防萬一有人在本地直行此腳本
+        update_source_tag = "Local Update (Bob)"
         
     try:
         if SETTINGS.get("auto_clear_first"):
