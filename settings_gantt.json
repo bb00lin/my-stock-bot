@@ -1,0 +1,24 @@
+{
+    "confluence_space_key": "team_AIoTHW",
+    "confluence_page_title": "Project Gantt Chart",
+    "target_projects": [
+        "prj_busgw_ah", 
+        "prj_gw_ah", 
+        "prj_gw_wifi7_iw"
+    ],
+    "view_mode": "MONTH",
+    "show_duration": true,
+    "show_dates": true,
+    "show_assignee": true,
+    "show_status": true,
+    "show_task_id": true,
+    "show_weekends": false,
+    "show_nodate": true,
+    "status_BLOCKED": true,
+    "status_CANDIDATE": true,
+    "status_RESUME": true,
+    "status_進行中": true,
+    "status_WAITING": true,
+    "status_ABORT": true,
+    "status_完成": false
+}
