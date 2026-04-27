@@ -4,7 +4,7 @@ on:
   schedule:
     # 這裡設定每日執行時間 (UTC 時間)
     # 台灣時間凌晨 01:00 = UTC 前一天 17:00
-    - cron: '0 17 * * *'
+    #- cron: '0 17 * * *'
   workflow_dispatch:
     # 允許手動點擊按鈕立即觸發執行
 
