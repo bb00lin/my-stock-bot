@@ -426,6 +426,7 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
                 comment_texts = []
                 def ex(n):
                     if n.get('type') == 'text': comment_texts.append(n.get('text', ''))
+                    elif n.get('type') == 'hardBreak': comment_texts.append('\n')  # ✅ 新增這行：處理強制換行符號
                     for child in n.get('content', []): ex(child)
                     # 🌟 核心修復：解析 Jira ADF 格式時，遇到段落自動加上換行符號
                     if n.get('type') in ['paragraph', 'listItem']:
@@ -532,6 +533,7 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
                         comment_texts = []
                         def ex(n):
                             if n.get('type') == 'text': comment_texts.append(n.get('text', ''))
+                            elif n.get('type') == 'hardBreak': comment_texts.append('\n')  # ✅ 新增這行：處理強制換行符號
                             for child in n.get('content', []): ex(child)
                             # 🌟 核心修復：一樣支援 ADF 段落換行
                             if n.get('type') in ['paragraph', 'listItem']:
