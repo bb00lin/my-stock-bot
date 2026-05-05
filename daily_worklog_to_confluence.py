@@ -937,7 +937,8 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
         panel_macro, project_box = create_confluence_panel()
         container.append(panel_macro)
 
-    if SETTINGS.get("group_by_project") and log['project'] != current_project:
+    for log in daily_aggregated_logs:
+        if SETTINGS.get("group_by_project") and log['project'] != current_project:
             if current_project is not None:
                 p_empty = soup.new_tag("p")
                 p_empty.append(soup.new_tag("br"))
@@ -962,7 +963,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             
             log_counter = 1
 
-    if log_counter > 1:
+        if log_counter > 1:
             project_box.append(soup.new_tag("br"))
 
         p_header = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 5px;")
