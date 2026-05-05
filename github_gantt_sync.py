@@ -28,7 +28,15 @@ tw_tz = timezone(timedelta(hours=8))
 today_start = datetime.now(tw_tz).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
 
 def get_page_by_title(space, title):
-    res = requests.get(f"{CONFLUENCE_API_URL}/content", params={"spaceKey": space, "title": title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
+    url = f"{CONFLUENCE_API_URL}/content"
+    print(f"🔗 正在請求 API: {url}") # 印出網址看看有沒有拼錯
+    res = requests.get(url, params={"spaceKey": space, "title": title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
+    
+    if res.status_code != 200:
+        print(f"❌ 取得母頁面失敗，HTTP 狀態碼: {res.status_code}")
+        print(f"❌ 伺服器回傳內容: {res.text[:500]}") # 印出前500個字元看是哪種錯誤網頁
+        return None
+        
     data = res.json()
     if data.get('results'):
         return data['results'][0]
@@ -36,6 +44,12 @@ def get_page_by_title(space, title):
 
 def get_child_pages(parent_id):
     res = requests.get(f"{CONFLUENCE_API_URL}/content/{parent_id}/child/page", params={"expand": "body.storage,version", "limit": 100}, auth=ADMIN_AUTH)
+    
+    if res.status_code != 200:
+        print(f"❌ 取得子頁面失敗，HTTP 狀態碼: {res.status_code}")
+        print(f"❌ 伺服器回傳內容: {res.text[:500]}")
+        return []
+        
     return res.json().get('results', [])
 
 def update_page(page_id, new_html, current_version, title):
