@@ -9,6 +9,7 @@ from requests.auth import HTTPBasicAuth
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup, Tag, NavigableString
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
 
 # 載入自訂的環境變數檔案 (本地端測試用，GitHub Actions 會自動忽略)
 load_dotenv("jira_config.txt")
@@ -37,7 +38,7 @@ ACCOUNT_DICT = {
     "SF Hsieh": os.environ.get("SF_EMAIL")
 }
 
-# ✅ 成員專屬背景顏色設定 (提取自圖片的柔和色系)
+# ✅ 成員專屬背景顏色設定
 USER_BG_COLORS = {
     "Bob Lin": "#F5E6FF",       # 紫色
     "shannonchang": "#E8F0FF",  # 藍色
@@ -46,17 +47,30 @@ USER_BG_COLORS = {
     "SF Hsieh": "#E0F8EA"       # 綠色
 }
 
-# --- 2. 設定檔載入引擎 (取代舊有 GUI 變數) ---
+# ✅ 台灣國定假日與補班日設定
+TW_HOLIDAYS = {
+    "2024-01-01", "2024-02-08", "2024-02-09", "2024-02-12", "2024-02-13", "2024-02-14", "2024-02-28", "2024-04-04", "2024-04-05", "2024-06-10", "2024-09-17", "2024-10-10",
+    "2025-01-01", "2025-01-27", "2025-01-28", "2025-01-29", "2025-01-30", "2025-01-31", "2025-02-28", "2025-04-03", "2025-04-04", "2025-05-01", "2025-05-30", "2025-10-06", "2025-10-10",
+    "2026-01-01", "2026-02-14", "2026-02-15", "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", "2026-02-21", "2026-02-22",
+    "2026-02-27", "2026-02-28", "2026-03-01", "2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06", "2026-05-01", "2026-05-02", "2026-05-03",
+    "2026-06-19", "2026-06-20", "2026-06-21", "2026-09-25", "2026-09-26", "2026-09-27", "2026-09-28", "2026-10-09", "2026-10-10", "2026-10-11",
+    "2026-10-24", "2026-10-25", "2026-10-26", "2026-12-25", "2026-12-26", "2026-12-27"
+}
+
+TW_MAKEUP_WORKDAYS = set()
+
+# --- 2. 設定檔載入引擎 ---
 class SettingsManager:
     def __init__(self, filepath="settings_daily.json"):
         self.filepath = filepath
-        # 預設值 (對齊本地端 V50.12 的完整功能)
+        # 預設值 (對齊本地端 V50.15)
         self.config = {
             "filter_comment": True, "filter_started": True, "day_yesterday": False,
             "exclude_keywords": "DailyMeeting", "auto_clear_first": False,
             "day_auto": True, "day_mon": True, "day_tue": True, "day_wed": True,
             "day_thu": True, "day_fri": True, "show_label": True, "show_parent": True,
             "show_status": True, "show_comment": True, "minor_edit": True,
+            "inherit_parent_due": True, # ✅ 新增繼承父系到期日
             "show_pending_inprogress": True, "show_pending_waiting": True,
             "show_pending_todo": False, "show_pending_candidate": False,
             "show_pending_blocked": False, "show_pending_abort": False, "show_pending_resume": False,
@@ -66,7 +80,8 @@ class SettingsManager:
             "show_issue_total_time": True, "show_confluence_links": True, 
             "show_total_time": True, "show_write_time": True,
             "show_duedate": True, "show_due_tbd": False,
-            "enable_newline": True, "newline_chars": "; ," # ✅ 新增換行引擎參數
+            "enable_newline": True, "newline_chars": "; ,",
+            "custom_holidays": [], "custom_makeup_days": []
         }
         self.load_settings()
 
@@ -115,6 +130,19 @@ def parse_jira_date_to_tz8(jira_time_str):
     except Exception:
         return jira_time_str[:10]
 
+# ✅ 強效時間解析器
+def parse_jira_date_to_dt(jira_time_str):
+    if not jira_time_str: return None
+    try:
+        clean_str = re.sub(r'\.\d+', '', jira_time_str)
+        dt = datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%S%z")
+        return dt.astimezone(timezone(timedelta(hours=8)))
+    except Exception:
+        try:
+            return datetime.strptime(jira_time_str[:10], "%Y-%m-%d").replace(tzinfo=timezone(timedelta(hours=8)))
+        except:
+            return None
+
 def parse_duration_to_minutes(dur_str):
     if not dur_str or dur_str == "-": return 0
     mins = 0
@@ -160,39 +188,46 @@ def format_due_date(date_str):
         return f'"Due {dt.strftime("%y")}\' {dt.month}/{dt.day}"', dt
     except: return '"Due TBD"', None
 
+def is_workday(date_obj):
+    date_str = date_obj.strftime("%Y-%m-%d")
+    if date_str in SETTINGS.get("custom_makeup_days", []) or date_str in TW_MAKEUP_WORKDAYS: 
+        return True
+    if date_obj.weekday() >= 5: 
+        return False
+    if date_str in SETTINGS.get("custom_holidays", []) or date_str in TW_HOLIDAYS: 
+        return False
+    return True
+
 def calculate_working_days(start_date, end_date):
     start = start_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
     end = end_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
     if start == end: return 0
-        
     step = timedelta(days=1) if start < end else timedelta(days=-1)
     current = start + step
     working_days = 0
-    
     while True:
-        if current.weekday() < 5: working_days += 1
+        if is_workday(current): working_days += 1
         if current == end: break
         current += step
-        
     return working_days if start < end else -working_days
 
 # --- 4. 核心邏輯引擎 ---
 def get_selected_dates():
     now_tpe = datetime.now(timezone(timedelta(hours=8)))
     
-    if SETTINGS.get("day_auto") and not SETTINGS.get("day_yesterday"):
+    if SETTINGS.get("day_yesterday"): 
+        curr = now_tpe - timedelta(days=1)
+        while not is_workday(curr):
+            curr -= timedelta(days=1)
+        return [curr]
+
+    if SETTINGS.get("day_auto"):
         weekday = now_tpe.weekday()
         SETTINGS.config.update({
             "day_mon": weekday >= 0, "day_tue": weekday >= 1,
             "day_wed": weekday >= 2, "day_thu": weekday >= 3,
             "day_fri": weekday >= 4
         })
-
-    if SETTINGS.get("day_yesterday"): 
-        if now_tpe.weekday() == 0: return [now_tpe - timedelta(days=3)]
-        elif now_tpe.weekday() == 5: return [now_tpe - timedelta(days=1)]
-        elif now_tpe.weekday() == 6: return [now_tpe - timedelta(days=2)]
-        else: return [now_tpe - timedelta(days=1)]
             
     weekday = now_tpe.weekday()
     monday = now_tpe - timedelta(days=weekday)
@@ -239,7 +274,7 @@ def fetch_all_recent_issues(min_date):
         payload = {
             "jql": jql, 
             "maxResults": 100, 
-            "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate", "timetracking"],
+            "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate", "timetracking", "updated"],
             "expand": "changelog" 
         }
         
@@ -312,10 +347,10 @@ def get_remote_links(key):
     _remote_links_cache[key] = links
     return links
 
-def fetch_pending_tasks(account_id, updated_keys):
+def fetch_pending_tasks(account_id, updated_keys, target_date):
     if not account_id: return [], [], [], [], [], [], []
     jql = f'assignee = "{account_id}" AND resolution = Unresolved'
-    payload = {"jql": jql, "maxResults": 100, "fields": ["summary", "status", "project", "duedate"]}
+    payload = {"jql": jql, "maxResults": 100, "fields": ["summary", "status", "project", "duedate", "created", "worklog", "comment", "parent"]}
     
     pending_in_progress, pending_waiting, pending_todo, pending_candidate = [], [], [], []
     pending_blocked, pending_abort, pending_resume = [], [], []
@@ -326,23 +361,67 @@ def fetch_pending_tasks(account_id, updated_keys):
             issues = res.json().get('issues', [])
             exclude_kws = [kw.strip().lower() for kw in SETTINGS.get("exclude_keywords", "").split(',') if kw.strip()]
             
+            def preload_issue_details(issue):
+                key = issue.get('key')
+                if not key: return
+                fields = issue.get('fields') or {}
+                wl_data = fields.get('worklog') or {}
+                if wl_data.get('total', 0) > len(wl_data.get('worklogs', [])):
+                    try:
+                        r = requests.get(f"{JIRA_URL}/rest/api/2/issue/{key}/worklog", auth=ADMIN_AUTH, timeout=10)
+                        if r.status_code == 200: issue['fields']['worklog']['worklogs'] = r.json().get('worklogs', [])
+                    except: pass
+                c_data = fields.get('comment') or {}
+                if c_data.get('total', 0) > len(c_data.get('comments', [])):
+                    try:
+                        r = requests.get(f"{JIRA_URL}/rest/api/2/issue/{key}/comment", auth=ADMIN_AUTH, timeout=10)
+                        if r.status_code == 200: issue['fields']['comment']['comments'] = r.json().get('comments', [])
+                    except: pass
+            
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                list(executor.map(preload_issue_details, [iss for iss in issues if iss.get('key') not in updated_keys]))
+
             for issue in issues:
                 key = issue['key']
-                summary_text = issue['fields'].get('summary', 'NA')
-                project_text = issue['fields'].get('project', {}).get('name', 'NA')
+                fields = issue.get('fields') or {}
+                summary_text = fields.get('summary', 'NA')
+                project_text = fields.get('project', {}).get('name', 'NA')
+                
+                parent_data = fields.get('parent') or {}
+                parent_key = parent_data.get('key')
                 
                 if key not in updated_keys:
                     is_excluded = any(kw in summary_text.lower() or kw in project_text.lower() for kw in exclude_kws)
                     if is_excluded: continue
                         
-                    status_str = issue['fields'].get('status', {}).get('name', 'NA')
-                    duedate_str, duedate_dt = format_due_date(issue['fields'].get('duedate'))
+                    status_str = fields.get('status', {}).get('name', 'NA')
+                    duedate_str, duedate_dt = format_due_date(fields.get('duedate'))
                     confluence_links = get_remote_links(key) if SETTINGS.get("show_confluence_links") else []
+
+                    created_str = fields.get('created')
+                    last_active_dt = parse_jira_date_to_dt(created_str)
+
+                    worklogs = (fields.get('worklog') or {}).get('worklogs', [])
+                    for wl in worklogs:
+                        wl_dt = parse_jira_date_to_dt(wl.get('started') or wl.get('updated'))
+                        if wl_dt and (not last_active_dt or wl_dt > last_active_dt):
+                            last_active_dt = wl_dt
+                            
+                    comments = (fields.get('comment') or {}).get('comments', [])
+                    for cmt in comments:
+                        c_dt = parse_jira_date_to_dt(cmt.get('created') or cmt.get('updated'))
+                        if c_dt and (not last_active_dt or c_dt > last_active_dt):
+                            last_active_dt = c_dt
+                            
+                    stagnant_days = 0
+                    if last_active_dt:
+                        stagnant_days = calculate_working_days(last_active_dt, target_date)
+                        if stagnant_days < 0: stagnant_days = 0
 
                     task_data = {
                         "key": key, "summary": summary_text, "status": status_str,
-                        "project": project_text, "duedate": duedate_str, "duedate_dt": duedate_dt,
-                        "confluence_links": confluence_links
+                        "project": project_text, "parent_key": parent_key, "duedate": duedate_str, "duedate_dt": duedate_dt,
+                        "confluence_links": confluence_links, "updated_dt": last_active_dt, "stagnant_days": stagnant_days
                     }
                     
                     status_upper = status_str.upper()
@@ -355,7 +434,12 @@ def fetch_pending_tasks(account_id, updated_keys):
                     elif status_upper in ["IN PROGRESS", "進行中"] or "PROGRESS" in status_upper: pending_in_progress.append(task_data)
                         
             for task_list in [pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume]:
-                task_list.sort(key=lambda x: (1 if x.get('project', '').upper() == 'MEETING' else 0, x.get('project', ''), x.get('key', '')))
+                task_list.sort(key=lambda x: (
+                    1 if x.get('project', '').upper() == 'MEETING' else 0,
+                    x.get('project', ''),
+                    x.get('stagnant_days', 0),
+                    x.get('key', '')
+                ))
         
         return pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume
     except: pass
@@ -399,9 +483,10 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
         
         if any(kw in summary.lower() or kw in project_name.lower() for kw in exclude_kws): continue
             
-        parent = fields.get('parent', {}).get('fields', {}).get('summary', 'NA')
+        parent_data = fields.get('parent') or {}
+        parent = (parent_data.get('fields') or {}).get('summary', 'NA')
+        parent_key = parent_data.get('key')
         
-        # ✅ 強效正則替換：不論大小寫或有沒有黏在一起，強制在任何英數字與 NPI 之間加上 " - "
         if isinstance(parent, str) and parent != "NA":
             parent = re.sub(r'([a-zA-Z0-9])\s*NPI', r'\1 - NPI', parent, flags=re.IGNORECASE)
             
@@ -426,9 +511,8 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
                 comment_texts = []
                 def ex(n):
                     if n.get('type') == 'text': comment_texts.append(n.get('text', ''))
-                    elif n.get('type') == 'hardBreak': comment_texts.append('\n')  # ✅ 新增這行：處理強制換行符號
+                    elif n.get('type') == 'hardBreak': comment_texts.append('\n')
                     for child in n.get('content', []): ex(child)
-                    # 🌟 核心修復：解析 Jira ADF 格式時，遇到段落自動加上換行符號
                     if n.get('type') in ['paragraph', 'listItem']:
                         comment_texts.append('\n')
                 ex(comment_raw)
@@ -437,13 +521,8 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
             if not comment_text: comment_text = "NA"
 
             raw_started = wl.get('started', '')
-            try:
-                dt = datetime.strptime(raw_started, "%Y-%m-%dT%H:%M:%S.%f%z")
-                start_dt_tz8 = dt.astimezone(timezone(timedelta(hours=8)))
-                started_date_tz8 = start_dt_tz8.strftime("%Y-%m-%d")
-            except:
-                start_dt_tz8 = None
-                started_date_tz8 = raw_started[:10]
+            start_dt_tz8 = parse_jira_date_to_dt(raw_started)
+            started_date_tz8 = start_dt_tz8.strftime("%Y-%m-%d") if start_dt_tz8 else raw_started[:10]
 
             is_target_day = (started_date_tz8 in target_date_strs)
             has_date_prefix = any(comment_text.startswith(ts) for ts in target_shorts)
@@ -481,7 +560,7 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
                 for uwl in day_logs:
                     collected_logs.append({
                         "key": key, "summary": summary, "status": current_status, "transition": status_transition_str,
-                        "project": project_name, "parent": parent, "label": label_str, "comment": uwl['comment'],
+                        "project": project_name, "parent": parent, "parent_key": parent_key, "label": label_str, "comment": uwl['comment'],
                         "duration": uwl['duration'], "duration_mins": uwl.get('duration_mins', 0),
                         "duedate": duedate_str, "duedate_dt": duedate_dt, "confluence_links": confluence_links,
                         "started_date": uwl['started_date'], "issue_total_str": issue_total_str
@@ -490,7 +569,7 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
     collected_logs.sort(key=lambda x: (1 if x.get('project', '').upper() == 'MEETING' else 0, x.get('project', ''), 0 if x.get('status', '').upper() in ['DONE', '完成'] else 1, x.get('key', '')))
     return collected_logs
 
-# ✅ 專注於全區間 (週一至週日) 的聚合邏輯
+# ✅ 聚合邏輯
 def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process, all_issues):
     issue_dict = {issue['key']: issue for issue in all_issues}
     enriched = []
@@ -520,12 +599,8 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
                 if not ((account_id and author_id == account_id) or (email and author_email == email.lower())): continue
                 
                 raw_started = wl.get('started', '')
-                try:
-                    start_dt_tz8 = datetime.strptime(raw_started, "%Y-%m-%dT%H:%M:%S.%f%z").astimezone(timezone(timedelta(hours=8)))
-                    wl_date_str = start_dt_tz8.strftime("%Y-%m-%d")
-                except:
-                    wl_date_str = raw_started[:10]
-                    start_dt_tz8 = None
+                start_dt_tz8 = parse_jira_date_to_dt(raw_started)
+                wl_date_str = start_dt_tz8.strftime("%Y-%m-%d") if start_dt_tz8 else raw_started[:10]
                     
                 if wl_date_str == day_str:
                     comment_raw = wl.get('comment', '')
@@ -533,9 +608,8 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
                         comment_texts = []
                         def ex(n):
                             if n.get('type') == 'text': comment_texts.append(n.get('text', ''))
-                            elif n.get('type') == 'hardBreak': comment_texts.append('\n')  # ✅ 新增這行：處理強制換行符號
+                            elif n.get('type') == 'hardBreak': comment_texts.append('\n')
                             for child in n.get('content', []): ex(child)
-                            # 🌟 核心修復：一樣支援 ADF 段落換行
                             if n.get('type') in ['paragraph', 'listItem']:
                                 comment_texts.append('\n')
                         ex(comment_raw)
@@ -549,7 +623,6 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
             total_mins_day = sum(w.get('mins', 0) for w in wls)
             dur_str = format_duration(total_mins_day) if total_mins_day > 0 else ""
             
-            # ✅ 消除重複的 Comment (同一天同一任務，重複的留言只顯示一次)
             unique_comments = []
             for w in wls:
                 if w['comment'] and w['comment'] not in unique_comments:
@@ -666,8 +739,18 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         if SETTINGS.get("show_duedate") and log.get('duedate'):
             if not (is_tbd and not SETTINGS.get("show_due_tbd")):
                 span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
-                span_due.string = f" {log['duedate']}"
+                
+                if log.get('parent_due_key'):
+                    span_due.string = f" {log['duedate']} (依父系 "
+                    a_parent = soup.new_tag("a", href=f"{JIRA_URL}/browse/{log['parent_due_key']}", style="color: #3498db; text-decoration: none;")
+                    a_parent.string = log['parent_due_summary']
+                    span_due.append(a_parent)
+                    span_due.append(soup.new_string(")"))
+                else:
+                    span_due.string = f" {log['duedate']}"
+                    
                 p1.append(span_due)
+                
                 if not is_tbd and log.get('duedate_dt'):
                     diff_days = calculate_working_days(target_date, log['duedate_dt'])
                     color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
@@ -823,7 +906,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                 p_empty.append(soup.new_tag("br"))
                 container.append(p_empty)
             current_project = log['project']
-            p_proj = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 8px; font-weight: bold; color: #2980b9;")
+            p_proj = soup.new_tag("p", style="margin-top: 15px; margin-bottom: 8px; font-weight: bold; color: #2980b9;")
             p_proj.string = f"---- 專案: {current_project} ----"
             container.append(p_proj)
             
@@ -896,7 +979,15 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             p_meta.append(soup.new_string(f"{d_info['day_short']} {d_info['day_name']} {dur_text}"))
 
             if SETTINGS.get("show_duedate") and log['duedate'] and log['duedate'] != '"Due TBD"':
-                p_meta.append(soup.new_string(f'{log["duedate"]} '))
+                if log.get('parent_due_key'):
+                    p_meta.append(soup.new_string(f' {log["duedate"]} (依父系 '))
+                    a_parent = soup.new_tag("a", href=f"{JIRA_URL}/browse/{log['parent_due_key']}", style="color: #3498db; text-decoration: none;")
+                    a_parent.string = log['parent_due_summary']
+                    p_meta.append(a_parent)
+                    p_meta.append(soup.new_string(") "))
+                else:
+                    p_meta.append(soup.new_string(f' {log["duedate"]} '))
+
                 if log['duedate_dt']:
                     diff_days = calculate_working_days(d_info['date'], log['duedate_dt'])
                     sign = "+" if diff_days >= 0 else ""
@@ -1003,7 +1094,15 @@ def _append_pending_tasks(soup, container, pending_in_progress, pending_waiting,
         container.append(panel_macro)
 
         task_counter = 1
+        last_project = None
+        
         for pl in task_list:
+            current_project = pl.get('project', '')
+            if last_project is not None and current_project != last_project:
+                hr_tag = soup.new_tag("hr", style="border: 0; height: 1px; background-color: #bdc3c7; margin: 12px 0;")
+                pending_box.append(hr_tag)
+            last_project = current_project
+            
             p_pend = soup.new_tag("p", style="margin-top: 4px; margin-bottom: 4px; color: #7f8c8d;")
             num_span = soup.new_tag("span", style="color: black; font-weight: bold;")
             num_span.string = f"{task_counter}. "
@@ -1021,11 +1120,40 @@ def _append_pending_tasks(soup, container, pending_in_progress, pending_waiting,
                 p_pend.append(a_key)
                 p_pend.append(soup.new_string(f" : {pl['summary']} {get_emoji(pl['status'])}[{translate_status(pl['status'])}]"))
 
+            if pl.get('updated_dt'):
+                diff_work_days = pl.get('stagnant_days', 0)
+                
+                if diff_work_days >= 30:
+                    warning_span = soup.new_tag("span", style="color: #8e44ad; font-weight: bold; margin-left: 8px;")
+                    warning_span.string = f"💀停滯 {diff_work_days} 個工作天"
+                    p_pend.append(warning_span)
+                elif diff_work_days >= 15:
+                    warning_span = soup.new_tag("span", style="color: #c0392b; background-color: #fadbd8; padding: 2px 4px; border-radius: 3px; font-weight: bold; margin-left: 8px;")
+                    warning_span.string = f"🔥停滯 {diff_work_days} 個工作天"
+                    p_pend.append(warning_span)
+                elif diff_work_days >= 5:
+                    warning_span = soup.new_tag("span", style="color: #e74c3c; font-weight: bold; margin-left: 8px;")
+                    warning_span.string = f"⚠️停滯 {diff_work_days} 個工作天"
+                    p_pend.append(warning_span)
+                elif diff_work_days >= 3:
+                    warning_span = soup.new_tag("span", style="color: #e67e22; font-weight: bold; margin-left: 8px;")
+                    warning_span.string = f"⏳停滯 {diff_work_days} 個工作天"
+                    p_pend.append(warning_span)
+
             is_tbd = (pl.get('duedate') == '"Due TBD"')
             if SETTINGS.get("show_duedate") and pl.get('duedate'):
                 if not (is_tbd and not SETTINGS.get("show_due_tbd")):
                     span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
-                    span_due.string = f" {pl['duedate']}"
+                    
+                    if pl.get('parent_due_key'):
+                        span_due.string = f" {pl['duedate']} (依父系 "
+                        a_parent = soup.new_tag("a", href=f"{JIRA_URL}/browse/{pl['parent_due_key']}", style="color: #3498db; text-decoration: none;")
+                        a_parent.string = pl['parent_due_summary']
+                        span_due.append(a_parent)
+                        span_due.append(soup.new_string(")"))
+                    else:
+                        span_due.string = f" {pl['duedate']}"
+                        
                     p_pend.append(span_due)
                     
                     if not is_tbd and pl.get('duedate_dt'):
@@ -1256,6 +1384,33 @@ def run_sync_logic():
         print("\n=========================================")
         print("🚀 開始針對個別成員進行全區間合併寫入...")
 
+        # === 🌟 批量讀取父系 Due Date 邏輯 ===
+        parent_due_map = {}
+        if SETTINGS.get("inherit_parent_due"):
+            parent_keys_to_fetch = set()
+            for iss in all_issues_pool:
+                fields = iss.get('fields') or {}
+                parent_data = fields.get('parent') or {}
+                if not fields.get('duedate') and parent_data.get('key'):
+                    parent_keys_to_fetch.add(parent_data['key'])
+            
+            if parent_keys_to_fetch:
+                p_list = list(parent_keys_to_fetch)
+                chunk_size = 50
+                for i in range(0, len(p_list), chunk_size):
+                    chunk = p_list[i:i+chunk_size]
+                    jql = f"key in ({','.join(chunk)})"
+                    try:
+                        pres = requests.post(f"{JIRA_URL}/rest/api/3/search/jql", json={"jql": jql, "maxResults": 100, "fields": ["duedate", "summary"]}, auth=ADMIN_AUTH, timeout=10)
+                        if pres.status_code == 200:
+                            for pi in pres.json().get('issues', []):
+                                fields = pi.get('fields') or {}
+                                due = fields.get('duedate')
+                                summary = fields.get('summary', 'Unknown Task')
+                                if due:
+                                    parent_due_map[pi['key']] = {'due': due, 'summary': summary}
+                    except: pass
+
         for name, email in ACCOUNT_DICT.items():
             acc_id = get_account_id(email, name)
             
@@ -1323,6 +1478,16 @@ def run_sync_logic():
             
             logs = extract_logs_from_issues(name, email, acc_id, days_to_process, all_issues_pool)
             
+            # 🌟 套用依附父系到期日邏輯 (對 logs)
+            if SETTINGS.get("inherit_parent_due"):
+                for log in logs:
+                    if not log.get('duedate_dt') and log.get('parent_key') and parent_due_map.get(log['parent_key']):
+                        p_info = parent_due_map[log['parent_key']]
+                        log['duedate_dt'] = datetime.strptime(p_info['due'][:10], "%Y-%m-%d")
+                        log['duedate'] = f'"Due {log["duedate_dt"].strftime("%y")}\' {log["duedate_dt"].month}/{log["duedate_dt"].day}"'
+                        log['parent_due_key'] = log['parent_key']
+                        log['parent_due_summary'] = p_info['summary']
+
             if SETTINGS.get("style_weekly") and logs:
                 daily_aggregated_logs = enrich_with_weekly_data(logs, name, email, acc_id, days_to_process, all_issues_pool)
                 total_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].date() in [sd.date() for sd in selected_dates])
@@ -1333,8 +1498,19 @@ def run_sync_logic():
                 weekend_mins = sum(log.get('duration_mins', 0) for log in logs if log.get('started_date') in [sd.strftime("%Y-%m-%d") for sd in selected_dates if sd.weekday() >= 5])
 
             updated_keys = {log['key'] for log in logs}
-            pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume = fetch_pending_tasks(acc_id, updated_keys)
+            pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume = fetch_pending_tasks(acc_id, updated_keys, target_date)
             
+            # 🌟 套用依附父系到期日邏輯 (對 pending)
+            if SETTINGS.get("inherit_parent_due"):
+                for p_list in [pending_in_progress, pending_waiting, pending_candidate, pending_todo, pending_blocked, pending_abort, pending_resume]:
+                    for t in p_list:
+                        if not t.get('duedate_dt') and t.get('parent_key') and parent_due_map.get(t['parent_key']):
+                            p_info = parent_due_map[t['parent_key']]
+                            t['duedate_dt'] = datetime.strptime(p_info['due'][:10], "%Y-%m-%d")
+                            t['duedate'] = f'"Due {t["duedate_dt"].strftime("%y")}\' {t["duedate_dt"].month}/{t["duedate_dt"].day}"'
+                            t['parent_due_key'] = t['parent_key']
+                            t['parent_due_summary'] = p_info['summary']
+
             if SETTINGS.get("show_pending_has_due"):
                 pending_in_progress = [p for p in pending_in_progress if p.get('duedate_dt') is not None]
                 pending_waiting = [p for p in pending_waiting if p.get('duedate_dt') is not None]
@@ -1397,5 +1573,5 @@ def run_sync_logic():
         print(f"\n🏁 任務結束。 (總耗時: {time_str})")
 
 if __name__ == "__main__":
-    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.12 全週合併版) ===")
+    print("=== Confluence 自動填表機 (GitHub Actions Headless V50.15 全週合併版) ===")
     run_sync_logic()
