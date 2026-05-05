@@ -962,7 +962,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             
             log_counter = 1
 
-        if log_counter > 1:
+    if log_counter > 1:
             project_box.append(soup.new_tag("br"))
 
         p_header = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 5px;")
