@@ -1,35 +1,35 @@
-name: Jira Gantt to Confluence Sync
+name: Confluence Gantt Daily Update
 
 on:
   schedule:
-    # 這裡設定每日執行時間 (UTC 時間)
-    # 台灣時間凌晨 01:00 = UTC 前一天 17:00
-    #- cron: '0 17 * * *'
-  workflow_dispatch:
-    # 允許手動點擊按鈕立即觸發執行
+    # 每天 UTC 時間 16:00 執行 (剛好是台灣時間的凌晨 00:00)
+    - cron: '0 16 * * *'
+  workflow_dispatch: # 保留手動觸發按鈕，方便你隨時測試
 
 jobs:
-  build-and-sync:
+  update-gantt:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 📥 檢出程式碼 (Checkout code)
-        uses: actions/checkout@v3
+      - name: 📥 檢出程式碼
+        uses: actions/checkout@v4
 
       - name: 🐍 設定 Python 環境
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'
 
       - name: 📦 安裝相依套件
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pandas openpyxl python-dotenv
+          pip install requests beautifulsoup4
 
-      - name: 🚀 執行甘特圖自動同步腳本
+      - name: 🚀 執行甘特圖推進腳本
         env:
-          # 這裡讀取 GitHub Secrets 中儲存的金鑰
+          # 這裡直接對應你截圖中的現有 Secrets
           CONF_URL: ${{ secrets.CONF_URL }}
           CONF_USER: ${{ secrets.CONF_USER }}
           CONF_PASS: ${{ secrets.CONF_PASS }}
-        run: python github_gantt_sync.py
+          # SPACE_KEY 可以直接寫在這邊，若未來想改，也可以改為讀取 variables
+          SPACE_KEY: "team_AIoTHW"
+        run: python update_gantt_today.py
