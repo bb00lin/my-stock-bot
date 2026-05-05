@@ -31,4 +31,4 @@ jobs:
           CONF_PASS: ${{ secrets.CONF_PASS }}
           # SPACE_KEY 可以直接寫在這邊，若未來想改，也可以改為讀取 variables
           SPACE_KEY: "team_AIoTHW"
-        run: python update_gantt_today.py
+        run: python github_gantt_sync.py
