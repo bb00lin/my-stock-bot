@@ -1,10 +1,9 @@
-name: Confluence Gantt Daily Update
+name: Jira Gantt to Confluence Sync
 
 on:
   schedule:
-    # 每天 UTC 時間 16:00 執行 (剛好是台灣時間的凌晨 00:00)
-    - cron: '0 16 * * *'
-  workflow_dispatch: # 保留手動觸發按鈕，方便你隨時測試
+    - cron: "0 16 * * *"
+  workflow_dispatch:
 
 jobs:
   update-gantt:
