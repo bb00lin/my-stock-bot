@@ -706,8 +706,18 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                 p_empty.append(soup.new_tag("br"))
                 container.append(p_empty)
             current_project = log['project']
-            p_proj = soup.new_tag("p", style="margin-top: 5px; margin-bottom: 8px; font-weight: bold; color: #2980b9;")
-            p_proj.string = f"---- 專案: {current_project} ----"
+            
+            # 清洗專案名稱前綴，讓畫面更簡潔
+            display_project = current_project
+            if display_project.lower().startswith('prj_'):
+                display_project = display_project[4:]
+            elif display_project.lower().startswith('report_'):
+                display_project = display_project[7:]
+                
+            p_proj = soup.new_tag("p", style="margin-top: 15px; margin-bottom: 8px;")
+            strong_proj = soup.new_tag("strong")
+            strong_proj.string = f"---- 專案: {display_project} ----"
+            p_proj.append(strong_proj)
             container.append(p_proj)
             
             panel_macro, project_box = create_confluence_panel()
@@ -811,30 +821,58 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
-            
             comment_text = log['comment']
+            
             if SETTINGS.get("enable_newline"):
                 delimiters = [d for d in SETTINGS.get("newline_chars", "; ,").split(" ") if d]
                 for d in delimiters:
                     comment_text = comment_text.replace(d, '\n')
+                    
+                comment_text = comment_text.replace('[', '').replace(']', '')
                 lines = [l.strip() for l in comment_text.split('\n') if l.strip()]
                 
-                if not lines:
+                seen_urls = set()
+                final_lines = []
+                
+                for line in lines:
+                    urls_in_line = re.findall(r'(https?://[^\s]+)', line)
+                    if len(urls_in_line) == 1 and line == urls_in_line[0] and line in seen_urls:
+                        continue
+                    seen_urls.update(urls_in_line)
+                    final_lines.append(line)
+                
+                if not final_lines:
                     p3.append(soup.new_string(f"└ 📝 {dur_text}"))
                 else:
                     p3.append(soup.new_string(f"└ 📝 {dur_text}"))
-                    for idx, line in enumerate(lines):
-                        if idx == 0:
-                            p3.append(soup.new_string(line))
-                        else:
+                    for idx, line in enumerate(final_lines):
+                        parts = re.split(r'(https?://[^\s]+)', line)
+                        for part in parts:
+                            if part.startswith('http'):
+                                a_tag = soup.new_tag("a", href=part, target="_blank", style="color: #2980b9; text-decoration: none;")
+                                a_tag.string = part
+                                p3.append(a_tag)
+                            elif part:
+                                p3.append(soup.new_string(part))
+                                
+                        if idx < len(final_lines) - 1:
                             p3.append(soup.new_tag("br"))
                             align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
                             align_spacer.string = "----------"
                             p3.append(align_spacer)
-                            p3.append(soup.new_string(line))
             else:
                 comment_text = comment_text.replace('\n', ' ').replace('\r', '')
-                p3.append(soup.new_string(f"└ 📝 {dur_text}{comment_text}"))
+                comment_text = comment_text.replace('[', '').replace(']', '')
+                p3.append(soup.new_string(f"└ 📝 {dur_text}"))
+                
+                parts = re.split(r'(https?://[^\s]+)', comment_text)
+                for part in parts:
+                    if part.startswith('http'):
+                        a_tag = soup.new_tag("a", href=part, target="_blank", style="color: #2980b9; text-decoration: none;")
+                        a_tag.string = part
+                        p3.append(a_tag)
+                    elif part:
+                        p3.append(soup.new_string(part))
         else:
             if log['duration'] != "-": 
                 p3.append(soup.new_string(f"└ ⏱️ 耗時: {log['duration']}"))
@@ -899,15 +937,24 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
         panel_macro, project_box = create_confluence_panel()
         container.append(panel_macro)
 
-    for log in daily_aggregated_logs:
-        if SETTINGS.get("group_by_project") and log['project'] != current_project:
+    if SETTINGS.get("group_by_project") and log['project'] != current_project:
             if current_project is not None:
                 p_empty = soup.new_tag("p")
                 p_empty.append(soup.new_tag("br"))
                 container.append(p_empty)
             current_project = log['project']
-            p_proj = soup.new_tag("p", style="margin-top: 15px; margin-bottom: 8px; font-weight: bold; color: #2980b9;")
-            p_proj.string = f"---- 專案: {current_project} ----"
+            
+            # 清洗專案名稱前綴，讓畫面更簡潔
+            display_project = current_project
+            if display_project.lower().startswith('prj_'):
+                display_project = display_project[4:]
+            elif display_project.lower().startswith('report_'):
+                display_project = display_project[7:]
+                
+            p_proj = soup.new_tag("p", style="margin-top: 15px; margin-bottom: 8px;")
+            strong_proj = soup.new_tag("strong")
+            strong_proj.string = f"---- 專案: {display_project} ----"
+            p_proj.append(strong_proj)
             container.append(p_proj)
             
             panel_macro, project_box = create_confluence_panel()
@@ -1032,17 +1079,49 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                         for d in delimiters:
                             comment_text = comment_text.replace(d, '\n')
                         
+                        # 移除 Jira ADF 造成的括號
+                        comment_text = comment_text.replace('[', '').replace(']', '')
                         lines = [l.strip() for l in comment_text.split('\n') if l.strip()]
-                        for idx, line in enumerate(lines):
-                            comment_span.append(soup.new_string(line))
-                            if idx < len(lines) - 1:
+                        
+                        seen_urls = set()
+                        final_lines = []
+                        
+                        # 網址去重複邏輯
+                        for line in lines:
+                            urls_in_line = re.findall(r'(https?://[^\s]+)', line)
+                            if len(urls_in_line) == 1 and line == urls_in_line[0] and line in seen_urls:
+                                continue
+                            seen_urls.update(urls_in_line)
+                            final_lines.append(line)
+                            
+                        # 轉譯超連結
+                        for idx, line in enumerate(final_lines):
+                            parts = re.split(r'(https?://[^\s]+)', line)
+                            for part in parts:
+                                if part.startswith('http'):
+                                    a_tag = soup.new_tag("a", href=part, target="_blank", style="color: #2980b9; text-decoration: none;")
+                                    a_tag.string = part
+                                    comment_span.append(a_tag)
+                                elif part:
+                                    comment_span.append(soup.new_string(part))
+                                    
+                            if idx < len(final_lines) - 1:
                                 comment_span.append(soup.new_tag("br"))
                                 align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
                                 align_spacer.string = "--------------"
                                 comment_span.append(align_spacer)
                     else:
                         comment_text = comment_text.replace('\n', ' ').replace('\r', '')
-                        comment_span.string = comment_text
+                        comment_text = comment_text.replace('[', '').replace(']', '')
+                        
+                        parts = re.split(r'(https?://[^\s]+)', comment_text)
+                        for part in parts:
+                            if part.startswith('http'):
+                                a_tag = soup.new_tag("a", href=part, target="_blank", style="color: #2980b9; text-decoration: none;")
+                                a_tag.string = part
+                                comment_span.append(a_tag)
+                            elif part:
+                                comment_span.append(soup.new_string(part))
                         
                     p_comment.append(comment_span)
                     
