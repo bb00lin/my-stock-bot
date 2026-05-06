@@ -2,6 +2,7 @@ name: Jira Gantt to Confluence Sync
 
 on:
   schedule:
+    # 每天 UTC 時間 16:00 執行 (剛好是台灣時間的凌晨 00:00)
     - cron: "0 16 * * *"
   workflow_dispatch:
 
@@ -21,14 +22,14 @@ jobs:
       - name: 📦 安裝相依套件
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 python-dotenv
 
       - name: 🚀 執行甘特圖推進腳本
         env:
-          # 這裡直接對應你截圖中的現有 Secrets
           CONF_URL: ${{ secrets.CONF_URL }}
           CONF_USER: ${{ secrets.CONF_USER }}
           CONF_PASS: ${{ secrets.CONF_PASS }}
-          # SPACE_KEY 可以直接寫在這邊，若未來想改，也可以改為讀取 variables
-          SPACE_KEY: "team_AIoTHW"
+          # 👇 這裡已經為你修正為網址上正確的 Space Key (沒有底線)
+          SPACE_KEY: "teamAIoTHW"
+        # 👇 確保這裡的檔名跟你 GitHub 根目錄的 Python 檔名完全一致
         run: python github_gantt_sync.py
