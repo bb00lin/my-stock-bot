@@ -7,9 +7,14 @@ from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
 
 # --- 1. 環境變數與金鑰設定 (對齊你的 GitHub Secrets) ---
-JIRA_URL = os.environ.get("CONF_URL", "").rstrip('/')
-ADMIN_EMAIL = os.environ.get("CONF_USER", "")
-ADMIN_TOKEN = os.environ.get("CONF_PASS", "")
+# [終極淨化器] 確保 URL 沒有多餘的空白、斜線，並強制移除可能重複的 /wiki
+raw_url = os.environ.get("CONF_URL", "").strip().rstrip('/')
+if raw_url.endswith("/wiki"):
+    raw_url = raw_url[:-5]
+JIRA_URL = raw_url
+
+ADMIN_EMAIL = os.environ.get("CONF_USER", "").strip()
+ADMIN_TOKEN = os.environ.get("CONF_PASS", "").strip()
 
 if not JIRA_URL or not ADMIN_EMAIL or not ADMIN_TOKEN:
     print("❌ 錯誤：找不到環境變數 CONF_URL, CONF_USER 或 CONF_PASS")
@@ -18,38 +23,34 @@ if not JIRA_URL or not ADMIN_EMAIL or not ADMIN_TOKEN:
 ADMIN_AUTH = HTTPBasicAuth(ADMIN_EMAIL, ADMIN_TOKEN)
 CONFLUENCE_API_URL = f"{JIRA_URL}/wiki/rest/api"
 
-# 目標空間與母頁面
-SPACE_KEY = os.environ.get("SPACE_KEY", "真實的SpaceKey，例如teamAIoTHW")
-PARENT_TITLE = "Project Gantt Chart"
+# 目標空間與母頁面 ID (從您提供的網址提取，最為精準)
+SPACE_KEY = "teamAIoTHW"
+PARENT_PAGE_ID = "151684319"
 
 # --- 2. 時區與今天日期計算 (台灣 UTC+8) ---
 tw_tz = timezone(timedelta(hours=8))
 # 取得台灣當下時間的凌晨 00:00:00
 today_start = datetime.now(tw_tz).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
 
-def get_page_by_title(space, title):
-    url = f"{CONFLUENCE_API_URL}/content"
-    print(f"🔗 正在請求 API: {url}") # 印出網址看看有沒有拼錯
-    res = requests.get(url, params={"spaceKey": space, "title": title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
+def get_parent_page_by_id(page_id):
+    """直接透過精確的 Page ID 抓取母頁面，避免名稱比對錯誤"""
+    url = f"{CONFLUENCE_API_URL}/content/{page_id}"
+    print(f"🔗 正在請求 API: {url}") 
+    res = requests.get(url, params={"expand": "body.storage,version"}, auth=ADMIN_AUTH)
     
     if res.status_code != 200:
         print(f"❌ 取得母頁面失敗，HTTP 狀態碼: {res.status_code}")
-        print(f"❌ 伺服器回傳內容: {res.text[:500]}") # 印出前500個字元看是哪種錯誤網頁
+        print(f"❌ 伺服器回傳內容: {res.text[:500]}")
         return None
-        
-    data = res.json()
-    if data.get('results'):
-        return data['results'][0]
-    return None
+    return res.json()
 
 def get_child_pages(parent_id):
-    res = requests.get(f"{CONFLUENCE_API_URL}/content/{parent_id}/child/page", params={"expand": "body.storage,version", "limit": 100}, auth=ADMIN_AUTH)
+    url = f"{CONFLUENCE_API_URL}/content/{parent_id}/child/page"
+    res = requests.get(url, params={"expand": "body.storage,version", "limit": 100}, auth=ADMIN_AUTH)
     
     if res.status_code != 200:
         print(f"❌ 取得子頁面失敗，HTTP 狀態碼: {res.status_code}")
-        print(f"❌ 伺服器回傳內容: {res.text[:500]}")
         return []
-        
     return res.json().get('results', [])
 
 def update_page(page_id, new_html, current_version, title):
@@ -76,14 +77,11 @@ def process_gantt_source(source_str):
         end_date_str = timeline["endDate"]
         try:
             current_end_date = datetime.strptime(end_date_str, '%Y-%m-%d %H:%M:%S')
-            # 如果今天已經達到或超過了甘特圖的右側邊界
             if today_start >= current_end_date:
                 mode = timeline.get("displayOption", "MONTH")
                 if mode == "WEEK":
-                    # WEEK 模式：往後推 14 天
                     new_end_date = today_start + timedelta(days=14)
                 else:
-                    # MONTH 模式：往後推到下個月底
                     next_m = today_start.month + 1 if today_start.month < 12 else 1
                     next_y = today_start.year if today_start.month < 12 else today_start.year + 1
                     nn_m = next_m + 1 if next_m < 12 else 1
@@ -114,23 +112,22 @@ def process_gantt_source(source_str):
             if "bars" in lane:
                 for bar in lane["bars"]:
                     if str(bar.get("title", "")).startswith("[NA]"):
-                        # 因為 Confluence 是吃 startDate 跟 duration，所以修改起點整個 Bar 就會往前滑動
                         bar["startDate"] = today_start.strftime('%Y-%m-%d 12:00:00')
 
-    # 重新壓縮並進行 URL Encode
     return urllib.parse.quote(json.dumps(data, separators=(',', ':')))
 
 def main():
     print(f"=== 啟動 GitHub Actions 甘特圖 Today 每日推進任務 ===")
     print(f"📍 系統判定今日 (台灣時間): {today_start.strftime('%Y-%m-%d')}")
-    print(f"🎯 目標 Space: {SPACE_KEY}")
+    print(f"🎯 目標母頁面 ID: {PARENT_PAGE_ID}")
 
-    parent_page = get_page_by_title(SPACE_KEY, PARENT_TITLE)
+    # 直接透過 ID 獲取，跳過名稱搜尋可能造成的失誤
+    parent_page = get_parent_page_by_id(PARENT_PAGE_ID)
     if not parent_page:
-        print(f"❌ 找不到母頁面：[{SPACE_KEY}] {PARENT_TITLE}")
+        print(f"❌ 找不到母頁面！請檢查憑證權限是否正確。")
         return
 
-    child_pages = get_child_pages(parent_page['id'])
+    child_pages = get_child_pages(PARENT_PAGE_ID)
     print(f"🔍 找到 {len(child_pages)} 個子頁面，開始逐一檢查甘特圖...")
 
     for page in child_pages:
