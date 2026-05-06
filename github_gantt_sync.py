@@ -19,7 +19,7 @@ ADMIN_AUTH = HTTPBasicAuth(ADMIN_EMAIL, ADMIN_TOKEN)
 CONFLUENCE_API_URL = f"{JIRA_URL}/wiki/rest/api"
 
 # 目標空間與母頁面
-SPACE_KEY = os.environ.get("SPACE_KEY", "team_AIoTHW")
+SPACE_KEY = os.environ.get("SPACE_KEY", "真實的SpaceKey，例如teamAIoTHW")
 PARENT_TITLE = "Project Gantt Chart"
 
 # --- 2. 時區與今天日期計算 (台灣 UTC+8) ---
