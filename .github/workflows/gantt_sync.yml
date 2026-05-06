@@ -38,16 +38,16 @@ jobs:
 
       - name: 📧 發送執行成功信件
         if: success()
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@v4  # 升級到 v4
         with:
           server_address: smtp.gmail.com
-          server_port: 465   
+          server_port: 465
           secure: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
-          subject: Confluence Gantt Sync [Success]
+          subject: "Confluence Gantt Sync [Success] - ${{ github.run_id }}" # 加入 run_id 避免被 Gmail 歸類為重複對話
           to: bb00lin@gmail.com
-          from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
+          from: "GitHub-Automation" # 建議用簡單字串，不要帶特殊符號
           body: file://output.txt
 
       - name: 📧 發送執行失敗信件
