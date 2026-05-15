@@ -71,6 +71,7 @@ class SettingsManager:
             "day_thu": True, "day_fri": True, "show_label": True, "show_parent": True,
             "show_status": True, "show_comment": True, "minor_edit": True,
             "inherit_parent_due": True, # ✅ 新增繼承父系到期日
+            "due_date_mode": "方案一: 標題列 (統一以本週報產出日結算)", # ✅ 新增到期日排版選項
             "show_pending_inprogress": True, "show_pending_waiting": True,
             "show_pending_todo": False, "show_pending_candidate": False,
             "show_pending_blocked": False, "show_pending_abort": False, "show_pending_resume": False,
@@ -441,7 +442,7 @@ def fetch_pending_tasks(account_id, updated_keys, target_date):
                     x.get('key', '')
                 ))
         
-        return pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume
+            return pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume
     except: pass
     return [], [], [], [], [], [], []
 
@@ -699,6 +700,8 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         panel_macro, project_box = create_confluence_panel()
         container.append(panel_macro)
 
+    mode = SETTINGS.get("due_date_mode", "方案一: 標題列 (統一以本週報產出日結算)")
+
     for log in logs:
         if SETTINGS.get("group_by_project") and log['project'] != current_project:
             if current_project is not None:
@@ -707,12 +710,9 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                 container.append(p_empty)
             current_project = log['project']
             
-            # 清洗專案名稱前綴，讓畫面更簡潔
             display_project = current_project
-            if display_project.lower().startswith('prj_'):
-                display_project = display_project[4:]
-            elif display_project.lower().startswith('report_'):
-                display_project = display_project[7:]
+            if display_project.lower().startswith('prj_'): display_project = display_project[4:]
+            elif display_project.lower().startswith('report_'): display_project = display_project[7:]
                 
             p_proj = soup.new_tag("p", style="margin-top: 15px; margin-bottom: 8px;")
             strong_proj = soup.new_tag("strong")
@@ -746,30 +746,40 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             p1.append(soup.new_string(f" : {log['summary']}{status_text}"))
         
         is_tbd = (log.get('duedate') == '"Due TBD"')
-        if SETTINGS.get("show_duedate") and log.get('duedate'):
-            if not (is_tbd and not SETTINGS.get("show_due_tbd")):
-                span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
-                
+        
+        if "雙管齊下" in mode:
+            diff_work_days = log.get('stagnant_days', 0)
+            if diff_work_days >= 3:
+                warn_color = "#e67e22" if diff_work_days < 5 else ("#e74c3c" if diff_work_days < 15 else ("#c0392b" if diff_work_days < 30 else "#8e44ad"))
+                icon = "⏳" if diff_work_days < 5 else ("⚠️" if diff_work_days < 15 else ("🔥" if diff_work_days < 30 else "💀"))
+                bg_style = "background-color: #fadbd8; padding: 2px 4px; border-radius: 3px;" if diff_work_days >= 15 else ""
+                warning_span = soup.new_tag("span", style=f"color: {warn_color}; {bg_style} font-weight: bold; margin-left: 8px;")
+                warning_span.string = f"{icon}停滯 {diff_work_days} 個工作天"
+                p1.append(warning_span)
+
+        if "標題列" in mode and "雙管" not in mode:
+            if SETTINGS.get("show_duedate") and log.get('duedate') and not is_tbd:
+                span_due = soup.new_tag("span", style="color: gray; font-size: 90%; font-weight: bold; margin-left: 8px;")
                 if log.get('parent_due_key'):
-                    span_due.string = f" {log['duedate']} (依父系 "
+                    inherit_text = "依故事" if log.get('is_inherited_from_story') else "依父系"
+                    span_due.string = f" 📅 {log['duedate']} ({inherit_text} "
                     a_parent = soup.new_tag("a", href=f"{JIRA_URL}/browse/{log['parent_due_key']}", style="color: #3498db; text-decoration: none;")
                     a_parent.string = log['parent_due_summary']
                     span_due.append(a_parent)
-                    span_due.append(soup.new_string(")"))
+                    span_due.append(soup.new_string(") "))
                 else:
-                    span_due.string = f" {log['duedate']}"
+                    span_due.string = f" 📅 {log['duedate']} "
                     
-                p1.append(span_due)
-                
-                if not is_tbd and log.get('duedate_dt'):
+                if log.get('duedate_dt'):
                     diff_days = calculate_working_days(target_date, log['duedate_dt'])
                     color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
                     sign = "+" if diff_days >= 0 else ""
                     warning_icon = "❗" if diff_days <= 2 else ""
-                    span_diff = soup.new_tag("span", style=f"color: {color}; font-size: 50%; margin-left: 4px;")
+                    span_diff = soup.new_tag("span", style=f"color: {color};")
                     span_diff.string = f" {warning_icon}({sign}{diff_days})"
-                    p1.append(span_diff)
-        
+                    span_due.append(span_diff)
+                p1.append(span_due)
+
         if log.get('confluence_links'):
             for cl in log['confluence_links']:
                 p1.append(soup.new_string(" "))
@@ -827,10 +837,9 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                 delimiters = [d for d in SETTINGS.get("newline_chars", "; ,").split(" ") if d]
                 for d in delimiters:
                     comment_text = comment_text.replace(d, '\n')
-                    
+                
                 comment_text = comment_text.replace('[', '').replace(']', '')
                 lines = [l.strip() for l in comment_text.split('\n') if l.strip()]
-                
                 seen_urls = set()
                 final_lines = []
                 
@@ -873,6 +882,30 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                         p3.append(a_tag)
                     elif part:
                         p3.append(soup.new_string(part))
+                        
+            if SETTINGS.get("show_duedate") and log.get('duedate') and not is_tbd and ("標題列" not in mode or "雙管" in mode):
+                span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
+                if log.get('parent_due_key'):
+                    inherit_text = "依故事" if log.get('is_inherited_from_story') else "依父系"
+                    span_due.string = f" {log['duedate']} ({inherit_text} "
+                    a_parent = soup.new_tag("a", href=f"{JIRA_URL}/browse/{log['parent_due_key']}", style="color: #3498db; text-decoration: none;")
+                    a_parent.string = log['parent_due_summary']
+                    span_due.append(a_parent)
+                    span_due.append(soup.new_string(") "))
+                else:
+                    span_due.string = f" {log['duedate']} "
+                    
+                p3.append(span_due)
+                
+                if log.get('duedate_dt'):
+                    calc_base_date = datetime.strptime(log['started_date'], "%Y-%m-%d")
+                    diff_days = calculate_working_days(calc_base_date, log['duedate_dt'])
+                    color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
+                    sign = "+" if diff_days >= 0 else ""
+                    warning_icon = "❗" if diff_days <= 2 else ""
+                    span_diff = soup.new_tag("span", style=f"color: {color}; font-size: 50%; margin-left: 4px;")
+                    span_diff.string = f" {warning_icon}({sign}{diff_days})"
+                    p3.append(span_diff)
         else:
             if log['duration'] != "-": 
                 p3.append(soup.new_string(f"└ ⏱️ 耗時: {log['duration']}"))
@@ -937,6 +970,8 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
         panel_macro, project_box = create_confluence_panel()
         container.append(panel_macro)
 
+    mode = SETTINGS.get("due_date_mode", "方案一: 標題列 (統一以本週報產出日結算)")
+
     for log in daily_aggregated_logs:
         if SETTINGS.get("group_by_project") and log['project'] != current_project:
             if current_project is not None:
@@ -945,12 +980,9 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                 container.append(p_empty)
             current_project = log['project']
             
-            # 清洗專案名稱前綴，讓畫面更簡潔
             display_project = current_project
-            if display_project.lower().startswith('prj_'):
-                display_project = display_project[4:]
-            elif display_project.lower().startswith('report_'):
-                display_project = display_project[7:]
+            if display_project.lower().startswith('prj_'): display_project = display_project[4:]
+            elif display_project.lower().startswith('report_'): display_project = display_project[7:]
                 
             p_proj = soup.new_tag("p", style="margin-top: 15px; margin-bottom: 8px;")
             strong_proj = soup.new_tag("strong")
@@ -980,6 +1012,39 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             a_key.string = log['key']
             p_header.append(a_key)
             p_header.append(soup.new_string(f" - {log['summary']} "))
+
+        if "標題列" in mode and "雙管" not in mode:
+            if SETTINGS.get("show_duedate") and log.get('duedate') and log['duedate'] != '"Due TBD"':
+                span_due = soup.new_tag("span", style="color: gray; font-size: 90%; font-weight: bold; margin-left: 8px;")
+                if log.get('parent_due_key'):
+                    inherit_text = "依故事" if log.get('is_inherited_from_story') else "依父系"
+                    span_due.string = f" 📅 {log['duedate']} ({inherit_text} "
+                    a_parent = soup.new_tag("a", href=f"{JIRA_URL}/browse/{log['parent_due_key']}", style="color: #3498db; text-decoration: none;")
+                    a_parent.string = log['parent_due_summary']
+                    span_due.append(a_parent)
+                    span_due.append(soup.new_string(") "))
+                else:
+                    span_due.string = f" 📅 {log['duedate']} "
+                    
+                if log.get('duedate_dt'):
+                    diff_days = calculate_working_days(target_date, log['duedate_dt'])
+                    color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
+                    sign = "+" if diff_days >= 0 else ""
+                    warning_icon = "❗" if diff_days <= 2 else ""
+                    span_diff = soup.new_tag("span", style=f"color: {color};")
+                    span_diff.string = f" {warning_icon}({sign}{diff_days})"
+                    span_due.append(span_diff)
+                p_header.append(span_due)
+
+        if "雙管齊下" in mode:
+            diff_work_days = log.get('stagnant_days', 0)
+            if diff_work_days >= 3:
+                warn_color = "#e67e22" if diff_work_days < 5 else ("#e74c3c" if diff_work_days < 15 else ("#c0392b" if diff_work_days < 30 else "#8e44ad"))
+                icon = "⏳" if diff_work_days < 5 else ("⚠️" if diff_work_days < 15 else ("🔥" if diff_work_days < 30 else "💀"))
+                bg_style = "background-color: #fadbd8; padding: 2px 4px; border-radius: 3px;" if diff_work_days >= 15 else ""
+                warning_span = soup.new_tag("span", style=f"color: {warn_color}; {bg_style} font-weight: bold; margin-left: 8px;")
+                warning_span.string = f"{icon}停滯 {diff_work_days} 個工作天"
+                p_header.append(warning_span)
         
         if SETTINGS.get("show_parent") and log['parent'] != "NA":
             span_parent = soup.new_tag("span", style="color: #95a5a6; font-size: 90%;")
@@ -1026,23 +1091,30 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             dur_text = f"({d_info['dur_str']}) " if d_info['dur_str'] else ""
             p_meta.append(soup.new_string(f"{d_info['day_short']} {d_info['day_name']} {dur_text}"))
 
-            if SETTINGS.get("show_duedate") and log['duedate'] and log['duedate'] != '"Due TBD"':
+            is_tbd = (log.get('duedate') == '"Due TBD"')
+            if SETTINGS.get("show_duedate") and log.get('duedate') and not is_tbd and ("標題列" not in mode or "雙管" in mode):
+                span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
                 if log.get('parent_due_key'):
-                    p_meta.append(soup.new_string(f' {log["duedate"]} (依父系 '))
+                    inherit_text = "依故事" if log.get('is_inherited_from_story') else "依父系"
+                    span_due.string = f" {log['duedate']} ({inherit_text} "
                     a_parent = soup.new_tag("a", href=f"{JIRA_URL}/browse/{log['parent_due_key']}", style="color: #3498db; text-decoration: none;")
                     a_parent.string = log['parent_due_summary']
-                    p_meta.append(a_parent)
-                    p_meta.append(soup.new_string(") "))
+                    span_due.append(a_parent)
+                    span_due.append(soup.new_string(") "))
                 else:
-                    p_meta.append(soup.new_string(f' {log["duedate"]} '))
-
-                if log['duedate_dt']:
-                    diff_days = calculate_working_days(d_info['date'], log['duedate_dt'])
-                    sign = "+" if diff_days >= 0 else ""
+                    span_due.string = f" {log['duedate']} "
+                    
+                p_meta.append(span_due)
+                
+                if log.get('duedate_dt'):
+                    calc_base_date = target_date if ("標題列" in mode and "雙管" not in mode) else d_info['date']
+                    diff_days = calculate_working_days(calc_base_date, log['duedate_dt'])
                     color = "#2ecc71" if diff_days >= 0 else "#e74c3c"
-                    diff_span = soup.new_tag("span", style=f"color: {color};")
-                    diff_span.string = f"({sign}{diff_days}) "
-                    p_meta.append(diff_span)
+                    sign = "+" if diff_days >= 0 else ""
+                    warning_icon = "❗" if diff_days <= 2 else ""
+                    span_diff = soup.new_tag("span", style=f"color: {color}; font-size: 50%; margin-left: 4px;")
+                    span_diff.string = f" {warning_icon}({sign}{diff_days})"
+                    p_meta.append(span_diff)
 
             trans_text = d_info['transition'] if d_info['transition'] else f"{get_emoji(log['status'])}[{translate_status(log['status'])}]"
             p_meta.append(soup.new_string(trans_text))
@@ -1080,22 +1152,18 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                         for d in delimiters:
                             comment_text = comment_text.replace(d, '\n')
                         
-                        # 移除 Jira ADF 造成的括號
                         comment_text = comment_text.replace('[', '').replace(']', '')
                         lines = [l.strip() for l in comment_text.split('\n') if l.strip()]
-                        
                         seen_urls = set()
                         final_lines = []
                         
-                        # 網址去重複邏輯
                         for line in lines:
                             urls_in_line = re.findall(r'(https?://[^\s]+)', line)
                             if len(urls_in_line) == 1 and line == urls_in_line[0] and line in seen_urls:
                                 continue
                             seen_urls.update(urls_in_line)
                             final_lines.append(line)
-                            
-                        # 轉譯超連結
+                        
                         for idx, line in enumerate(final_lines):
                             parts = re.split(r'(https?://[^\s]+)', line)
                             for part in parts:
@@ -1109,7 +1177,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                             if idx < len(final_lines) - 1:
                                 comment_span.append(soup.new_tag("br"))
                                 align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
-                                align_spacer.string = "--------------"
+                                align_spacer.string = "----------"
                                 comment_span.append(align_spacer)
                     else:
                         comment_text = comment_text.replace('\n', ' ').replace('\r', '')
@@ -1226,7 +1294,8 @@ def _append_pending_tasks(soup, container, pending_in_progress, pending_waiting,
                     span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
                     
                     if pl.get('parent_due_key'):
-                        span_due.string = f" {pl['duedate']} (依父系 "
+                        inherit_text = "依故事" if pl.get('is_inherited_from_story') else "依父系"
+                        span_due.string = f" {pl['duedate']} ({inherit_text} "
                         a_parent = soup.new_tag("a", href=f"{JIRA_URL}/browse/{pl['parent_due_key']}", style="color: #3498db; text-decoration: none;")
                         a_parent.string = pl['parent_due_summary']
                         span_due.append(a_parent)
@@ -1464,14 +1533,14 @@ def run_sync_logic():
         print("\n=========================================")
         print("🚀 開始針對個別成員進行全區間合併寫入...")
 
-        # === 🌟 批量讀取父系 Due Date 邏輯 ===
-        parent_due_map = {}
+        # === 🌟 1. 批量讀取明確的父系(Epic) Due Date (實體關聯) ===
+        explicit_parent_due_map = {}
         if SETTINGS.get("inherit_parent_due"):
             parent_keys_to_fetch = set()
             for iss in all_issues_pool:
                 fields = iss.get('fields') or {}
                 parent_data = fields.get('parent') or {}
-                if not fields.get('duedate') and parent_data.get('key'):
+                if parent_data.get('key'):
                     parent_keys_to_fetch.add(parent_data['key'])
             
             if parent_keys_to_fetch:
@@ -1486,10 +1555,56 @@ def run_sync_logic():
                             for pi in pres.json().get('issues', []):
                                 fields = pi.get('fields') or {}
                                 due = fields.get('duedate')
-                                summary = fields.get('summary', 'Unknown Task')
                                 if due:
-                                    parent_due_map[pi['key']] = {'due': due, 'summary': summary}
+                                    explicit_parent_due_map[pi['key']] = {'due': due, 'summary': fields.get('summary', 'Unknown'), 'key': pi['key']}
                     except: pass
+
+        # === 🌟 2. 批量讀取故事(Story)的 Due Date (單向狀態機視覺排序) ===
+        story_due_map = {}
+        fetched_projects = set()
+
+        def ensure_project_rank_mapped(proj_key):
+            if not proj_key or proj_key in fetched_projects: return
+            fetched_projects.add(proj_key)
+            print(f"  └ 🧠 啟動單向狀態機：掃描專案 [{proj_key}] 看板排序，計算 Story/Epic 繼承到期日...")
+            try:
+                # 使用 ORDER BY Rank ASC 來確保絕對符合 Jira 看板的由上往下視覺順序
+                jql = f'project = "{proj_key}" ORDER BY Rank ASC'
+                res = requests.post(f"{JIRA_URL}/rest/api/3/search/jql", json={"jql": jql, "maxResults": 3000, "fields": ["issuetype", "duedate", "summary"]}, auth=ADMIN_AUTH, timeout=15)
+                if res.status_code == 200:
+                    current_epic_due, current_epic_summary, current_epic_key = None, "", ""
+                    current_story_due, current_story_summary, current_story_key = None, "", ""
+                    
+                    for i_rank in res.json().get('issues', []):
+                        r_key = i_rank['key']
+                        r_fields = i_rank.get('fields') or {}
+                        r_type = r_fields.get('issuetype', {}).get('name', '').lower()
+                        r_due = r_fields.get('duedate')
+                        r_summary = r_fields.get('summary', 'Unknown')
+                        
+                        is_epic = 'epic' in r_type or '大型工作' in r_type or r_fields.get('issuetype', {}).get('hierarchyLevel') == 1
+                        is_story = 'story' in r_type or '故事' in r_type
+                        
+                        if is_epic:
+                            current_epic_due, current_epic_summary, current_epic_key = r_due, r_summary, r_key
+                            # 遇到新 Epic，強制清空 Story 口袋記憶
+                            current_story_due, current_story_summary, current_story_key = None, "", ""
+                        elif is_story:
+                            current_story_due, current_story_summary, current_story_key = r_due, r_summary, r_key
+                        else:
+                            # 是 Task 或 Sub-task，看自己有沒有到期日。沒有才繼承！
+                            if not r_due:
+                                if current_story_due:
+                                    story_due_map[r_key] = {'due': current_story_due, 'summary': current_story_summary, 'key': current_story_key}
+                                elif current_epic_due:
+                                    story_due_map[r_key] = {'due': current_epic_due, 'summary': current_epic_summary, 'key': current_epic_key}
+            except Exception as e:
+                print(f"    ❌ 掃描專案 {proj_key} 排序時發生錯誤: {e}")
+
+        # 預先掃描近期有更新的專案 (狀態機會自動過濾重複的專案)
+        if SETTINGS.get("inherit_parent_due"):
+            for iss in all_issues_pool:
+                ensure_project_rank_mapped(iss.get('fields', {}).get('project', {}).get('key'))
 
         for name, email in ACCOUNT_DICT.items():
             acc_id = get_account_id(email, name)
@@ -1553,6 +1668,9 @@ def run_sync_logic():
                 node.extract()
                 page_needs_update = True
 
+            # ====================================================
+            # ✅ 核心寫入邏輯：直接一次性整週輸出！
+            # ====================================================
             date_str_tag = target_date.strftime("[%Y/%m/%d]")
             safe_date_class = target_date.strftime("%Y%m%d")
             
@@ -1561,16 +1679,32 @@ def run_sync_logic():
             # 🌟 套用依附父系到期日邏輯 (對 logs)
             if SETTINGS.get("inherit_parent_due"):
                 for log in logs:
-                    if not log.get('duedate_dt') and log.get('parent_key') and parent_due_map.get(log['parent_key']):
-                        p_info = parent_due_map[log['parent_key']]
-                        log['duedate_dt'] = datetime.strptime(p_info['due'][:10], "%Y-%m-%d")
-                        log['duedate'] = f'"Due {log["duedate_dt"].strftime("%y")}\' {log["duedate_dt"].month}/{log["duedate_dt"].day}"'
-                        log['parent_due_key'] = log['parent_key']
-                        log['parent_due_summary'] = p_info['summary']
+                    proj_key = log['key'].split('-')[0]
+                    ensure_project_rank_mapped(proj_key)
+                    
+                    if not log.get('duedate_dt'):
+                        p_info = None
+                        is_from_story = False
+                        # 1. 優先檢查 Story (視覺排序)
+                        if log['key'] in story_due_map:
+                            p_info = story_due_map[log['key']]
+                            is_from_story = True
+                        # 2. 次要檢查 Epic (實體父系連結)
+                        elif log.get('parent_key') and log['parent_key'] in explicit_parent_due_map:
+                            p_info = explicit_parent_due_map[log['parent_key']]
+                            
+                        if p_info:
+                            log['duedate_dt'] = datetime.strptime(p_info['due'][:10], "%Y-%m-%d")
+                            log['duedate'] = f'"Due {log["duedate_dt"].strftime("%y")}\' {log["duedate_dt"].month}/{log["duedate_dt"].day}"'
+                            log['parent_due_key'] = p_info['key']
+                            log['parent_due_summary'] = p_info['summary']
+                            log['is_inherited_from_story'] = is_from_story
 
             if SETTINGS.get("style_weekly") and logs:
                 daily_aggregated_logs = enrich_with_weekly_data(logs, name, email, acc_id, days_to_process, all_issues_pool)
+                # 總工時計算 (針對 selected_dates)
                 total_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].date() in [sd.date() for sd in selected_dates])
+                
                 weekend_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].weekday() >= 5 and d['date'].date() in [sd.date() for sd in selected_dates])
             else:
                 daily_aggregated_logs = None
@@ -1582,14 +1716,28 @@ def run_sync_logic():
             
             # 🌟 套用依附父系到期日邏輯 (對 pending)
             if SETTINGS.get("inherit_parent_due"):
-                for p_list in [pending_in_progress, pending_waiting, pending_candidate, pending_todo, pending_blocked, pending_abort, pending_resume]:
+                for p_list in [pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume]:
                     for t in p_list:
-                        if not t.get('duedate_dt') and t.get('parent_key') and parent_due_map.get(t['parent_key']):
-                            p_info = parent_due_map[t['parent_key']]
-                            t['duedate_dt'] = datetime.strptime(p_info['due'][:10], "%Y-%m-%d")
-                            t['duedate'] = f'"Due {t["duedate_dt"].strftime("%y")}\' {t["duedate_dt"].month}/{t["duedate_dt"].day}"'
-                            t['parent_due_key'] = t['parent_key']
-                            t['parent_due_summary'] = p_info['summary']
+                        proj_key = t['key'].split('-')[0]
+                        ensure_project_rank_mapped(proj_key)
+                        
+                        if not t.get('duedate_dt'):
+                            p_info = None
+                            is_from_story = False
+                            # 1. 優先檢查 Story (視覺排序)
+                            if t['key'] in story_due_map:
+                                p_info = story_due_map[t['key']]
+                                is_from_story = True
+                            # 2. 次要檢查 Epic (實體父系連結)
+                            elif t.get('parent_key') and t['parent_key'] in explicit_parent_due_map:
+                                p_info = explicit_parent_due_map[t['parent_key']]
+                                
+                            if p_info:
+                                t['duedate_dt'] = datetime.strptime(p_info['due'][:10], "%Y-%m-%d")
+                                t['duedate'] = f'"Due {t["duedate_dt"].strftime("%y")}\' {t["duedate_dt"].month}/{t["duedate_dt"].day}"'
+                                t['parent_due_key'] = p_info['key']
+                                t['parent_due_summary'] = p_info['summary']
+                                t['is_inherited_from_story'] = is_from_story
 
             if SETTINGS.get("show_pending_has_due"):
                 pending_in_progress = [p for p in pending_in_progress if p.get('duedate_dt') is not None]
