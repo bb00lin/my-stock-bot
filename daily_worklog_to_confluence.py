@@ -1463,13 +1463,13 @@ def run_sync_logic():
     
     if is_github_actions:
         if github_event_name == "schedule":
-            update_source_tag = "Scheduled Update (Bob)"
+            update_source_tag = "Scheduled Update"
         elif github_event_name == "workflow_dispatch":
-            update_source_tag = "Manual Update (Bob)"
+            update_source_tag = "GitHub Update"
         else:
             update_source_tag = "GitHub Update (Bob)"
     else:
-        update_source_tag = "Local Update (Bob)"
+        update_source_tag = "Local Update"
         
     try:
         if SETTINGS.get("auto_clear_first"):
