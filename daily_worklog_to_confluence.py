@@ -11,6 +11,10 @@ from bs4 import BeautifulSoup, Tag, NavigableString
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 
+# 🌟 新增 LINE Bot SDK 的匯入
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
+
 # 載入自訂的環境變數檔案 (本地端測試用，GitHub Actions 會自動忽略)
 load_dotenv("jira_config.txt")
 
@@ -1448,6 +1452,11 @@ def run_clear_logic():
 def run_sync_logic():
     start_time = time.time()
     
+    # 用來記錄最終要推播給 LINE 的結果
+    sync_status = "success"
+    sync_message = ""
+    total_logs_written = 0
+    
     # ✅ 動態判斷 GitHub 執行環境並決定標籤
     is_github_actions = os.environ.get("GITHUB_ACTIONS") == "true"
     github_event_name = os.environ.get("GITHUB_EVENT_NAME", "")
@@ -1471,11 +1480,16 @@ def run_sync_logic():
             print("\n✅ 前置清除作業完成，準備開始批次寫入...\n")
 
         if not SETTINGS.get("filter_comment") and not SETTINGS.get("filter_started"):
-            return print("❌ 錯誤：請至少在 settings_daily.json 啟用一種「智慧過濾機制」。")
+            sync_status = "error"
+            sync_message = "❌ 錯誤：請至少在 settings_daily.json 啟用一種「智慧過濾機制」。"
+            return print(sync_message)
 
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
         selected_dates = get_selected_dates()
-        if not selected_dates: return print("⚠️ 未選擇任何要更新的日期。")
+        if not selected_dates:
+            sync_status = "warning"
+            sync_message = "⚠️ 未選擇任何要更新的日期。"
+            return print(sync_message)
 
         target_title = get_target_report_title(selected_dates[0])
         print(f"\n=========================================\n🎯 目標週報頁面: {target_title}\n=========================================\n")
@@ -1484,16 +1498,23 @@ def run_sync_logic():
         res = requests.get(api_endpoint, params={"title": target_title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
         
         if res.status_code != 200:
-            print(f"❌ API 請求被 Confluence 拒絕！(狀態碼: {res.status_code})")
-            print(f"💡 錯誤診斷提示：")
-            if res.status_code == 401: print("   👉 [401 未授權]: 請檢查 GitHub Secrets 的 CONF_USER 與 CONF_PASS。注意：CONF_PASS 必須是 Atlassian API Token，不能是登入密碼！")
-            elif res.status_code == 403: print("   👉 [403 權限不足]: 你的帳號沒有權限讀取此頁面，或 API Token 權限不足。")
-            elif res.status_code == 404: print(f"   👉 [404 找不到]: 請檢查 CONF_URL ({JIRA_URL}) 是否正確。")
-            print(f"📄 伺服器原始回傳內容: {res.text[:300]}")
+            sync_status = "error"
+            error_msg = []
+            error_msg.append(f"❌ API 請求被 Confluence 拒絕！(狀態碼: {res.status_code})")
+            error_msg.append(f"💡 錯誤診斷提示：")
+            if res.status_code == 401: error_msg.append("   👉 [401 未授權]: 請檢查 GitHub Secrets 的 CONF_USER 與 CONF_PASS。注意：CONF_PASS 必須是 Atlassian API Token，不能是登入密碼！")
+            elif res.status_code == 403: error_msg.append("   👉 [403 權限不足]: 你的帳號沒有權限讀取此頁面，或 API Token 權限不足。")
+            elif res.status_code == 404: error_msg.append(f"   👉 [404 找不到]: 請檢查 CONF_URL ({JIRA_URL}) 是否正確。")
+            error_msg.append(f"📄 伺服器原始回傳內容: {res.text[:300]}")
+            sync_message = "\n".join(error_msg)
+            print(sync_message)
             return
 
         pages = res.json().get('results', [])
-        if not pages: return print(f"❌ 找不到目標頁面 {target_title}，請先確保週報已建立！")
+        if not pages:
+            sync_status = "error"
+            sync_message = f"❌ 找不到目標頁面 {target_title}，請先確保週報已建立！"
+            return print(sync_message)
             
         page_data = pages[0]
         page_id = page_data['id']
@@ -1501,7 +1522,6 @@ def run_sync_logic():
         soup = BeautifulSoup(html_content, 'html.parser')
         
         page_needs_update = False
-        total_logs_written = 0
 
         week_start = selected_dates[0] - timedelta(days=selected_dates[0].weekday())
         days_to_process = [week_start + timedelta(days=i) for i in range(7)]
@@ -1568,7 +1588,6 @@ def run_sync_logic():
             fetched_projects.add(proj_key)
             print(f"  └ 🧠 啟動單向狀態機：掃描專案 [{proj_key}] 看板排序，計算 Story/Epic 繼承到期日...")
             try:
-                # 使用 ORDER BY Rank ASC 來確保絕對符合 Jira 看板的由上往下視覺順序
                 jql = f'project = "{proj_key}" ORDER BY Rank ASC'
                 res = requests.post(f"{JIRA_URL}/rest/api/3/search/jql", json={"jql": jql, "maxResults": 3000, "fields": ["issuetype", "duedate", "summary"]}, auth=ADMIN_AUTH, timeout=15)
                 if res.status_code == 200:
@@ -1587,12 +1606,10 @@ def run_sync_logic():
                         
                         if is_epic:
                             current_epic_due, current_epic_summary, current_epic_key = r_due, r_summary, r_key
-                            # 遇到新 Epic，強制清空 Story 口袋記憶
                             current_story_due, current_story_summary, current_story_key = None, "", ""
                         elif is_story:
                             current_story_due, current_story_summary, current_story_key = r_due, r_summary, r_key
                         else:
-                            # 是 Task 或 Sub-task，看自己有沒有到期日。沒有才繼承！
                             if not r_due:
                                 if current_story_due:
                                     story_due_map[r_key] = {'due': current_story_due, 'summary': current_story_summary, 'key': current_story_key}
@@ -1601,15 +1618,12 @@ def run_sync_logic():
             except Exception as e:
                 print(f"    ❌ 掃描專案 {proj_key} 排序時發生錯誤: {e}")
 
-        # 預先掃描近期有更新的專案 (狀態機會自動過濾重複的專案)
         if SETTINGS.get("inherit_parent_due"):
             for iss in all_issues_pool:
                 ensure_project_rank_mapped(iss.get('fields', {}).get('project', {}).get('key'))
 
         for name, email in ACCOUNT_DICT.items():
             acc_id = get_account_id(email, name)
-            
-            # ✅ 動態取得使用者的背景顏色
             user_bg_color = USER_BG_COLORS.get(name, "#ffffff")
             
             target_mention = None
@@ -1669,14 +1683,13 @@ def run_sync_logic():
                 page_needs_update = True
 
             # ====================================================
-            # ✅ 核心寫入邏輯：直接一次性整週輸出！
+            # ✅ 核心寫入邏輯
             # ====================================================
             date_str_tag = target_date.strftime("[%Y/%m/%d]")
             safe_date_class = target_date.strftime("%Y%m%d")
             
             logs = extract_logs_from_issues(name, email, acc_id, days_to_process, all_issues_pool)
             
-            # 🌟 套用依附父系到期日邏輯 (對 logs)
             if SETTINGS.get("inherit_parent_due"):
                 for log in logs:
                     proj_key = log['key'].split('-')[0]
@@ -1685,11 +1698,9 @@ def run_sync_logic():
                     if not log.get('duedate_dt'):
                         p_info = None
                         is_from_story = False
-                        # 1. 優先檢查 Story (視覺排序)
                         if log['key'] in story_due_map:
                             p_info = story_due_map[log['key']]
                             is_from_story = True
-                        # 2. 次要檢查 Epic (實體父系連結)
                         elif log.get('parent_key') and log['parent_key'] in explicit_parent_due_map:
                             p_info = explicit_parent_due_map[log['parent_key']]
                             
@@ -1702,9 +1713,7 @@ def run_sync_logic():
 
             if SETTINGS.get("style_weekly") and logs:
                 daily_aggregated_logs = enrich_with_weekly_data(logs, name, email, acc_id, days_to_process, all_issues_pool)
-                # 總工時計算 (針對 selected_dates)
                 total_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].date() in [sd.date() for sd in selected_dates])
-                
                 weekend_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].weekday() >= 5 and d['date'].date() in [sd.date() for sd in selected_dates])
             else:
                 daily_aggregated_logs = None
@@ -1714,7 +1723,6 @@ def run_sync_logic():
             updated_keys = {log['key'] for log in logs}
             pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume = fetch_pending_tasks(acc_id, updated_keys, target_date)
             
-            # 🌟 套用依附父系到期日邏輯 (對 pending)
             if SETTINGS.get("inherit_parent_due"):
                 for p_list in [pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume]:
                     for t in p_list:
@@ -1724,11 +1732,9 @@ def run_sync_logic():
                         if not t.get('duedate_dt'):
                             p_info = None
                             is_from_story = False
-                            # 1. 優先檢查 Story (視覺排序)
                             if t['key'] in story_due_map:
                                 p_info = story_due_map[t['key']]
                                 is_from_story = True
-                            # 2. 次要檢查 Epic (實體父系連結)
                             elif t.get('parent_key') and t['parent_key'] in explicit_parent_due_map:
                                 p_info = explicit_parent_due_map[t['parent_key']]
                                 
@@ -1788,17 +1794,44 @@ def run_sync_logic():
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
                 notice_text = "🔇已啟動靜默更新" if SETTINGS.get("minor_edit") else "🔊已發送公開通知"
+                sync_message = f"🎉 同步完成！\n本次共更新了 {total_logs_written} 筆任務紀錄至 Confluence。\n目標頁面：{target_title}"
                 print(f"🎉 大功告成！已成功更新 {total_logs_written} 筆任務紀錄 ({notice_text})！")
-            else: print(f"❌ 儲存至 Confluence 失敗: {update_res.text}")
+            else:
+                sync_status = "error"
+                sync_message = f"❌ 儲存至 Confluence 失敗，請檢查權限或伺服器連線。"
+                print(f"❌ 儲存至 Confluence 失敗: {update_res.text}")
         else:
-            print(f"\n📭 根據你選擇的日期，沒有找到任何需要變動的紀錄。")
+            sync_status = "warning"
+            sync_message = "📭 執行完畢，但根據選擇的日期，沒有找到任何需要變動或新增的紀錄。"
+            print(f"\n{sync_message}")
 
-    except Exception as e: print(f"\n❌ 程式發生意外錯誤: {e}")
+    except Exception as e:
+        sync_status = "error"
+        sync_message = f"❌ 程式發生意外錯誤：{e}"
+        print(f"\n{sync_message}")
+        
     finally:
         elapsed = int(time.time() - start_time)
         mins, secs = divmod(elapsed, 60)
         time_str = f"{mins}m{secs}s" if mins > 0 else f"{secs}s"
         print(f"\n🏁 任務結束。 (總耗時: {time_str})")
+        
+        # ====================================================
+        # 🌟 核心修改：判斷是否由 LINE 觸發，並發送推播回報
+        # ====================================================
+        line_user_id = os.environ.get("LINE_USER_ID", "")
+        line_access_token = os.environ.get("LINE_ACCESS_TOKEN", "")
+        
+        if line_user_id and line_access_token:
+            print(f"📱 準備發送執行結果推播給使用者: {line_user_id}")
+            try:
+                line_bot_api = LineBotApi(line_access_token)
+                
+                final_push_message = f"{sync_message}\n\n⏱️ 執行耗時: {time_str}"
+                line_bot_api.push_message(line_user_id, TextSendMessage(text=final_push_message))
+                print("✅ LINE 推播回報發送成功！")
+            except Exception as e:
+                print(f"❌ LINE 推播回報發送失敗: {e}")
 
 if __name__ == "__main__":
     print("=== Confluence 自動填表機 (GitHub Actions Headless V50.15 全週合併版) ===")
