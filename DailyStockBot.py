@@ -47,12 +47,7 @@ def sync_to_sheets(data_list):
         print(f"⚠️ '法人精選監測' 同步失敗: {e}")
 
 def update_watch_list_sheet(recommended_stocks, name_map):
-    """
-    將推薦標的匯入 'WATCH_LIST' 並檢查所有現有持股名稱
-    Args:
-        recommended_stocks: 今日推薦的股票列表
-        name_map: 股票代號對應名稱的字典 (從 FinMind 獲取)
-    """
+    """將推薦標的匯入 'WATCH_LIST' 並檢查所有現有持股名稱"""
     try:
         client = get_gspread_client()
         if not client: return
@@ -77,7 +72,6 @@ def update_watch_list_sheet(recommended_stocks, name_map):
             
             existing_ids.add(sid)
             
-            # 檢查是否需要更新名稱 (使用傳入的 name_map)
             if sid in name_map:
                 correct_name = name_map[sid]
                 if not current_name or current_name != correct_name:
@@ -87,11 +81,9 @@ def update_watch_list_sheet(recommended_stocks, name_map):
                     except Exception as e:
                         print(f"⚠️ 更新名稱失敗 ({sid}): {e}")
 
-        # 2. 新增推薦股 (如果有)
+        # 2. 新增推薦股
         if recommended_stocks:
             new_rows = []
-            
-            # 強制使用 UTC+8 (台灣時間)
             tw_time = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
             now_str = tw_time.strftime('%Y-%m-%d %H:%M')
 
@@ -99,7 +91,6 @@ def update_watch_list_sheet(recommended_stocks, name_map):
 
             for stock in recommended_stocks:
                 sid = str(stock['id']).strip()
-                # 優先使用 map 中的正確名稱
                 name = name_map.get(sid, stock['name']) 
                 reason = stock['reason']
                 
@@ -109,7 +100,6 @@ def update_watch_list_sheet(recommended_stocks, name_map):
                     existing_ids.add(sid) # 避免同批次重複
 
             if new_rows:
-                # 使用 RAW 模式寫入，確保 A 欄不會變成超連結
                 sheet.append_rows(new_rows, value_input_option='RAW')
                 print(f"✅ 已將 {len(new_rows)} 檔新標的加入 'WATCH_LIST'")
             else:
@@ -178,32 +168,18 @@ def analyze_v14(ticker, name):
         vol_today = df.iloc[-1]['Volume']
         vol_avg = df['Volume'].iloc[-11:-1].mean()
         vol_ratio = vol_today / vol_avg if vol_avg > 0 else 0
-        vol_tag = f"🔥爆量({vol_ratio:.1f}x)" if vol_ratio > 2.0 else f"{vol_ratio:.1f}x"
         
         bias_5 = ((cp - ma5) / ma5) * 100
-        kd_status = "高檔" if k_val > 80 else ("低檔" if k_val < 20 else "穩定")
-        
         status_label = "✅安全"
         if bias_5 > 7 or rsi_val > 75 or k_val > 85:
             status_label = "⚠️過熱"
         
-        status_msg = f"{status_label}(乖離{bias_5:.1f}%|RSI:{rsi_val:.0f}|K:{k_val:.0f})"
-
         pure_id = ticker.split('.')[0]
         fs, ss = get_streak_only(pure_id)
         
-        # --- 基礎報表生成 (只要有法人買且多頭就列入) ---
+        # 基礎報表生成門檻
         if (fs >= 2 or ss >= 1) and cp > ma60 and vol_ratio > 1.1:
             type_tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
-            
-            line_txt = (f"📍{ticker} {name} ({type_tag})\n"
-                        f"法人：外資{fs}d | 投信{ss}d\n"
-                        f"量比：{vol_tag}\n"
-                        f"狀態：{status_msg} [{kd_status}]\n"
-                        f"現價：{cp:.2f}\n"
-                        f"-----------------------------------")
-            
-            # 這裡的日期也建議同步修正為台灣時間
             tw_today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
             
             sheet_data = [
@@ -212,42 +188,26 @@ def analyze_v14(ticker, name):
                 round(rsi_val, 1), round(k_val, 1), cp
             ]
 
-            # --- 進階 AI 雙軌推薦邏輯 ---
+            # 進階雙軌推薦邏輯
             recommendation = None
-            
-            # 策略 A: 🛡️ AI 穩健型
-            is_stable = (
-                (ss >= 2 or fs >= 3) and        
-                (vol_ratio > 1.2) and           
-                (50 <= rsi_val <= 75) and       
-                (k_val <= 80)                   
-            )
-
-            # 策略 B: 🚀 AI 飆股型
-            is_aggressive = (
-                (ss >= 1 or fs >= 2) and        
-                (vol_ratio > 2.5) and           
-                (rsi_val > 60) and              
-                (cp > ma5)                      
-            )
+            is_stable = ((ss >= 2 or fs >= 3) and (vol_ratio > 1.2) and (50 <= rsi_val <= 75) and (k_val <= 80))
+            is_aggressive = ((ss >= 1 or fs >= 2) and (vol_ratio > 2.5) and (rsi_val > 60) and (cp > ma5))
 
             if is_stable:
                 reason = f"🛡️AI穩健: {type_tag} (量{vol_ratio:.1f}x/RSI{rsi_val:.0f})"
                 recommendation = {'id': pure_id, 'name': name, 'reason': reason}
-            
             elif is_aggressive:
                 reason = f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs}投{ss})"
                 recommendation = {'id': pure_id, 'name': name, 'reason': reason}
 
-            return line_txt, sheet_data, recommendation
+            # 注意：這裡的 line_txt 因為不再推播詳細清單，故傳回 None 即可
+            return None, sheet_data, recommendation
 
     except: return None, None, None
     return None, None, None
 
 def main():
     dl = DataLoader()
-    
-    # [修正] 1. 加入 FinMind 連線重試機制，解決 JSONDecodeError
     stock_df = None
     max_retries = 3
     print("📥 正在下載台股清單 (FinMind)...")
@@ -262,25 +222,21 @@ def main():
             print(f"⚠️ FinMind 連線失敗 (第 {attempt+1}/{max_retries} 次): {e}")
             if attempt < max_retries - 1:
                 print("⏳ 等待 5 秒後重試...")
-                time.sleep(5) # 失敗後等待 5 秒
+                time.sleep(5)
             else:
-                print("❌ 無法獲取台股清單，可能是 FinMind 伺服器維護中。程式終止。")
+                print("❌ 無法獲取台股清單。程式終止。")
                 return
 
     if stock_df is None: return
 
-    # [修正] 2. 建立代號對應名稱的字典 (用於更新 Watch List)
     name_map = dict(zip(stock_df['stock_id'], stock_df['stock_name']))
-
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
-    
     targets = stock_df[stock_df['stock_id'].str.len() == 4].head(1000) 
     
-    line_results = []
     sheet_results = []
     watch_list_candidates = []
-
     seen_ids = set()
+    
     print(f"啟動雙軌策略掃描 (1000檔)...")
     
     for _, row in targets.iterrows():
@@ -294,30 +250,37 @@ def main():
             suffix = ".TWO" if int(sid) >= 8000 else ".TW"
             
         t = f"{sid}{suffix}"
-        l_res, s_res, rec_obj = analyze_v14(t, row['stock_name'])
+        _, s_res, rec_obj = analyze_v14(t, row['stock_name'])
         
-        if l_res:
-            line_results.append(l_res)
+        if s_res:
             sheet_results.append(s_res)
-        
         if rec_obj:
             watch_list_candidates.append(rec_obj)
 
         time.sleep(0.4)
 
+    # 1. 同步至法人精選監測 Raw 報表
     if sheet_results:
         sync_to_sheets(sheet_results)
 
-    # [修正] 3. 無條件執行 Watch List 更新 (傳入 name_map 進行全表檢查)
+    # 2. 無條件執行 Watch List 的檢查與推薦股更新
     update_watch_list_sheet(watch_list_candidates, name_map)
 
-    if line_results:
-        # 使用台灣時間顯示標題
-        tw_date = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
-        msg = f"🔍 【{tw_date} 法人精選(1000檔)】\n\n" + "\n".join(line_results)
-        send_line(msg)
-    else:
-        print("今日無符合標的。")
+    # 3. [修改重點] 簡化 LINE 推播：只推播精簡總結與雲端報表連結
+    tw_date = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
+    
+    # 📌 請將此處網址替換為您的實際 Google Sheets 共用連結
+    monitor_sheet_url = "https://docs.google.com/spreadsheets/d/您的法人精選監測報表ID/edit"
+    watch_list_url = "https://docs.google.com/spreadsheets/d/您的WATCH_LIST報表ID/edit"
+
+    msg = (f"🔍 【{tw_date} 法人雙軌策略掃描完成】\n\n"
+           f"今日 1000 檔股票篩選已順利結束！\n"
+           f"📈 共篩選出 {len(sheet_results)} 檔符合法人多頭標的，並已自動過濾更新潛力股至您的雲端觀察名單。\n\n"
+           f"🔗 點擊查看法人精選監測：\n{monitor_sheet_url}\n\n"
+           f"📋 點擊查看最新 WATCH_LIST：\n{watch_list_url}")
+    
+    send_line(msg)
+    print("✅ 簡化版 LINE 策略通知已發送")
 
 if __name__ == "__main__":
     main()
