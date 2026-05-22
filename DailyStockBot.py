@@ -35,6 +35,9 @@ def get_gspread_client():
         print(f"❌ 解析金鑰或連線失敗: {e}")
         return None
 
+# ==========================================
+# 1. 法人精選監測同步 (具備自動擴增與高亮)
+# ==========================================
 def sync_to_sheets(data_list):
     """將結果寫入 '法人精選監測' 報表，具備自動擴增行數與高亮最新資料功能"""
     try:
@@ -44,21 +47,20 @@ def sync_to_sheets(data_list):
         sheet = spreadsheet.get_worksheet(0)
         
         # 1. 偵測空間並自動擴增行數
-        current_rows = sheet.row_count       # 目前總格子行數
-        existing_data_rows = len(sheet.get_all_values())  # 目前已有資料的最後一行
+        current_rows = sheet.row_count       
+        existing_data_rows = len(sheet.get_all_values())  
         needed_rows = existing_data_rows + len(data_list)
         
         if needed_rows >= current_rows:
-            add_rows = len(data_list) + 100  # 多預留 100 行安全空間
+            add_rows = len(data_list) + 100  
             sheet.add_rows(add_rows)
-            print(f"⚡ 偵測到報表容量不足！已自動擴增 {add_rows} 行空間。")
+            print(f"⚡ 偵測到[法人精選監測]容量不足！已自動擴增 {add_rows} 行空間。")
 
-        # 2. 清除整張報表舊資料的顏色 (重置為白色)
-        # 建立大範圍格式重置（假設上限處理到 10000 行，A到K欄）
+        # 2. 清除舊資料的顏色 (重置為白色)
         sheet.format(f"A2:K{max(2000, current_rows)}", {
             "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
         })
-        print("🔄 已清除舊資料的高亮顏色")
+        print("🔄 已清除[法人精選監測]舊資料的高亮顏色")
 
         # 3. 寫入新數據
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
@@ -69,11 +71,7 @@ def sync_to_sheets(data_list):
         end_row = existing_data_rows + len(data_list)
         
         sheet.format(f"A{start_row}:K{end_row}", {
-            "backgroundColor": {
-                "red": 1.0, 
-                "green": 0.98,  # 柔和暖黃色，舒服不刺眼
-                "blue": 0.82
-            }
+            "backgroundColor": {"red": 1.0, "green": 0.98, "blue": 0.82}
         })
         print(f"💛 已將最新的第 {start_row} 到 {end_row} 行標示為高亮黃色！")
         
@@ -82,8 +80,11 @@ def sync_to_sheets(data_list):
         print(f"⚠️ '法人精選監測' 同步與高亮失敗: {e}")
         return None
 
+# ==========================================
+# 2. WATCH_LIST 同步 (✨本次全面升級高亮與擴增版)
+# ==========================================
 def update_watch_list_sheet(recommended_stocks, name_map):
-    """將推薦標的匯入 'WATCH_LIST'、自動檢查容量並更新"""
+    """將推薦標的匯入 'WATCH_LIST'、自動檢查容量、清除舊底色，並高亮今日最新加入的潛力股"""
     try:
         client = get_gspread_client()
         if not client: return None
@@ -119,7 +120,13 @@ def update_watch_list_sheet(recommended_stocks, name_map):
                     except Exception as e:
                         print(f"⚠️ 更新名稱失敗 ({sid}): {e}")
 
-        # 2. 新增推薦股
+        # 2. ✨ 先全面清除 WATCH_LIST 中舊資料的底色 (重置為白色，範圍涵蓋 A 到 G 欄)
+        sheet.format(f"A2:G{max(2000, current_rows)}", {
+            "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+        })
+        print("🔄 已清除[WATCH_LIST]舊資料的高亮顏色")
+
+        # 3. 新增推薦股
         if recommended_stocks:
             new_rows = []
             tw_time = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
@@ -133,17 +140,29 @@ def update_watch_list_sheet(recommended_stocks, name_map):
                 reason = stock['reason']
                 
                 if sid not in existing_ids:
+                    # 寫入格式: A:代號, B:名稱, C:庫存, D:成本, E:股數, F:理由, G:時間
                     new_rows.append([sid, name, "", "", "", reason, now_str])
                     existing_ids.add(sid)
 
             if new_rows:
-                # 檢查容量是否足夠
+                # ✨ 自動偵測擴增行數邏輯
                 if existing_data_rows + len(new_rows) >= current_rows:
-                    sheet.add_rows(len(new_rows) + 50)
-                    print("⚡ WATCH_LIST 容量不足，已自動擴增空間。")
+                    add_rows = len(new_rows) + 50
+                    sheet.add_rows(add_rows)
+                    print(f"⚡ 偵測到[WATCH_LIST]容量不足！已自動擴增 {add_rows} 行空間。")
                     
+                # 執行寫入
                 sheet.append_rows(new_rows, value_input_option='RAW')
                 print(f"✅ 已將 {len(new_rows)} 檔新標的加入 'WATCH_LIST'")
+
+                # ✨ 4. 將今天全新寫入的這幾行精準高亮為柔和暖黃色 (A 到 G 欄)
+                start_row = existing_data_rows + 1
+                end_row = existing_data_rows + len(new_rows)
+                
+                sheet.format(f"A{start_row}:G{end_row}", {
+                    "backgroundColor": {"red": 1.0, "green": 0.98, "blue": 0.82}
+                })
+                print(f"💛 已將最新的第 {start_row} 到 {end_row} 行標示為高亮黃色！")
             else:
                 print("ℹ️ 推薦標的已存在於 WATCH_LIST，無新增項目。")
         else:
@@ -152,11 +171,13 @@ def update_watch_list_sheet(recommended_stocks, name_map):
         return spreadsheet.url  
 
     except Exception as e:
-        print(f"⚠️ 更新 WATCH_LIST 失敗: {e}")
+        print(f"⚠️ 更新 WATCH_LIST 與高亮失敗: {e}")
         return None
 
+# ==========================================
+# 3. 指標運算與核心掃描邏輯 (維持不變)
+# ==========================================
 def get_streak_only(sid_clean):
-    """獲取法人連買天數"""
     try:
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=20)).strftime('%Y-%m-%d')
@@ -174,7 +195,6 @@ def get_streak_only(sid_clean):
     except: return 0, 0
 
 def calculate_indicators(df):
-    """計算 RSI 與 KD 指標"""
     close = df['Close']
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
@@ -191,7 +211,6 @@ def calculate_indicators(df):
     return rsi, k, d
 
 def analyze_v14(ticker, name):
-    """核心篩選邏輯：雙軌制 (穩健型 vs 飆股型)"""
     try:
         s = yf.Ticker(ticker)
         i = s.info
@@ -248,6 +267,9 @@ def analyze_v14(ticker, name):
     except: return None, None, None
     return None, None, None
 
+# ==========================================
+# 4. 主程式執行區塊 (已整合雙表動能)
+# ==========================================
 def main():
     dl = DataLoader()
     stock_df = None
@@ -301,15 +323,18 @@ def main():
 
         time.sleep(0.4)
 
+    # 1. 執行 [法人精選監測] 寫入、自動擴展、舊資料去色、新資料高亮
     monitor_sheet_url = "無法獲取連結"
     if sheet_results:
         real_url = sync_to_sheets(sheet_results)
         if real_url: monitor_sheet_url = real_url
 
+    # 2. 執行 [WATCH_LIST] 寫入、自動擴展、舊資料去色、✨新推薦股精準黃色高亮
     watch_list_url = "無法獲取連結"
     real_watch_url = update_watch_list_sheet(watch_list_candidates, name_map)
     if real_watch_url: watch_list_url = real_watch_url
 
+    # 3. 發送 LINE 精簡版通知
     tw_date = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
 
     msg = (f"🔍 【{tw_date} 法人雙軌策略掃描完成】\n\n"
@@ -319,7 +344,7 @@ def main():
            f"📋 點擊查看最新 WATCH_LIST：\n{watch_list_url}")
     
     send_line(msg)
-    print("✅ 自動偵測擴增 + 舊資料去色 + 最新資料高亮黃色完成！LINE 通知已發送！")
+    print("✅ 雙報表自動防爆+自動去色+最新數據高亮升級全部大獲成功！")
 
 if __name__ == "__main__":
     main()
