@@ -36,26 +36,30 @@ def get_gspread_client():
         return None
 
 def sync_to_sheets(data_list):
-    """將結果寫入 '法人精選監測' Google Sheets"""
+    """將結果寫入 '法人精選監測' Google Sheets 並回傳該報表的實際真實網址"""
     try:
         client = get_gspread_client()
-        if not client: return 
-        sheet = client.open("法人精選監測").get_worksheet(0)
+        if not client: return None
+        spreadsheet = client.open("法人精選監測")
+        sheet = spreadsheet.get_worksheet(0)
         sheet.append_rows(data_list)
         print(f"✅ 成功同步 {len(data_list)} 筆數據至 '法人精選監測'")
+        return spreadsheet.url  # 🚀 自動動態獲取真實網址
     except Exception as e:
         print(f"⚠️ '法人精選監測' 同步失敗: {e}")
+        return None
 
 def update_watch_list_sheet(recommended_stocks, name_map):
-    """將推薦標的匯入 'WATCH_LIST' 並檢查所有現有持股名稱"""
+    """將推薦標的匯入 'WATCH_LIST'、檢查所有現有持股名稱，並回傳真實網址"""
     try:
         client = get_gspread_client()
-        if not client: return
-
+        if not client: return None
+        
+        spreadsheet = client.open("WATCH_LIST")
         try:
-            sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
+            sheet = spreadsheet.worksheet("WATCH_LIST")
         except:
-            sheet = client.open("WATCH_LIST").get_worksheet(0)
+            sheet = spreadsheet.get_worksheet(0)
 
         # 1. 讀取現有資料並檢查名稱
         all_values = sheet.get_all_values()
@@ -64,12 +68,11 @@ def update_watch_list_sheet(recommended_stocks, name_map):
         print(f"🔍 正在檢查 {len(all_values)-1} 筆現有庫存名稱...")
         
         for idx, row in enumerate(all_values):
-            if idx == 0: continue # 跳過標題
+            if idx == 0: continue 
             if not row: continue
             
             sid = str(row[0]).strip()
             current_name = str(row[1]).strip() if len(row) > 1 else ""
-            
             existing_ids.add(sid)
             
             if sid in name_map:
@@ -95,9 +98,8 @@ def update_watch_list_sheet(recommended_stocks, name_map):
                 reason = stock['reason']
                 
                 if sid not in existing_ids:
-                    # 寫入格式: A:代號, B:名稱, C-E:空, F:理由, G:時間
                     new_rows.append([sid, name, "", "", "", reason, now_str])
-                    existing_ids.add(sid) # 避免同批次重複
+                    existing_ids.add(sid)
 
             if new_rows:
                 sheet.append_rows(new_rows, value_input_option='RAW')
@@ -106,9 +108,12 @@ def update_watch_list_sheet(recommended_stocks, name_map):
                 print("ℹ️ 推薦標的已存在於 WATCH_LIST，無新增項目。")
         else:
             print("ℹ️ 今日無新推薦標的。")
+            
+        return spreadsheet.url  # 🚀 自動動態獲取真實網址
 
     except Exception as e:
         print(f"⚠️ 更新 WATCH_LIST 失敗: {e}")
+        return None
 
 def get_streak_only(sid_clean):
     """獲取法人連買天數"""
@@ -177,7 +182,6 @@ def analyze_v14(ticker, name):
         pure_id = ticker.split('.')[0]
         fs, ss = get_streak_only(pure_id)
         
-        # 基礎報表生成門檻
         if (fs >= 2 or ss >= 1) and cp > ma60 and vol_ratio > 1.1:
             type_tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
             tw_today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
@@ -188,7 +192,6 @@ def analyze_v14(ticker, name):
                 round(rsi_val, 1), round(k_val, 1), cp
             ]
 
-            # 進階雙軌推薦邏輯
             recommendation = None
             is_stable = ((ss >= 2 or fs >= 3) and (vol_ratio > 1.2) and (50 <= rsi_val <= 75) and (k_val <= 80))
             is_aggressive = ((ss >= 1 or fs >= 2) and (vol_ratio > 2.5) and (rsi_val > 60) and (cp > ma5))
@@ -200,7 +203,6 @@ def analyze_v14(ticker, name):
                 reason = f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs}投{ss})"
                 recommendation = {'id': pure_id, 'name': name, 'reason': reason}
 
-            # 注意：這裡的 line_txt 因為不再推播詳細清單，故傳回 None 即可
             return None, sheet_data, recommendation
 
     except: return None, None, None
@@ -259,19 +261,18 @@ def main():
 
         time.sleep(0.4)
 
-    # 1. 同步至法人精選監測 Raw 報表
+    # 🚀 重點升級：讓函式直接動態獲取雲端試算表的真實 URL
+    monitor_sheet_url = "無法獲取連結"
     if sheet_results:
-        sync_to_sheets(sheet_results)
+        real_url = sync_to_sheets(sheet_results)
+        if real_url: monitor_sheet_url = real_url
 
-    # 2. 無條件執行 Watch List 的檢查與推薦股更新
-    update_watch_list_sheet(watch_list_candidates, name_map)
+    watch_list_url = "無法獲取連結"
+    real_watch_url = update_watch_list_sheet(watch_list_candidates, name_map)
+    if real_watch_url: watch_list_url = real_watch_url
 
-    # 3. [修改重點] 簡化 LINE 推播：只推播精簡總結與雲端報表連結
+    # 3. 簡化 LINE 推播 (現在帶有 100% 正確的真實連結)
     tw_date = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
-    
-    # 📌 請將此處網址替換為您的實際 Google Sheets 共用連結
-    monitor_sheet_url = "https://docs.google.com/spreadsheets/d/您的法人精選監測報表ID/edit"
-    watch_list_url = "https://docs.google.com/spreadsheets/d/您的WATCH_LIST報表ID/edit"
 
     msg = (f"🔍 【{tw_date} 法人雙軌策略掃描完成】\n\n"
            f"今日 1000 檔股票篩選已順利結束！\n"
@@ -280,7 +281,7 @@ def main():
            f"📋 點擊查看最新 WATCH_LIST：\n{watch_list_url}")
     
     send_line(msg)
-    print("✅ 簡化版 LINE 策略通知已發送")
+    print("✅ 完美動態連結版 LINE 策略通知已發送！")
 
 if __name__ == "__main__":
     main()
