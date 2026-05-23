@@ -309,7 +309,35 @@ def generate_and_save_summary(data_list, report_time_str):
     if not HAS_GENAI or not AI_CLIENT: return "本次報告未包含 AI 總結"
     inventory_txt = "".join([f"- {r['name']}({r['id']}) | 現價:{r['p']}\n" for r in data_list if r['is_hold']])
     watchlist_txt = "".join([f"- {r['name']}({r['id']}) | 現價:{r['p']}\n" for r in data_list if not r['is_hold']])
-    prompt = f"請擔任台股投資總監，根據以下持股與觀察名單，撰寫專業的五章節戰略日報。庫存：\n{inventory_txt}\n觀察：\n{watchlist_txt}"
+    # 請將 generate_and_save_summary 內部的 prompt 替換為這段：
+    prompt = f"""
+    角色：你是頂尖、冷酷且極度重視風險管理的台股短線主力量化操盤手。
+    任務：根據今日傳入的自選股與庫存數據，撰寫一份極度精準、不說廢話、一針見血的【戰略總結報告】。
+    
+    【重要數據參考 (內含今日各均線價格)】
+    {inventory_txt}
+    {watchlist_txt}
+    
+    【🔥 今日黃金進場公式篩選結果】
+    {golden_candidates}
+    
+    【🚀 今日漲停潛力股獵殺名單】
+    {limit_up_candidates_txt}
+    
+    【嚴格撰寫指令 —— 違反則扣薪】：
+    1. 拋棄所有空泛的財經新聞廢話（例如不需要寫美股震盪、通膨、美聯儲等大盤新聞）。
+    2. 第一章【庫存持股總體檢】請直接對比個股的現價與 MA 均線。只要建議「防守、減碼、停損」，括號內必須寫出具體的「均線名稱與價格數字」，例如：「台郡建議防守MA5(57.28)，跌破則考慮減碼」。
+    3. 必須將個股分類為：[較弱勢個股(跌破均線/庫存虧損)]、[持平個股]、[相對強勢個股]。
+    4. 第二章【觀察名單潛力股】從名單中挑選 3 檔，參考傳入的 MA5 或 MA20 數值，給出具體的「回測進場價金額」與「波段防守價金額」。
+    5. 第四章【黃金進場公式】與第五章【🎯 漲停潛力股獵殺】必須像之前一樣列出完整的個股清單、潛力分數，並結合你內建的半導體/電子產業知識庫，補上其熱門題材（如 CoWoS、MLCC、矽智財等）與短期爆發力評估。
+
+    請嚴格依照以下格式與章節輸出（繁體中文）：
+    ### 1. 庫存持股總體檢
+    ### 2. 觀察名單潛力股
+    ### 3. 總結操作建議
+    ### 4. 黃金進場公式 (每日必檢)
+    ### 5. 🎯 漲停潛力股獵殺 (AI預測)
+    """
 
     for model_name in MODEL_CANDIDATES:
         try:
