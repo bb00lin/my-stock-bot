@@ -19,14 +19,44 @@ def send_line(msg):
     try: requests.post(url, headers=headers, json=payload)
     except: pass
 
+# ==========================================
+# ✨ 本次新增：LINE 官方帳號免費發送額度查詢
+# ==========================================
+def get_line_quota_report():
+    """透過 LINE API 自動查詢本月已發送則數與剩餘免費額度"""
+    if not LINE_ACCESS_TOKEN:
+        return "⚠️ 未設定 LINE Token，無法查詢額度"
+    headers = {"Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+    try:
+        quota_url = "https://api.line.me/v2/bot/message/quota"
+        quota_res = requests.get(quota_url, headers=headers).json()
+        value_type = quota_res.get("type", "none")
+        if value_type == "none":
+            return "♾️ 目前 LINE 方案為無限制則數"
+        total_limit = quota_res.get("value", 0)
+        
+        consumption_url = "https://api.line.me/v2/bot/message/quota/consumption"
+        consumption_res = requests.get(consumption_url, headers=headers).json()
+        total_consumed = consumption_res.get("totalUsage", 0)
+        
+        remaining_quota = total_limit - total_consumed
+        alert_tag = "🟢 安全" if remaining_quota > 50 else ("🟡 偏低" if remaining_quota > 15 else "🚨 嚴重不足")
+        
+        return (
+            f"📊 ── LINE 本月額度診斷 ──\n"
+            f"🔹 當月免費總量：{total_limit} 則\n"
+            f"🔹 本月已發送量：{total_consumed} 則\n"
+            f"🔹 目前剩餘額度：{remaining_quota} 則 [{alert_tag}]"
+        )
+    except:
+        return "⚠️ LINE 額度查詢失敗"
+
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     json_key_str = os.environ.get('GOOGLE_SHEETS_JSON')
-    
     if not json_key_str:
         print("❌ 錯誤：找不到 GOOGLE_SHEETS_JSON 環境變數！")
         return None
-
     try:
         creds_dict = json.loads(json_key_str)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -46,7 +76,6 @@ def sync_to_sheets(data_list):
         spreadsheet = client.open("法人精選監測")
         sheet = spreadsheet.get_worksheet(0)
         
-        # 1. 偵測空間並自動擴增行數
         current_rows = sheet.row_count       
         existing_data_rows = len(sheet.get_all_values())  
         needed_rows = existing_data_rows + len(data_list)
@@ -56,120 +85,97 @@ def sync_to_sheets(data_list):
             sheet.add_rows(add_rows)
             print(f"⚡ 偵測到[法人精選監測]容量不足！已自動擴增 {add_rows} 行空間。")
 
-        # 2. 清除舊資料的顏色 (重置為白色)
+        # 清除舊資料的顏色 (重置為白色)
         sheet.format(f"A2:K{max(2000, current_rows)}", {
             "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
         })
         print("🔄 已清除[法人精選監測]舊資料的高亮顏色")
 
-        # 3. 寫入新數據
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆數據至 '法人精選監測'")
 
-        # 4. 將剛剛寫入的最後這幾行標示為黃色
+        # 高亮最新資料
         start_row = existing_data_rows + 1
         end_row = existing_data_rows + len(data_list)
-        
         sheet.format(f"A{start_row}:K{end_row}", {
             "backgroundColor": {"red": 1.0, "green": 0.98, "blue": 0.82}
         })
         print(f"💛 已將最新的第 {start_row} 到 {end_row} 行標示為高亮黃色！")
-        
         return spreadsheet.url  
     except Exception as e:
         print(f"⚠️ '法人精選監測' 同步與高亮失敗: {e}")
         return None
 
 # ==========================================
-# 2. WATCH_LIST 同步 (✨本次全面升級高亮與擴增版)
+# 2. WATCH_LIST 同步 (具備自動擴增與高亮)
 # ==========================================
 def update_watch_list_sheet(recommended_stocks, name_map):
     """將推薦標的匯入 'WATCH_LIST'、自動檢查容量、清除舊底色，並高亮今日最新加入的潛力股"""
     try:
         client = get_gspread_client()
         if not client: return None
-        
         spreadsheet = client.open("WATCH_LIST")
-        try:
-            sheet = spreadsheet.worksheet("WATCH_LIST")
-        except:
-            sheet = spreadsheet.get_worksheet(0)
+        try: sheet = spreadsheet.worksheet("WATCH_LIST")
+        except: sheet = spreadsheet.get_worksheet(0)
 
-        # 1. 讀取現有資料並檢查名稱
         all_values = sheet.get_all_values()
         existing_ids = set()
         existing_data_rows = len(all_values)
         current_rows = sheet.row_count
         
         print(f"🔍 正在檢查 {existing_data_rows-1} 筆現有庫存名稱...")
-        
         for idx, row in enumerate(all_values):
-            if idx == 0: continue 
-            if not row: continue
-            
+            if idx == 0 or not row: continue 
             sid = str(row[0]).strip()
             current_name = str(row[1]).strip() if len(row) > 1 else ""
             existing_ids.add(sid)
-            
             if sid in name_map:
                 correct_name = name_map[sid]
                 if not current_name or current_name != correct_name:
                     try:
                         sheet.update_cell(idx + 1, 2, correct_name)
                         print(f"🔄 更新股票名稱 ({sid}): '{current_name}' -> '{correct_name}'")
-                    except Exception as e:
-                        print(f"⚠️ 更新名稱失敗 ({sid}): {e}")
+                    except Exception as e: print(f"⚠️ 更新名稱失敗 ({sid}): {e}")
 
-        # 2. ✨ 先全面清除 WATCH_LIST 中舊資料的底色 (重置為白色，範圍涵蓋 A 到 G 欄)
+        # 全面清除 WATCH_LIST 中舊資料的底色 (A 到 G 欄)
         sheet.format(f"A2:G{max(2000, current_rows)}", {
             "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
         })
         print("🔄 已清除[WATCH_LIST]舊資料的高亮顏色")
 
-        # 3. 新增推薦股
         if recommended_stocks:
             new_rows = []
             tw_time = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
             now_str = tw_time.strftime('%Y-%m-%d %H:%M')
-
             print(f"📋 準備將 {len(recommended_stocks)} 檔潛力股匯入 WATCH_LIST...")
 
             for stock in recommended_stocks:
                 sid = str(stock['id']).strip()
                 name = name_map.get(sid, stock['name']) 
                 reason = stock['reason']
-                
                 if sid not in existing_ids:
-                    # 寫入格式: A:代號, B:名稱, C:庫存, D:成本, E:股數, F:理由, G:時間
                     new_rows.append([sid, name, "", "", "", reason, now_str])
                     existing_ids.add(sid)
 
             if new_rows:
-                # ✨ 自動偵測擴增行數邏輯
                 if existing_data_rows + len(new_rows) >= current_rows:
                     add_rows = len(new_rows) + 50
                     sheet.add_rows(add_rows)
                     print(f"⚡ 偵測到[WATCH_LIST]容量不足！已自動擴增 {add_rows} 行空間。")
                     
-                # 執行寫入
                 sheet.append_rows(new_rows, value_input_option='RAW')
                 print(f"✅ 已將 {len(new_rows)} 檔新標的加入 'WATCH_LIST'")
 
-                # ✨ 4. 將今天全新寫入的這幾行精準高亮為柔和暖黃色 (A 到 G 欄)
+                # 將今天全新寫入的這幾行精準高亮 (A 到 G 欄)
                 start_row = existing_data_rows + 1
                 end_row = existing_data_rows + len(new_rows)
-                
                 sheet.format(f"A{start_row}:G{end_row}", {
                     "backgroundColor": {"red": 1.0, "green": 0.98, "blue": 0.82}
                 })
                 print(f"💛 已將最新的第 {start_row} 到 {end_row} 行標示為高亮黃色！")
-            else:
-                print("ℹ️ 推薦標的已存在於 WATCH_LIST，無新增項目。")
-        else:
-            print("ℹ️ 今日無新推薦標的。")
-            
+            else: print("ℹ️ 推薦標的已存在於 WATCH_LIST，無新增項目。")
+        else: print("ℹ️ 今日無新推薦標的。")
         return spreadsheet.url  
-
     except Exception as e:
         print(f"⚠️ 更新 WATCH_LIST 與高亮失敗: {e}")
         return None
@@ -183,7 +189,6 @@ def get_streak_only(sid_clean):
         start = (datetime.date.today() - datetime.timedelta(days=20)).strftime('%Y-%m-%d')
         df = dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start)
         if df is None or df.empty: return 0, 0
-        
         def count_s(name):
             d = df[df['name'] == name].sort_values('date', ascending=False)
             c = 0
@@ -198,16 +203,13 @@ def calculate_indicators(df):
     close = df['Close']
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
-    
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rsi = 100 - (100 / (1 + (gain / loss)))
-    
     rsv = (close - low_min) / (high_max - low_min) * 100
     k = rsv.ewm(com=2).mean() 
     d = k.ewm(com=2).mean()
-    
     return rsi, k, d
 
 def analyze_v14(ticker, name):
@@ -235,8 +237,7 @@ def analyze_v14(ticker, name):
         
         bias_5 = ((cp - ma5) / ma5) * 100
         status_label = "✅安全"
-        if bias_5 > 7 or rsi_val > 75 or k_val > 85:
-            status_label = "⚠️過熱"
+        if bias_5 > 7 or rsi_val > 75 or k_val > 85: status_label = "⚠️過熱"
         
         pure_id = ticker.split('.')[0]
         fs, ss = get_streak_only(pure_id)
@@ -244,12 +245,7 @@ def analyze_v14(ticker, name):
         if (fs >= 2 or ss >= 1) and cp > ma60 and vol_ratio > 1.1:
             type_tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
             tw_today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
-            
-            sheet_data = [
-                tw_today, pure_id, name, type_tag, 
-                fs, ss, round(vol_ratio, 2), status_label, 
-                round(rsi_val, 1), round(k_val, 1), cp
-            ]
+            sheet_data = [tw_today, pure_id, name, type_tag, fs, ss, round(vol_ratio, 2), status_label, round(rsi_val, 1), round(k_val, 1), cp]
 
             recommendation = None
             is_stable = ((ss >= 2 or fs >= 3) and (vol_ratio > 1.2) and (50 <= rsi_val <= 75) and (k_val <= 80))
@@ -261,14 +257,12 @@ def analyze_v14(ticker, name):
             elif is_aggressive:
                 reason = f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs}投{ss})"
                 recommendation = {'id': pure_id, 'name': name, 'reason': reason}
-
             return None, sheet_data, recommendation
-
     except: return None, None, None
     return None, None, None
 
 # ==========================================
-# 4. 主程式執行區塊 (已整合雙表動能)
+# 4. 主程式執行區塊 (全面融合 LINE 額度動態回報)
 # ==========================================
 def main():
     dl = DataLoader()
@@ -297,54 +291,45 @@ def main():
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
     targets = stock_df[stock_df['stock_id'].str.len() == 4].head(1000) 
     
-    sheet_results = []
-    watch_list_candidates = []
-    seen_ids = set()
-    
+    sheet_results, watch_list_candidates, seen_ids = [], [], set()
     print(f"啟動雙軌策略掃描 (1000檔)...")
     
     for _, row in targets.iterrows():
         sid = row['stock_id']
         if sid in seen_ids: continue
         seen_ids.add(sid)
-        
-        if m_col and m_col in row:
-            suffix = ".TWO" if '上櫃' in str(row[m_col]) or 'OTC' in str(row[m_col]) else ".TW"
-        else:
-            suffix = ".TWO" if int(sid) >= 8000 else ".TW"
+        suffix = ".TWO" if (m_col and m_col in row and ('上櫃' in str(row[m_col]) or 'OTC' in str(row[m_col]))) else (".TWO" if int(sid) >= 8000 else ".TW")
             
         t = f"{sid}{suffix}"
         _, s_res, rec_obj = analyze_v14(t, row['stock_name'])
-        
-        if s_res:
-            sheet_results.append(s_res)
-        if rec_obj:
-            watch_list_candidates.append(rec_obj)
-
+        if s_res: sheet_results.append(s_res)
+        if rec_obj: watch_list_candidates.append(rec_obj)
         time.sleep(0.4)
 
-    # 1. 執行 [法人精選監測] 寫入、自動擴展、舊資料去色、新資料高亮
     monitor_sheet_url = "無法獲取連結"
     if sheet_results:
         real_url = sync_to_sheets(sheet_results)
         if real_url: monitor_sheet_url = real_url
 
-    # 2. 執行 [WATCH_LIST] 寫入、自動擴展、舊資料去色、✨新推薦股精準黃色高亮
     watch_list_url = "無法獲取連結"
     real_watch_url = update_watch_list_sheet(watch_list_candidates, name_map)
     if real_watch_url: watch_list_url = real_watch_url
 
-    # 3. 發送 LINE 精簡版通知
+    # 🚀 動態撈取當前 LINE BOT 免費額度狀態
+    line_quota_report = get_line_quota_report()
+
+    # 3. 簡化 LINE 推播 (完美結合：自動連結 + 本月剩餘額度)
     tw_date = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
 
     msg = (f"🔍 【{tw_date} 法人雙軌策略掃描完成】\n\n"
            f"今日 1000 檔股票篩選已順利結束！\n"
            f"📈 共篩選出 {len(sheet_results)} 檔符合法人多頭標的，並已自動過濾更新潛力股至您的雲端觀察名單。\n\n"
            f"🔗 點擊查看法人精選監測：\n{monitor_sheet_url}\n\n"
-           f"📋 點擊查看最新 WATCH_LIST：\n{watch_list_url}")
+           f"📋 點擊查看最新 WATCH_LIST：\n{watch_list_url}\n\n"
+           f"{line_quota_report}")  # ✨ 自動貼上額度診斷報告
     
     send_line(msg)
-    print("✅ 雙報表自動防爆+自動去色+最新數據高亮升級全部大獲成功！")
+    print("✅ 雙報表自動化控制 + LINE 額度回報版推播成功！")
 
 if __name__ == "__main__":
     main()
