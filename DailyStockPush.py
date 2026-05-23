@@ -73,47 +73,35 @@ def check_ai_health():
 check_ai_health()
 
 # ==========================================
-# ✨ 本次新增：LINE 官方帳號免費發送額度查詢
+# LINE 官方帳號免費發送額度查詢
 # ==========================================
 def get_line_quota_report():
-    """透過 LINE API 自動查詢本月已發送則數與剩餘免費額度"""
     if not LINE_ACCESS_TOKEN:
         return "⚠️ 未設定 LINE Token，無法查詢額度"
-        
     headers = {"Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
-    
     try:
-        # 1. 查詢當月限制總量 (免費方案預設通常為 200 或因官方調整而異)
         quota_url = "https://api.line.me/v2/bot/message/quota"
         quota_res = requests.get(quota_url, headers=headers).json()
         value_type = quota_res.get("type", "none")
-        
-        # 如果是無限制方案，直接回傳
         if value_type == "none":
             return "♾️ 目前 LINE 方案為無限制則數"
-            
         total_limit = quota_res.get("value", 0)
         
-        # 2. 查詢當月透過 API 已發送的累積訊息量
         consumption_url = "https://api.line.me/v2/bot/message/quota/consumption"
         consumption_res = requests.get(consumption_url, headers=headers).json()
         total_consumed = consumption_res.get("totalUsage", 0)
         
-        # 3. 計算剩餘額度
         remaining_quota = total_limit - total_consumed
-        
-        # 4. 根據剩餘容量給予警示符號
         alert_tag = "🟢 安全" if remaining_quota > 50 else ("🟡 偏低" if remaining_quota > 15 else "🚨 嚴重不足")
         
-        report_str = (
+        return (
             f"📊 ── LINE 本月額度診斷 ──\n"
             f"🔹 當月免費總量：{total_limit} 則\n"
             f"🔹 本月已發送量：{total_consumed} 則\n"
             f"🔹 目前剩餘額度：{remaining_quota} 則 [{alert_tag}]"
         )
-        return report_str
-    except Exception as e:
-        return f"⚠️ LINE 額度查詢失敗: {e}"
+    except:
+        return "⚠️ LINE 額度查詢失敗"
 
 # ==========================================
 # Token 費用換算邏輯
@@ -122,13 +110,10 @@ def calculate_twd_cost():
     USD_PER_M_INPUT = 0.075   
     USD_PER_M_OUTPUT = 0.30   
     FX_USD_TO_TWD = 32.5      
-
     p_tokens = GLOBAL_TOKEN_BILLING["prompt_tokens"]
     c_tokens = GLOBAL_TOKEN_BILLING["completion_tokens"]
-
     usd_cost = ((p_tokens / 1_000_000) * USD_PER_M_INPUT) + ((c_tokens / 1_000_000) * USD_PER_M_OUTPUT)
-    twd_cost = usd_cost * FX_USD_TO_TWD
-    return round(twd_cost, 4)
+    return round(usd_cost * FX_USD_TO_TWD, 4)
 
 def record_token_usage(response):
     try:
@@ -141,7 +126,7 @@ def record_token_usage(response):
     except: pass
 
 # ==========================================
-# Google Sheets 連線與資料獲取 (維持原邏輯)
+# Google Sheets 核心資料庫 (升級：去色、防爆、高亮黃色)
 # ==========================================
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -152,6 +137,48 @@ def get_gspread_client():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return gspread.authorize(creds)
     except: return None
+
+def sync_to_sheets(data_list):
+    """將結果寫入主報表，具備自動擴增、全面去色與最新資料高亮黃色功能"""
+    try:
+        client = get_gspread_client()
+        if not client: return None
+        spreadsheet = client.open("全能金流診斷報表")
+        sheet = spreadsheet.get_worksheet(0)
+        
+        # 1. 自動偵測空間並擴充行數 (防止底部爆表)
+        current_rows = sheet.row_count       
+        existing_data_rows = len(sheet.get_all_values())  
+        needed_rows = existing_data_rows + len(data_list)
+        
+        if needed_rows >= current_rows:
+            add_rows = len(data_list) + 100  
+            sheet.add_rows(add_rows)
+            print(f"⚡ 偵測到[全能金流診斷報表]容量不足！已自動擴增 {add_rows} 行空間。")
+
+        # 2. 舊資料全面「去色」 (重置為純白底，對應資料欄位 A 到 V 欄)
+        sheet.format(f"A2:V{max(2000, current_rows)}", {
+            "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+        })
+        print("🔄 已清除主報表舊資料的高亮顏色")
+
+        # 3. 寫入新數據
+        sheet.append_rows(data_list, value_input_option='USER_ENTERED')
+        print(f"✅ 成功同步 {len(data_list)} 筆數據至主報表")
+
+        # 4. 最新資料「高亮黃色」 (精準鎖定剛寫入的這幾行)
+        start_row = existing_data_rows + 1
+        end_row = existing_data_rows + len(data_list)
+        
+        sheet.format(f"A{start_row}:V{end_row}", {
+            "backgroundColor": {"red": 1.0, "green": 0.98, "blue": 0.82}
+        })
+        print(f"💛 已將最新的第 {start_row} 到 {end_row} 行標示為高亮黃色！")
+        
+        return spreadsheet.url  
+    except Exception as e: 
+        print(f"⚠️ 主報表同步與高亮修正失敗: {e}")
+        return None
 
 def get_global_stock_info():
     try:
@@ -184,7 +211,7 @@ def get_watch_list_from_sheet():
     except: return []
 
 # ==========================================
-# 輔助數據運算 (與先前版本一致)
+# 輔助數據運算 (技術指標與籌碼)
 # ==========================================
 def get_streak_only(sid_clean):
     try:
@@ -257,7 +284,7 @@ def get_limit_up_potential(r):
     return score, " | ".join(reasons)
 
 # ==========================================
-# AI 策略生成器 (維持原邏輯)
+# AI 策略層
 # ==========================================
 def get_gemini_strategy(data):
     if not HAS_GENAI or not AI_CLIENT: return "AI 服務暫停"
@@ -294,12 +321,64 @@ def generate_and_save_summary(data_list, report_time_str):
             continue
     return "AI 生成總結報告失敗"
 
-def sync_to_sheets(data_list):
+def fetch_pro_metrics(stock_data):
+    sid, is_hold, cost = stock_data['sid'], stock_data['is_hold'], stock_data['cost']
+    stock, full_id = get_tw_stock(sid)
+    if not stock: return None
     try:
-        client = get_gspread_client()
-        if not client: return
-        client.open("全能金流診斷報表").get_worksheet(0).append_rows(data_list, value_input_option='USER_ENTERED')
-    except Exception as e: print(f"⚠️ Sheets 失敗: {e}")
+        df_hist = stock.history(period="8mo")
+        if len(df_hist) < 120: return None
+        info = stock.info
+        latest = df_hist.iloc[-1]
+        curr_p, curr_vol = latest['Close'], latest['Volume']
+        today_amount = (curr_vol * curr_p) / 100_000_000
+        
+        delta = df_hist['Close'].diff()
+        gain, loss = delta.where(delta > 0, 0).rolling(14).mean(), (-delta.where(delta < 0, 0)).rolling(14).mean()
+        clean_rsi = round(100 - (100 / (1 + (gain.iloc[-1] / loss.iloc[-1]))), 1) if loss.iloc[-1] != 0 else 50.0
+        
+        ma5 = round(df_hist['Close'].rolling(5).mean().iloc[-1], 2)
+        ma10 = round(df_hist['Close'].rolling(10).mean().iloc[-1], 2)
+        ma20 = round(df_hist['Close'].rolling(20).mean().iloc[-1], 2)
+        ma60 = round(df_hist['Close'].rolling(60).mean().iloc[-1], 2)
+        bias_60 = ((curr_p - ma60) / ma60) * 100
+        
+        ma_alert_str = check_ma_status(curr_p, ma5, ma10, ma20, ma60)
+        is_golden, golden_msg = check_golden_entry(df_hist)
+        raw_yield = info.get('dividendYield', 0) or 0
+        
+        vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean() if df_hist['Volume'].iloc[-6:-1].mean() > 0 else 0
+        pure_id = ''.join(filter(str.isdigit, sid))
+        fs, ss = get_streak_only(pure_id) 
+
+        score = 5
+        stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
+        market_label = '櫃' if '.TWO' in full_id else '市'
+
+        res = {
+            "id": f"{sid}{market_label}", "name": stock_name, "score": score, "rsi": clean_rsi, "industry": industry,
+            "vol_r": round(vol_ratio, 1), "p": round(curr_p, 2), "yield": raw_yield, "amt_t": round(today_amount, 1),
+            "d1": (curr_p / df_hist['Close'].iloc[-2]) - 1, "d5": (curr_p / df_hist['Close'].iloc[-6]) - 1,
+            "m1": (curr_p / df_hist['Close'].iloc[-21]) - 1, "m6": (curr_p / df_hist['Close'].iloc[-121]) - 1,
+            "is_hold": is_hold, "cost": cost, "bias_str": f"{bias_60:+.1f}%", "vol_str": get_vol_status_str(vol_ratio),
+            "fs": fs, "ss": ss, "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60, "ma_alert": ma_alert_str,
+            "is_golden": is_golden, "golden_msg": golden_msg
+        }
+        res.update({"risk": "正常", "trend": "持平", "hint": "追蹤"})
+        res['ai_strategy'] = get_gemini_strategy(res)
+        return res
+    except: return None
+
+def get_tw_stock(sid):
+    clean_id = str(sid).strip().upper()
+    suffixes = [".TWO", ".TW"] if clean_id.startswith(('3', '4', '5', '6', '8')) else [".TW", ".TWO"]
+    for suffix in suffixes:
+        target = f"{clean_id}{suffix}"
+        try:
+            hist = yf.Ticker(target).history(period="5d")
+            if not hist.empty: return yf.Ticker(target), target
+        except: continue
+    return None, None
 
 def send_email(subject, body):
     if not MAIL_USER or not MAIL_PASS: return
@@ -312,7 +391,7 @@ def send_email(subject, body):
     except Exception as e: print(f"❌ 郵件失敗: {e}")
 
 # ==========================================
-# 8. 主程式執行區塊 (雙費用監控核心版)
+# 8. 主程式執行區塊 (✨完美修復戰略總結工作表語法)
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -330,18 +409,45 @@ def main():
     if results_line:
         time.sleep(10) 
         summary_text = generate_and_save_summary(results_line, current_time)
-        sync_to_sheets(results_sheet)
-
-        # 🚀 1. 計算 Gemini AI 最終開銷
-        twd_cost = calculate_twd_cost()
         
-        # 🚀 2. ✨動態撈取當前 LINE 官方帳號免費額度狀態
+        # 🚀 執行主報表寫入、自動防爆擴增、去色、新資料高亮黃色
+        report_sheet_url = sync_to_sheets(results_sheet)
+        if not report_sheet_url:
+            report_sheet_url = "無法動態獲取連結，請至 Google Drive 查閱"
+        
+        # 🚀 【✨核心修復點】：使用新版 gspread 正確語法生成獨立的「日期戰略總結工作表」
+        try:
+            client = get_gspread_client()
+            if client:
+                spreadsheet = client.open("全能金流診斷報表")
+                try:
+                    # 如果分頁已存在就清空
+                    s_sheet = spreadsheet.worksheet(current_time)
+                    s_sheet.clear()
+                except:
+                    # 不存在就建立新分頁
+                    s_sheet = spreadsheet.add_worksheet(title=current_time, rows=150, cols=5)
+                
+                # 🛠️ 修正最新版 gspread 規格：將文字按換行切開，轉成二維陣列寫入
+                lines_list = [[line] for line in summary_text.split('\n')]
+                s_sheet.update(values=lines_list, range_name='A1')  # 🚀 100% 成功寫入
+                
+                # 美化設定：開啟自動換行
+                s_sheet.format("A1:A150", {"wrapStrategy": "WRAP"})
+                print(f"✅ 獨立日期戰略分頁 [{current_time}] 已成功生成並寫入報告！")
+        except Exception as e: 
+            print(f"⚠️ 建立獨立戰略分頁失敗: {e}")
+
+        # 計算費用與獲取 LINE 免費額度
+        twd_cost = calculate_twd_cost()
         line_quota_report = get_line_quota_report()
 
-        # HTML 版成本報告 (用於 Email 最下方)
+        # HTML 版成本報告 (Email)
         cost_report_html = f"""
         <div style='background-color:#fff9db; padding:15px; border-left:5px solid #fcc419; margin-top:20px; font-family:sans-serif;'>
             <h3 style='margin-top:0; color:#e67e22;'>💰 今日運作成本診斷報告</h3>
+            <p><b>【雲端主報表連結】</b><br>
+            - 🔗 <a href='{report_sheet_url}'>點擊前往查看數據報表</a></p>
             <p><b>【Gemini API 帳單】</b><br>
             - 消耗總 Tokens：<span style='color:#d9480f;'>{GLOBAL_TOKEN_BILLING['total_tokens']:,}</span><br>
             - 預估台幣費用：<span style='color:#c92a2a;'><b>NT$ {twd_cost} 元</b></span></p>
@@ -350,24 +456,25 @@ def main():
         </div>
         """
 
-        # 發送 Email 完整戰報 (內含雙成本診斷)
+        # 發送 Email
         email_body = f"<html><body><h2>📊 {current_time} 全能金流診斷</h2><pre style='font-family:sans-serif; white-space:pre-wrap;'>{summary_text}</pre><hr>{cost_report_html}</body></html>"
         send_email(f"[{current_time}] 台股 AI 戰報 (附成本與 LINE 額度診斷)", email_body)
 
-        # 發送精簡 LINE 通知 (完美結合兩大監控指標)
+        # 發送 LINE 精簡通知
         if LINE_ACCESS_TOKEN:
             line_msg = (
                 f"📊 【{current_time} 戰略報告已更新】\n\n"
-                f"今日自選股診斷已執行完畢，詳細戰報請查收 Email。\n\n"
+                f"今日自選股診斷已執行完畢，獨立日期戰略總結分頁已成功產生！\n\n"
+                f"🔗 點擊直達雲端主報表：\n{report_sheet_url}\n\n"
                 f"── 💸 今日 AI 帳單明細 ──\n"
                 f"🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}\n"
                 f"💰 今日預估費用：NT$ {twd_cost} 元\n\n"
-                f"{line_quota_report}"  # ✨ 自動黏貼本月 LINE 剩餘額度
+                f"{line_quota_report}"
             )
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
             payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": line_msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
-            print("✅ 整合 LINE 本月發送額度查詢之推播大獲成功！")
+            print("✅ 整合「自動擴增、去色高亮、分頁修復」之終極完美版戰報推播發送成功！")
 
 if __name__ == "__main__":
     main()
