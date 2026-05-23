@@ -126,7 +126,7 @@ def record_token_usage(response):
     except: pass
 
 # ==========================================
-# Google Sheets 核心資料庫 (升級：去色、防爆、高亮黃色)
+# Google Sheets 核心資料庫 (具備防爆、去色與高亮)
 # ==========================================
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -146,7 +146,7 @@ def sync_to_sheets(data_list):
         spreadsheet = client.open("全能金流診斷報表")
         sheet = spreadsheet.get_worksheet(0)
         
-        # 1. 自動偵測空間並擴充行數 (防止底部爆表)
+        # 1. 自動偵測空間並擴充行數
         current_rows = sheet.row_count       
         existing_data_rows = len(sheet.get_all_values())  
         needed_rows = existing_data_rows + len(data_list)
@@ -166,7 +166,7 @@ def sync_to_sheets(data_list):
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆數據至主報表")
 
-        # 4. 最新資料「高亮黃色」 (精準鎖定剛寫入的這幾行)
+        # 4. 最新資料「高亮黃色」
         start_row = existing_data_rows + 1
         end_row = existing_data_rows + len(data_list)
         
@@ -391,7 +391,7 @@ def send_email(subject, body):
     except Exception as e: print(f"❌ 郵件失敗: {e}")
 
 # ==========================================
-# 8. 主程式執行區塊 (✨完美修復戰略總結工作表語法)
+# 8. 主程式執行區塊 (已修正安全字串替換)
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -410,29 +410,22 @@ def main():
         time.sleep(10) 
         summary_text = generate_and_save_summary(results_line, current_time)
         
-        # 🚀 執行主報表寫入、自動防爆擴增、去色、新資料高亮黃色
         report_sheet_url = sync_to_sheets(results_sheet)
         if not report_sheet_url:
             report_sheet_url = "無法動態獲取連結，請至 Google Drive 查閱"
         
-        # 🚀 【✨核心修復點】：使用新版 gspread 正確語法生成獨立的「日期戰略總結工作表」
         try:
             client = get_gspread_client()
             if client:
                 spreadsheet = client.open("全能金流診斷報表")
                 try:
-                    # 如果分頁已存在就清空
                     s_sheet = spreadsheet.worksheet(current_time)
                     s_sheet.clear()
                 except:
-                    # 不存在就建立新分頁
                     s_sheet = spreadsheet.add_worksheet(title=current_time, rows=150, cols=5)
                 
-                # 🛠️ 修正最新版 gspread 規格：將文字按換行切開，轉成二維陣列寫入
                 lines_list = [[line] for line in summary_text.split('\n')]
-                s_sheet.update(values=lines_list, range_name='A1')  # 🚀 100% 成功寫入
-                
-                # 美化設定：開啟自動換行
+                s_sheet.update(values=lines_list, range_name='A1')  
                 s_sheet.format("A1:A150", {"wrapStrategy": "WRAP"})
                 print(f"✅ 獨立日期戰略分頁 [{current_time}] 已成功生成並寫入報告！")
         except Exception as e: 
@@ -441,6 +434,9 @@ def main():
         # 計算費用與獲取 LINE 免費額度
         twd_cost = calculate_twd_cost()
         line_quota_report = get_line_quota_report()
+
+        # ✨ 【重要修正點】：先在外部處理換行替換，完全避開 f-string 的大括號內部反斜線限制
+        line_quota_html = line_quota_report.replace('\n', '<br>')
 
         # HTML 版成本報告 (Email)
         cost_report_html = f"""
@@ -452,7 +448,7 @@ def main():
             - 消耗總 Tokens：<span style='color:#d9480f;'>{GLOBAL_TOKEN_BILLING['total_tokens']:,}</span><br>
             - 預估台幣費用：<span style='color:#c92a2a;'><b>NT$ {twd_cost} 元</b></span></p>
             <p style='margin-bottom:0;'><b>【LINE Bot 免費額度】</b><br>
-            {line_quota_report.replace('\n', '<br>')}</p>
+            {line_quota_html}</p>
         </div>
         """
 
@@ -474,7 +470,7 @@ def main():
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
             payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": line_msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
-            print("✅ 整合「自動擴增、去色高亮、分頁修復」之終極完美版戰報推播發送成功！")
+            print("✅ 語法完全修復之終極版戰報推播發送成功！")
 
 if __name__ == "__main__":
     main()
