@@ -306,7 +306,7 @@ def get_gemini_strategy(data):
     return "AI 連線忙碌中"
 
 # ==========================================
-# 5. ✨ 全域戰略報告生成器 (魂歸操盤手 Prompt 大升級)
+# 5. ✨ 全域戰略報告生成器 (魂歸操盤手且包含APP智慧單獵殺設定)
 # ==========================================
 def generate_and_save_summary(data_list, report_time_str):
     if not HAS_GENAI or not AI_CLIENT: return "本次報告未包含 AI 總結"
@@ -341,7 +341,7 @@ def generate_and_save_summary(data_list, report_time_str):
     if not golden_candidates: golden_candidates = "今日無符合標準之標的。"
     if not limit_up_candidates_txt: limit_up_candidates_txt = "今日無明顯漲停特徵股。"
 
-    # 🚀 注入靈魂的硬核操盤指令
+    # 🚀 注入靈魂的硬核操盤指令 + 智慧單下單精確設定自動化
     prompt = f"""
     角色：你是頂尖、冷酷、毫無客套、極度重視風險管理的台股短線量化操盤總監。
     任務：根據今日傳入的自選股與庫存技術數據，撰寫一份極度精準、不說廢話、直擊要害的【戰略總結報告】。
@@ -366,13 +366,25 @@ def generate_and_save_summary(data_list, report_time_str):
     4. 第二章【觀察名單潛力股】從觀察名單中挑選評分最高的前 3 檔點評。必須參考傳入的 MA5 或 MA20 實際數值，給出極具體、有數字的「進場埋伏價格」與「波段防守價格」。
     5. 第四章【黃金進場公式】完整列出上述達標的清單與對應的 MA20 停損金額。
     6. 第五章【🎯 漲停潛力股獵殺】針對上述名單，結合你內建的台股電子半導體知識庫，補上其精準的「熱門題材」（如 CoWoS 設備、被動元件、高階封測、MCU、矽智財等）並客觀評估短期爆發力。
+    7. ✨【精準對齊下單要求】：請交叉比對「第二章點名的觀察名單潛力股」與「第四章黃金公式清單」，找出同時符合這兩者的交集個股。在報告的最尾端，新增一個全新的【★ 明日券商 APP 智慧單下單精確設定】區塊。如果今日無交集個股，就從第二章或第四章挑選分數、位階最優者執行。
 
-    請嚴格依照以下格式與五個章節直接輸出，不准加任何前言或結尾廢話（繁體中文）：
+    請嚴格依照以下格式與六個章節直接輸出，不准加任何前言或結尾廢話（繁體中文）：
     ### 1. 庫存持股總體檢
     ### 2. 觀察名單潛力股
     ### 3. 總結操作建議
     ### 4. 黃金進場公式 (每日必檢)
     ### 5. 🎯 漲停潛力股獵殺 (AI預測)
+    
+    ### ★ 明日券商 APP 智慧單下單精確設定
+    (必須包含以下精細格式欄位：
+    🎯 獵殺目標：股票名稱 (代號)
+    - 為什麼選它：(寫出交叉符合原因與熱門題材)
+    - 精確進場區間：AI 總監提示「回測 MA5 (XX元) 附近進場」
+    - APP 實戰設定步驟：
+      1. 開啟手機券商 APP，切換到「條件單」或「智慧單」功能（選擇長效期智慧單）。
+      2. 觸發條件設定：當股價小於或等於 [今日實際MA5價格 + 0.1元] 時。
+      3. 下單動作設定：以「限價 [今日實際MA5價格]」買入 1 張（或自訂部位）。
+      4. 終極安全帶（停損設定）：同時設定一筆智慧停損單，條件為「當股價收盤跌破 MA20: [今日實際MA20價格] 元」時，立刻以市價或跌停價全數砍出。)
     """
 
     for model_name in MODEL_CANDIDATES:
@@ -466,7 +478,7 @@ def send_email(subject, body):
     except Exception as e: print(f"❌ 郵件失敗: {e}")
 
 # ==========================================
-# 8. 主程式執行區塊 (已修復舊版本 Python 字串相容性)
+# 8. 主程式執行區塊 (全面升級：圖2高質感逐行橫向合併排版)
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -485,12 +497,12 @@ def main():
         time.sleep(10) 
         summary_text = generate_and_save_summary(results_line, current_time)
         
-        # 🚀 寫入主報表數據（包含防爆、去色、黃色高亮）
+        # 🚀 寫入主報表數據（防爆、去色、黃色高亮）
         report_sheet_url = sync_to_sheets(results_sheet)
         if not report_sheet_url:
             report_sheet_url = "無法動態獲取連結，請至 Google Drive 查閱"
         
-        # 🚀 寫入獨立日期分頁 (AI 戰略報告)
+        # 🚀 【✨核心重構區：完全複製圖2高質感排版規格】
         try:
             client = get_gspread_client()
             if client:
@@ -499,20 +511,52 @@ def main():
                     s_sheet = spreadsheet.worksheet(current_time)
                     s_sheet.clear()
                 except:
-                    s_sheet = spreadsheet.add_worksheet(title=current_time, rows=150, cols=5)
+                    s_sheet = spreadsheet.add_worksheet(title=current_time, rows=150, cols=10)
                 
+                # 1. 轉化為二維陣列寫入
                 lines_list = [[line] for line in summary_text.split('\n')]
                 s_sheet.update(values=lines_list, range_name='A1')  
-                s_sheet.format("A1:A150", {"wrapStrategy": "WRAP"})
-                print(f"✅ 獨立日期戰略分頁 [{current_time}] 已成功生成並寫入報告！")
+                
+                # 2. 橫向逐行合併 A 欄到 E 欄 (MERGE_ROWS)
+                body_requests = []
+                for row_idx in range(1, len(lines_list) + 1):
+                    body_requests.append({
+                        "mergeCells": {
+                            "range": {
+                                "sheetId": s_sheet.id,
+                                "startRowIndex": row_idx - 1,
+                                "endRowIndex": row_idx,
+                                "startColumnIndex": 0,  # A 欄
+                                "endColumnIndex": 5     # E 欄 (意即合併 A, B, C, D, E)
+                            },
+                            "mergeType": "MERGE_ROWS"
+                        }
+                    })
+                
+                if body_requests:
+                    spreadsheet.batch_update({"requests": body_requests})
+                
+                # 3. 格式微調與美化設定 (自動換行、垂直靠上、微軟正黑體)
+                s_sheet.format("A1:E150", {
+                    "wrapStrategy": "WRAP",
+                    "verticalAlignment": "TOP",
+                    "textFormat": {
+                        "fontSize": 10,
+                        "fontFamily": "Microsoft JhengHei"
+                    }
+                })
+                
+                # 4. 固定 A 到 E 每欄欄寬為 140 像素，展開成 700 像素的完美寬度
+                for col in range(1, 6):
+                    s_sheet.set_column_width(gspread.utils.get_column_letter(col), 140)
+                    
+                print(f"✅ 獨立日期戰略分頁 [{current_time}] 已完美套用圖2規格生成！")
         except Exception as e: 
-            print(f"⚠️ 建立獨立戰略分頁失敗: {e}")
+            print(f"⚠️ 建立圖2排版戰略分頁失敗: {e}")
 
         # 計算費用與獲取 LINE 免費額度
         twd_cost = calculate_twd_cost()
         line_quota_report = get_line_quota_report()
-
-        # ✨ 重要修正點：在外部完成替換，100% 避開舊版 Python 的 f-string 內部反斜線報錯
         line_quota_html = line_quota_report.replace('\n', '<br>')
 
         # HTML 版成本報告 (Email)
@@ -537,7 +581,7 @@ def main():
         if LINE_ACCESS_TOKEN:
             line_msg = (
                 f"📊 【{current_time} 戰略報告已更新】\n\n"
-                f"今日自選股診斷已執行完畢，獨立日期戰略總結分頁已成功產生！\n\n"
+                f"今日自選股診斷已執行完畢，全新「明日券商 APP 智慧單下單精確設定」與圖2規格美化分頁已成功產生！\n\n"
                 f"🔗 點擊直達雲端主報表：\n{report_sheet_url}\n\n"
                 f"── 💸 今日 AI 帳單明細 ──\n"
                 f"🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}\n"
@@ -547,7 +591,7 @@ def main():
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
             payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": line_msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
-            print("✅ 終極修復、絕不爆錯之全新持股體檢戰報已全面部署成功！")
+            print("✅ 終極完全體持股體檢戰報已全面部署成功！")
 
 if __name__ == "__main__":
     main()
