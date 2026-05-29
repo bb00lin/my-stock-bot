@@ -306,7 +306,7 @@ def get_gemini_strategy(data):
     return "AI 連線忙碌中"
 
 # ==========================================
-# 5. ✨ 全域戰略報告生成器 (自動防禦暴衝股，生成智慧單策略)
+# 5. ✨ 全域戰略報告生成器 (自動三階分級 + 絕對數據顆粒度)
 # ==========================================
 def generate_and_save_summary(data_list, report_time_str):
     if not HAS_GENAI or not AI_CLIENT: return "本次報告未包含 AI 總結"
@@ -318,10 +318,12 @@ def generate_and_save_summary(data_list, report_time_str):
     
     for r in data_list:
         try:
+            # 🚀 升級傳遞給 AI 的字串：加入實際成交張數，提供絕對數據顆粒度
             stock_info = (
                 f"- {r['name']}({r['id']}) | 現價:{r['p']} | 分數:{r['score']} | "
                 f"MA5:{r['ma5']} | MA10:{r['ma10']} | MA20:{r['ma20']} | MA60:{r['ma60']} | "
-                f"日漲跌:{r['d1']:.2%} | 外資:{r['fs']}d 投信:{r['ss']}d | 量能:{r['vol_str']} | "
+                f"日漲跌:{r['d1']:.2%} | 外資:{r['fs']}d 投信:{r['ss']}d | "
+                f"今日成交量:{r.get('v_today',0)}張 (5日均量:{r.get('v_ma5',0)}張, {r['vol_str']}) | "
                 f"均線訊號:{r['ma_alert']} | AI個股策略:{r['ai_strategy'][:40]}...\n"
             )
             if r['is_hold']: inventory_txt += stock_info
@@ -342,34 +344,35 @@ def generate_and_save_summary(data_list, report_time_str):
     if not limit_up_candidates_txt: limit_up_candidates_txt = "今日無明顯漲停特徵股。"
 
     prompt = f"""
-    角色：你是頂尖、冷酷、毫無客套、極度重視風險管理的台股短線量化操盤總監。
-    任務：根據今日傳入的自選股與庫存技術數據，撰寫一份極度精準、不說廢話、直擊要害的【戰略總結報告】。
+    角色：你是頂尖、冷酷、極度重視風險管理的台股短線量化操盤總監。
+    任務：根據今日技術數據，撰寫極度精準、具備絕對數據顆粒度(必須寫出實際價格與張數)的【戰略總結報告】。
     
-    【最新市場數據庫 (內含今日各均線價格)】
+    【最新市場數據庫 (內含今日各均線價格與成交張數)】
     【庫存倉位】:
     {inventory_txt}
-    
     【自選觀察】:
     {watchlist_txt}
-    
     【🔥 今日黃金進場公式篩選】
     {golden_candidates}
-    
     【🚀 今日漲停潛力股獵殺名單】
     {limit_up_candidates_txt}
     
-    【❌ 鐵律：若違反以下指令直接扣薪 ❌】：
-    1. 絕對拋棄所有空泛的投顧或財經大盤新聞廢話（不需要寫美股震盪、通膨、美聯儲、昨日回顧等字眼）。
-    2. 第一章【庫存持股總體檢】必須將持股分類為：[較弱勢個股(跌破均線/庫存虧損)]、[持平個股]、[相對強勢個股]。且只要提到建議（如防守、減碼、停損），必須融合具體的均線價格數字。
-    3. 第二章【觀察名單潛力股】從觀察名單中挑選評分最高的前 3 檔點評，給出具體金額。
-    4. 第四章【黃金進場公式】完整列出上述達標的清單與對應的 MA20 停損金額。
+    【❌ 鐵律：違反直接扣薪 ❌】：
+    1. 絕對拋棄財經大盤新聞廢話（不需要寫美股震盪、通膨等）。
+    2. 第一章【庫存持股總體檢】分類為：[較弱勢個股]、[持平個股]、[相對強勢個股]。任何建議(防守/減碼)必須融合具體「均線名稱與價格數字」。
+    3. 第二章【觀察名單潛力股】挑選評分最高 3 檔點評，給出具體金額。
+    4. 第四章【黃金進場公式】列出清單與對應 MA20 停損金額。
     5. 第五章【🎯 漲停潛力股獵殺】列出潛力特徵股與題材。
-    6. ✨【🔥 終極智慧單防禦機制】：
-       請深度交叉比對「第二章潛力股」與「第四章黃金公式清單」。
-       在最後生成【★ 明日券商 APP 智慧單下單精確設定】時，你必須**嚴格過濾掉今日漲幅過高、甚至已經鎖漲停（日漲跌大於 5%）的極端暴衝股**！
-       你只能挑選**「股價剛好回測至 MA5 附近、今天日漲跌在 0% ~ 4% 之間、安全且尚未起飛」**的 1~2 檔作為狙擊目標，並為其計算出精準的低調佈局指令。如果沒有完全符合的個股，就從黃金公式中挑選離 MA20 最近、防守肉最少者執行。
-    
-    請嚴格依照以下格式與六個章節直接輸出，不准加任何前言或結尾廢話（繁體中文）：
+    6. ✨【★ 明日券商 APP 智慧單下單精確設定】：
+       深度交叉比對第二章潛力股與第四章黃金公式清單。
+       請依據以下三大等級進行分類與嚴格判定，挑選出 1~2 檔執行獵殺：
+       (A) ✨ 特選：低位階尚未起飛股 (MA5 貼近 MA20，日漲跌 0%~3%，量縮)
+       (B) ⚡ 衝刺：中位階主升起飛股 (MA5>MA10>MA20>MA60，日漲跌 3%~6%，溫和出量)
+       (C) 🚀 獵殺：高位階極速飆高股 (乖離大，日漲跌 > 6% 或鎖漲停) -> 絕對禁止追高，必須設定拉回 MA5 才能觸發。
+       
+       你必須使用提供的具體數字(價格、張數、百分比)來寫出以下深度解析模板。
+
+    請嚴格依照六個章節直接輸出（繁體中文）：
     ### 1. 庫存持股總體檢
     ### 2. 觀察名單潛力股
     ### 3. 總結操作建議
@@ -377,15 +380,17 @@ def generate_and_save_summary(data_list, report_time_str):
     ### 5. 🎯 漲停潛力股獵殺 (AI預測)
     
     ### ★ 明日券商 APP 智慧單下單精確設定
-    (必須包含以下精細格式欄位：
-    🎯 獵殺目標：股票名稱 (代號) - ✨ 特選：低位階尚未起飛股
-    - 為什麼選它：(說明它同時符合公式與潛力股，且今日位階安全、剛好回測MA5防線、避開了高檔漲停追高風險)
-    - 精確進場區間：AI 總監提示「回測 MA5 (XX元) 附近進場」
+    🎯 獵殺目標一：[股票名稱] (代號) - [套用上述 A, B, C 等級名稱]
+    - 📊 進場邏輯深度解析 (黃金公式大數據拆解)：
+      1. 【大趨勢保護】：現價 ([填入現價]元) 位於 MA20 月線 ([填入MA20]元) 與 MA60 季線 ([填入MA60]元) 之上，呈現多頭排列。
+      2. 【洗盤與量能表態】：近期經歷洗盤，今日成交量為 [填入今日成交量]張，對比 5 日均量 [填入5日均量]張，顯示 [分析量縮或出量意義]。
+      3. 【位階安全防禦】：今日漲跌幅為 [填入%]，股價剛好回測至 MA5 ([填入MA5]元) 附近，屬於[依據等級填寫位階判定]。
+    - 精確進場區間：AI 總監提示「回測 MA5 ([填入MA5]元) 附近進場」
     - APP 實戰設定步驟：
       1. 開啟手機券商 APP，切換到「條件單」或「智慧單」功能（選擇長效期智慧單）。
-      2. 觸發條件設定：當股價小於或等於 [今日實際MA5價格 + 0.1元] 時。
-      3. 下單動作設定：以「限價 [今日實際MA5價格]」買入 1 張（或自訂部位）。
-      4. 終極安全帶（停損設定）：同時設定一筆智慧停損單，條件為「當股價收盤跌破 MA20: [今日實際MA20價格] 元」時，立刻以市價或跌停價全數砍出。)
+      2. 觸發條件設定：當股價小於或等於 [實際MA5價格 + 0.1元] 時。
+      3. 下單動作設定：以「限價 [實際MA5價格]」買入 1 張。
+      4. 終極安全帶（停損設定）：同時設定一筆智慧停損單，條件為「當股價收盤跌破 MA20: [實際MA20價格] 元」時，立刻以市價全數砍出。
     """
 
     for model_name in MODEL_CANDIDATES:
@@ -443,6 +448,10 @@ def fetch_pro_metrics(stock_data):
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
         market_label = '櫃' if '.TWO' in full_id else '市'
 
+        # 🚀 升級傳遞變數：加入 v_today 與 v_ma5 (換算為張數)
+        vol_today_lots = int(curr_vol / 1000) if not pd.isna(curr_vol) else 0
+        vol_ma5_lots = int(df_hist['Volume'].iloc[-6:-1].mean() / 1000) if not pd.isna(df_hist['Volume'].iloc[-6:-1].mean()) else 0
+
         res = {
             "id": f"{sid}{market_label}", "name": stock_name, "score": score, "rsi": clean_rsi, "industry": industry,
             "vol_r": round(vol_ratio, 1), "p": round(curr_p, 2), "yield": raw_yield, "amt_t": round(today_amount, 1),
@@ -450,7 +459,9 @@ def fetch_pro_metrics(stock_data):
             "m1": (curr_p / df_hist['Close'].iloc[-21]) - 1, "m6": (curr_p / df_hist['Close'].iloc[-121]) - 1,
             "is_hold": is_hold, "cost": cost, "bias_str": f"{bias_60:+.1f}%", "vol_str": get_vol_status_str(vol_ratio),
             "fs": fs, "ss": ss, "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60, "ma_alert": ma_alert_str,
-            "is_golden": is_golden, "golden_msg": golden_msg
+            "is_golden": is_golden, "golden_msg": golden_msg,
+            "v_today": vol_today_lots,
+            "v_ma5": vol_ma5_lots
         }
         res.update({"risk": "正常", "trend": "持平", "hint": "追蹤"})
         res['ai_strategy'] = get_gemini_strategy(res)
@@ -479,7 +490,7 @@ def send_email(subject, body):
     except Exception as e: print(f"❌ 郵件失敗: {e}")
 
 # ==========================================
-# 8. 主程式執行區塊 (✨圖2高質感排版與LINE費用額度診斷)
+# 8. 主程式執行區塊 (✨圖2高質感逐行橫向合併排版)
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -551,13 +562,15 @@ def main():
                 for col in range(1, 6):
                     s_sheet.set_column_width(gspread.utils.get_column_letter(col), 140)
                     
-                print(f"✅ 獨立日期戰略分頁 [{current_time}] 已套用圖2規格生成！")
+                print(f"✅ 獨立日期戰略分頁 [{current_time}] 已完美套用圖2規格生成！")
         except Exception as e: 
-            print(f"⚠️ 建立戰略分頁失敗: {e}")
+            print(f"⚠️ 建立圖2排版戰略分頁失敗: {e}")
 
         # 計算費用與獲取 LINE 免費額度
         twd_cost = calculate_twd_cost()
         line_quota_report = get_line_quota_report()
+        
+        # ✨ 在外部安全替換換行符號
         line_quota_html = line_quota_report.replace('\n', '<br>')
 
         # HTML 版成本報告
@@ -582,7 +595,7 @@ def main():
         if LINE_ACCESS_TOKEN:
             line_msg = (
                 f"📊 【{current_time} 戰略報告已更新】\n\n"
-                f"今日自選股診斷已執行完畢，全新「智慧單自動下單設定」與圖2規格美化分頁已成功產生！\n\n"
+                f"今日自選股診斷已執行完畢，全新「三階位階評估 + 智慧單精算」與圖2規格美化分頁已成功產生！\n\n"
                 f"🔗 點擊直達雲端主報表：\n{report_sheet_url}\n\n"
                 f"── 💸 今日 AI 帳單明細 ──\n"
                 f"🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}\n"
@@ -592,7 +605,7 @@ def main():
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
             payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": line_msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
-            print("✅ 完美排版＋下單智慧單生成版部署成功！")
+            print("✅ 終極完全體持股體檢戰報已全面部署成功！")
 
 if __name__ == "__main__":
     main()
