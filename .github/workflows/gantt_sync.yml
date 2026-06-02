@@ -1,9 +1,9 @@
 name: Jira Gantt to Confluence Sync
 
 on:
-  schedule:
+  #schedule:
     # 台灣時間凌晨 00:05 執行 (對應 UTC 16:05)
-    - cron: "5 16 * * *"
+    #- cron: "5 16 * * *"
   workflow_dispatch: # 允許手動執行
 
 jobs:
