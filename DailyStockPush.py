@@ -539,8 +539,10 @@ def main():
                 lines_list = [[line] for line in summary_text.split('\n')]
                 s_sheet.update(values=lines_list, range_name='A1')  
                 
-                # 2. 橫向逐行合併 A 欄到 E 欄 (MERGE_ROWS)
+                # 2. 準備批次更新的任務清單 (body_requests)
                 body_requests = []
+                
+                # [任務 A]: 橫向逐行合併 A 欄到 E 欄 (MERGE_ROWS)
                 for row_idx in range(1, len(lines_list) + 1):
                     body_requests.append({
                         "mergeCells": {
@@ -555,6 +557,23 @@ def main():
                         }
                     })
                 
+                # [任務 B]: ✨ 修正版 - 透過官方 API 設定 A 到 E 欄 (index 0~5) 寬度為 140 像素
+                body_requests.append({
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": s_sheet.id,
+                            "dimension": "COLUMNS",
+                            "startIndex": 0,
+                            "endIndex": 5
+                        },
+                        "properties": {
+                            "pixelSize": 140
+                        },
+                        "fields": "pixelSize"
+                    }
+                })
+                
+                # 執行批次任務
                 if body_requests:
                     spreadsheet.batch_update({"requests": body_requests})
                 
@@ -567,10 +586,6 @@ def main():
                         "fontFamily": "Microsoft JhengHei"
                     }
                 })
-                
-                # 4. 固定 A 到 E 每欄欄寬為 140 像素
-                for col in range(1, 6):
-                    s_sheet.set_column_width(gspread.utils.get_column_letter(col), 140)
                     
                 print(f"✅ 獨立日期戰略分頁 [{current_time}] 已完美套用圖2規格生成！")
         except Exception as e: 
