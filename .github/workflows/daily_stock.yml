@@ -2,7 +2,7 @@ name: DailyStockPush
 
 on:
   schedule:
-    - cron: '30 09 * * 1-5' # 台北時間 17:30
+    - cron: '30 09 * * 1-5' # 台北時間 17:30 (UTC 09:30)
   workflow_dispatch:
 
 permissions:
@@ -14,17 +14,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # 🚀 升級至 v4，支援最新 Node.js 環境
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # 🚀 升級至 v5
         with:
           python-version: '3.10'
+          cache: 'pip' # ⚡ [全新優化] 開啟 pip 快取，下次執行時免重新下載相同套件，大幅縮短執行時間
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          # [修改] 移除 google-generativeai，改裝 google-genai
           pip install -U tqdm requests pandas yfinance FinMind gspread oauth2client google-genai
 
       - name: Run DailyStockPush
