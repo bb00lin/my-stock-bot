@@ -14,25 +14,36 @@ jobs:
     timeout-minutes: 60 
     steps:
       - name: 1. 檢出代碼
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # 🚀 升級至 v4
 
       - name: 2. 設定 Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # 🚀 升級至 v5
         with:
           python-version: '3.10'
+          cache: 'pip' # ⚡ [全新優化] 開啟快取，加速後續套件安裝速度
 
       - name: 3. 安裝必要套件
         run: |
-          pip install yfinance pandas requests FinMind tqdm gspread oauth2client numpy
+          python -m pip install --upgrade pip
+          # 🚀 [修正] 補上新版 Push 腳本不可或缺的 google-genai 官方 SDK
+          pip install yfinance pandas requests FinMind tqdm gspread oauth2client numpy google-genai
 
       # [已移除] 4. 建立 Google 金鑰檔案 (不需要了，且比較安全)
 
-      - name: 5. 執行股票分析
+      - name: 5. 執行股票分析 (Bot)
         env:
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          # [新增] 必須加入這行，Python 才能透過 os.environ 讀取金鑰
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: python DailyStockBot.py
 
-      # [已移除] 6. 清理金鑰 (因為沒建立，所以不需要清理)
+      - name: 6. 執行 AI 戰略體檢與推播 (Push)
+        env:
+          # 🚀 [新增] 將 AI 戰報與郵件發送所需的所有祕鑰完美對接進環境變數
+          LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        run: python DailyStockPush.py
