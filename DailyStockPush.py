@@ -66,7 +66,6 @@ def check_ai_health():
                     AI_CLIENT = client
                     return
             except Exception as model_err: 
-                # 關鍵修正：不再隱藏錯誤，直接印出為什麼連不上 Gemini
                 print(f"❌ 模型 {model_name} 測試失敗，原因: {model_err}")
                 continue
         print("❌ 失敗: 所有候選模型皆無法連線。將以「無 AI 模式」繼續執行。")
@@ -151,7 +150,6 @@ def sync_to_sheets(data_list):
         spreadsheet = client.open("全能金流診斷報表")
         sheet = spreadsheet.get_worksheet(0)
         
-        # 1. 自動偵測空間並擴充行數
         current_rows = sheet.row_count       
         existing_data_rows = len(sheet.get_all_values())  
         needed_rows = existing_data_rows + len(data_list)
@@ -161,17 +159,14 @@ def sync_to_sheets(data_list):
             sheet.add_rows(add_rows)
             print(f"⚡ 偵測到[全能金流診斷報表]容量不足！已自動擴增 {add_rows} 行空間。")
 
-        # 2. 舊資料全面「去色」 (重置為純白底，對應資料欄位 A 到 V 欄)
         sheet.format(f"A2:V{max(2000, current_rows)}", {
             "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
         })
         print("🔄 已清除主報表舊資料的高亮顏色")
 
-        # 3. 寫入新數據
         sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆數據至主報表")
 
-        # 4. 最新資料「高亮黃色」
         start_row = existing_data_rows + 1
         end_row = existing_data_rows + len(data_list)
         
@@ -186,12 +181,10 @@ def sync_to_sheets(data_list):
         return None
 
 def log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost):
-    """【新功能】將每一次整套代碼執行的總 Token 與費用統計寫入獨立的對帳分頁"""
     try:
         try:
             cost_sheet = spreadsheet.worksheet("Token與費用統計")
         except:
-            # 若獨立分頁不存在，則新建並初始化欄位標頭
             cost_sheet = spreadsheet.add_worksheet(title="Token與費用統計", rows=1000, cols=6)
             cost_sheet.append_row(['執行時間', 'AI 呼召總次數', '輸入 Token (Prompt)', '輸出 Token (Completion)', '總 Token 消耗', '預估台幣費用 (TWD)'])
             cost_sheet.format("A1:F1", {
@@ -200,7 +193,6 @@ def log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost):
                 "horizontalAlignment": "CENTER"
             })
         
-        # 追加寫入本次自動化任務的成本明細
         row_data = [
             current_time,
             GLOBAL_TOKEN_BILLING["api_calls"],
@@ -424,7 +416,7 @@ def generate_and_save_summary(data_list, report_time_str):
     - 📊 進場邏輯深度解析 (黃金公式大數據拆解)：
       【流動性檢視】：今日實際成交量為 [實際今日張數]張 (為5日均量 [實際5日均量]張的倍數放大)。(若低於500張需在此加註冷門股風險提示)
       1. 【多頭發散攻勢】：現價 ([實際現價]元) 呈現 MA5 ([實際MA5]元) > MA10 ([實際MA10]元) > MA20 ([實際MA20]元) 的強勢發散排列，動能強勁。
-      2. 【主力追價表態】：今日成交量放大至 [實際今日張數]張，資金持續推升滾量。
+      2. 【主力追價表態】：今日成交量放大至 [實際今日張數]張，資金持續推推推升滾量。
       3. 【位階波段評估】：今日上漲 [實際日漲跌幅]%，代表股價已成功脫離底部並展開主升段衝刺，但尚未進入超買過熱區。
     - 精確進場區間：AI 總監提示「回測 MA5 ([實際MA5]元) 附近進場」
     - APP 實戰設定步驟：
@@ -511,7 +503,22 @@ def fetch_pro_metrics(stock_data):
             "v_today": vol_today_lots,
             "v_ma5": vol_ma5_lots
         }
-        res.update({"risk": "正常", "trend": "持平", "hint": "追蹤"})
+        
+        # 🚀【全新功能】動態量化風險診斷評級
+        if bias_60 > 15 or clean_rsi > 75: res["risk"] = "🚨高檔過熱"
+        elif curr_p < ma20: res["risk"] = "⚠️破線警戒"
+        else: res["risk"] = "🟢正常"
+            
+        # 🚀【全新功能】動態量化波段趨勢評級
+        if ma5 > ma10 and ma10 > ma20 and ma20 > ma60: res["trend"] = "📈強勢多頭"
+        elif curr_p < ma60: res["trend"] = "📉空頭修正"
+        else: res["trend"] = "☁️區間震盪"
+            
+        # 🚀【全新功能】動態量化操盤訊號提示
+        if is_golden: res["hint"] = "🔥黃金買點"
+        elif score >= 8: res["hint"] = "🚀強勢進攻"
+        else: res["hint"] = "👀持續追蹤"
+        
         res['ai_strategy'] = get_gemini_strategy(res)
         return res
     except: return None
@@ -550,6 +557,7 @@ def main():
         res = fetch_pro_metrics(stock_data)
         if res:
             results_line.append(res)
+            # 這裡完美對接全新的動態 [risk, trend, hint] 數據
             results_sheet.append([current_time, res['id'], res['name'], "📦庫存" if res['is_hold'] else "👀觀察", res['score'], res['rsi'], res['industry'], res['bias_str'], res['vol_str'], res['fs'], res['ss'], res['p'], res['yield'], res['amt_t'], res['d1'], res['d5'], res['m1'], res['m6'], res['risk'], res['trend'], res['hint'], res['ai_strategy']])
         if idx < len(watch_data_list) - 1: time.sleep(2.0)
     
@@ -557,16 +565,13 @@ def main():
         time.sleep(10) 
         summary_text = generate_and_save_summary(results_line, current_time)
         
-        # 🚀 寫入主報表數據（防爆、去色、黃色高亮）
         report_sheet_url = sync_to_sheets(results_sheet)
         if not report_sheet_url:
             report_sheet_url = "無法動態獲取連結，請至 Google Drive 查閱"
         
-        # 計算總費用與獲取 LINE 免費額度
         twd_cost = calculate_twd_cost()
         line_quota_report = get_line_quota_report()
 
-        # 🚀 【新功能】在終端機（Console）直接列印精美的成本結算表
         print("\n==========================================")
         print("💰 本次代碼工作 AI 運作成本結算報告")
         print(f"🔹 執行時間：{current_time}")
@@ -582,7 +587,6 @@ def main():
             if client:
                 spreadsheet = client.open("全能金流診斷報表")
                 
-                # 🚀 【新功能】同步將每期總帳單寫入獨立的分頁進行歷史存檔
                 log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost)
                 
                 try:
@@ -591,14 +595,11 @@ def main():
                 except:
                     s_sheet = spreadsheet.add_worksheet(title=current_time, rows=150, cols=10)
                 
-                # 1. 轉化為二維陣列寫入
                 lines_list = [[line] for line in summary_text.split('\n')]
                 s_sheet.update(values=lines_list, range_name='A1')  
                 
-                # 2. 準備批次更新的任務清單 (body_requests)
                 body_requests = []
                 
-                # [任務 A]: 橫向逐行合併 A 欄到 E 欄 (MERGE_ROWS)
                 for row_idx in range(1, len(lines_list) + 1):
                     body_requests.append({
                         "mergeCells": {
@@ -613,7 +614,6 @@ def main():
                         }
                     })
                 
-                # [任務 B]: 修正版 - 透過官方 API 設定 A 到 E 欄寬度為 140 像素
                 body_requests.append({
                     "updateDimensionProperties": {
                         "range": {
@@ -629,11 +629,9 @@ def main():
                     }
                 })
                 
-                # 執行批次任務
                 if body_requests:
                     spreadsheet.batch_update({"requests": body_requests})
                 
-                # 3. 格式微調與美化設定
                 s_sheet.format("A1:E150", {
                     "wrapStrategy": "WRAP",
                     "verticalAlignment": "TOP",
@@ -647,10 +645,8 @@ def main():
         except Exception as e: 
             print(f"⚠️ 建立圖2排版戰略分頁失敗: {e}")
 
-        # ✨ 在外部安全替換換行符號
         line_quota_html = line_quota_report.replace('\n', '<br>')
 
-        # HTML 版成本報告
         cost_report_html = f"""
         <div style='background-color:#fff9db; padding:15px; border-left:5px solid #fcc419; margin-top:20px; font-family:sans-serif;'>
             <h3 style='margin-top:0; color:#e67e22;'>💰 今日運作成本診斷報告</h3>
@@ -664,11 +660,9 @@ def main():
         </div>
         """
 
-        # 發送 Email
         email_body = f"<html><body><h2>📊 {current_time} 全能金流診斷</h2><pre style='font-family:sans-serif; white-space:pre-wrap;'>{summary_text}</pre><hr>{cost_report_html}</body></html>"
         send_email(f"[{current_time}] 台股 AI 戰報 (附成本與 LINE 額度診斷)", email_body)
 
-        # 發送 LINE 通知
         if LINE_ACCESS_TOKEN:
             line_msg = (
                 f"📊 【{current_time} 戰略報告已更新】\n\n"
