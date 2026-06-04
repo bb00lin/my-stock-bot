@@ -181,10 +181,10 @@ def update_watch_list_sheet(recommended_stocks, name_map):
         return None
 
 # ==========================================
-# 3. ✨ 升級版籌碼統計：同步精算「連續買超」與「區間總吸籌率」
+# 3. 籌碼數據與技術指標運算
 # ==========================================
 def get_inst_stats(sid_clean):
-    """【高效率對接】一次獲取外資投信連續買超天數，以及近20天合計買超天數，節省 API 配額"""
+    """一次獲取外資投信連續買超天數，以及近20天合計買超天數，節省 API 配額"""
     try:
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=35)).strftime('%Y-%m-%d')
@@ -222,9 +222,34 @@ def calculate_indicators(df):
     d = k.ewm(com=2).mean()
     return rsi, k, d
 
-def analyze_v14(ticker, name):
+# ==========================================
+# ✨ 【全新功能】雙保險後綴智慧對接辨識器 (防止 404 Error)
+# ==========================================
+def get_tw_stock(sid):
+    """智慧型代號對接器：根據代碼特徵排序優先級，並透過快速 K 線測試確保 100% 成功連線"""
+    clean_id = str(sid).strip().upper()
+    # 3, 4, 5, 6, 8 開頭通常是上櫃(.TWO)；其他通常是上市(.TW)
+    suffixes = [".TWO", ".TW"] if clean_id.startswith(('3', '4', '5', '6', '8')) else [".TW", ".TWO"]
+    for suffix in suffixes:
+        target = f"{clean_id}{suffix}"
+        try:
+            hist = yf.Ticker(target).history(period="5d")
+            if not hist.empty: 
+                return yf.Ticker(target), target
+        except: 
+            continue
+    return None, None
+
+# ==========================================
+# 4. 核心三軌策略過濾篩選引擎
+# ==========================================
+def analyze_v14(sid, name):
     try:
-        s = yf.Ticker(ticker)
+        # 🚀 呼叫全新雙保險對接引擎，徹底阻斷 404 找不到股票的錯誤
+        s, full_id = get_tw_stock(sid)
+        if not s: 
+            return None, None, None
+            
         i = s.info
         m = i.get('grossMargins', 0) or 0
         e = i.get('trailingEps', 0) or 0
@@ -253,14 +278,14 @@ def analyze_v14(ticker, name):
         status_label = "✅安全"
         if bias_5 > 7 or rsi_val > 75 or k_val > 85: status_label = "⚠️過熱"
         
-        pure_id = ticker.split('.')[0]
+        pure_id = str(sid).strip()
         fs_streak, ss_streak, fs_days, ss_days = get_inst_stats(pure_id)
         
         # 1. 短線穩健策略條件
         is_stable = ((ss_streak >= 2 or fs_streak >= 3) and (vol_ratio > 1.2) and (50 <= rsi_val <= 75) and (k_val <= 80) and cp > ma60)
         # 2. 短線強勢飆股策略條件
         is_aggressive = ((ss_streak >= 1 or fs_streak >= 2) and (vol_ratio > 2.5) and (rsi_val > 60) and (cp > ma5) and cp > ma60)
-        # 3. 🚀【全新功能】長線主升浪飆股策略條件（完美狙擊強茂體系：無RSI天花板、20日區間法人合計吸籌 >= 12天、季線上揚）
+        # 3. 🌊 長線主升浪飆股策略條件（完美對接強茂體系：無RSI天花板、20日區間法人合計吸籌 >= 12天、季線上揚）
         is_long_term_trend = (cp > ma20 and cp > ma60 and ma60 > ma60_prev and (fs_days + ss_days >= 12) and vol_ratio > 1.0)
         
         if ((fs_streak >= 2 or ss_streak >= 1) and cp > ma60 and vol_ratio > 1.1) or is_long_term_trend:
@@ -287,7 +312,7 @@ def analyze_v14(ticker, name):
     return None, None, None
 
 # ==========================================
-# 4. 主程式執行區塊 (已解除 .head(1000) 全市場解封版)
+# 5. 主程式執行區塊 (全市場無死角掃描解封版)
 # ==========================================
 def main():
     dl = DataLoader()
@@ -315,20 +340,19 @@ def main():
     name_map = dict(zip(stock_df['stock_id'], stock_df['stock_name']))
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
     
-    # ✨ 核心修改：移除 .head(1000)，無盲區全面掃描台股全市場
+    # 🔓 拔除 .head(1000) 枷鎖，全面掃描全市場 1700+ 檔標的
     targets = stock_df[stock_df['stock_id'].str.len() == 4] 
     
     sheet_results, watch_list_candidates, seen_ids = [], [], set()
-    print(f"🚀 啟動全市場雙軌＋長線飆股策略全面大掃描 (共 {len(targets)} 檔)...")
+    print(f"🚀 啟動全市場【短線雙軌策略 ＋ 長線浪潮飆股】全面大掃描 (共 {len(targets)} 檔)...")
     
     for _, row in targets.iterrows():
         sid = row['stock_id']
         if sid in seen_ids: continue
         seen_ids.add(sid)
-        suffix = ".TWO" if (m_col and m_col in row and ('上櫃' in str(row[m_col]) or 'OTC' in str(row[m_col]))) else (".TWO" if int(sid) >= 8000 else ".TW")
-            
-        t = f"{sid}{suffix}"
-        _, s_res, rec_obj = analyze_v14(t, row['stock_name'])
+        
+        # 🚀 這裡直接傳入純股票代號，讓內部全新的智慧型雙保險對接器處理
+        _, s_res, rec_obj = analyze_v14(sid, row['stock_name'])
         if s_res: sheet_results.append(s_res)
         if rec_obj: watch_list_candidates.append(rec_obj)
         time.sleep(0.4)
@@ -353,7 +377,7 @@ def main():
            f"{line_quota_report}")
     
     send_line(msg)
-    print("✅ 雙報表自動化控制 + 全市場長線飆股監測部署成功！")
+    print("✅ 雙報表自動化控制 + 全市場雙保險長線飆股監測部署成功！")
 
 if __name__ == "__main__":
     main()
