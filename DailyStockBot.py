@@ -20,7 +20,7 @@ def send_line(msg):
     except: pass
 
 # ==========================================
-# ✨ 本次新增：LINE 官方帳號免費發送額度查詢
+# LINE 官方帳號免費發送額度查詢
 # ==========================================
 def get_line_quota_report():
     """透過 LINE API 自動查詢本月已發送則數與剩餘免費額度"""
@@ -181,23 +181,33 @@ def update_watch_list_sheet(recommended_stocks, name_map):
         return None
 
 # ==========================================
-# 3. 指標運算與核心掃描邏輯 (維持不變)
+# 3. ✨ 升級版籌碼統計：同步精算「連續買超」與「區間總吸籌率」
 # ==========================================
-def get_streak_only(sid_clean):
+def get_inst_stats(sid_clean):
+    """【高效率對接】一次獲取外資投信連續買超天數，以及近20天合計買超天數，節省 API 配額"""
     try:
         dl = DataLoader()
-        start = (datetime.date.today() - datetime.timedelta(days=20)).strftime('%Y-%m-%d')
+        start = (datetime.date.today() - datetime.timedelta(days=35)).strftime('%Y-%m-%d')
         df = dl.taiwan_stock_institutional_investors(stock_id=sid_clean, start_date=start)
-        if df is None or df.empty: return 0, 0
-        def count_s(name):
-            d = df[df['name'] == name].sort_values('date', ascending=False)
-            c = 0
-            for _, r in d.iterrows():
-                if (r['buy'] - r['sell']) > 0: c += 1
-                else: break
-            return c
-        return count_s('Foreign_Investor'), count_s('Investment_Trust')
-    except: return 0, 0
+        if df is None or df.empty: return 0, 0, 0, 0
+        
+        def analyze_investor(name):
+            d = df[df['name'] == name].sort_values('date', ascending=False).head(20)
+            if d.empty: return 0, 0
+            streak = 0
+            buy_days = 0
+            for idx, (_, r) in enumerate(d.iterrows()):
+                net = r['buy'] - r['sell']
+                if net > 0:
+                    buy_days += 1
+                    if streak == idx:
+                        streak += 1
+            return streak, buy_days
+
+        fs_streak, fs_days = analyze_investor('Foreign_Investor')
+        ss_streak, ss_days = analyze_investor('Investment_Trust')
+        return fs_streak, ss_streak, fs_days, ss_days
+    except: return 0, 0, 0, 0
 
 def calculate_indicators(df):
     close = df['Close']
@@ -225,7 +235,11 @@ def analyze_v14(ticker, name):
         
         cp = df.iloc[-1]['Close']
         ma5 = df['Close'].rolling(5).mean().iloc[-1]
-        ma60 = df['Close'].rolling(60).mean().iloc[-1]
+        ma20 = df['Close'].rolling(20).mean().iloc[-1]
+        
+        ma60_series = df['Close'].rolling(60).mean()
+        ma60 = ma60_series.iloc[-1]
+        ma60_prev = ma60_series.iloc[-2] if len(ma60_series) > 1 else ma60
         
         rsi_series, k_series, d_series = calculate_indicators(df)
         rsi_val = rsi_series.iloc[-1]
@@ -240,29 +254,40 @@ def analyze_v14(ticker, name):
         if bias_5 > 7 or rsi_val > 75 or k_val > 85: status_label = "⚠️過熱"
         
         pure_id = ticker.split('.')[0]
-        fs, ss = get_streak_only(pure_id)
+        fs_streak, ss_streak, fs_days, ss_days = get_inst_stats(pure_id)
         
-        if (fs >= 2 or ss >= 1) and cp > ma60 and vol_ratio > 1.1:
-            type_tag = "🌟投信認養" if ss >= 2 else "🔍法人掃貨"
+        # 1. 短線穩健策略條件
+        is_stable = ((ss_streak >= 2 or fs_streak >= 3) and (vol_ratio > 1.2) and (50 <= rsi_val <= 75) and (k_val <= 80) and cp > ma60)
+        # 2. 短線強勢飆股策略條件
+        is_aggressive = ((ss_streak >= 1 or fs_streak >= 2) and (vol_ratio > 2.5) and (rsi_val > 60) and (cp > ma5) and cp > ma60)
+        # 3. 🚀【全新功能】長線主升浪飆股策略條件（完美狙擊強茂體系：無RSI天花板、20日區間法人合計吸籌 >= 12天、季線上揚）
+        is_long_term_trend = (cp > ma20 and cp > ma60 and ma60 > ma60_prev and (fs_days + ss_days >= 12) and vol_ratio > 1.0)
+        
+        if ((fs_streak >= 2 or ss_streak >= 1) and cp > ma60 and vol_ratio > 1.1) or is_long_term_trend:
+            type_tag = "🔍法人掃貨"
+            if ss_streak >= 2: type_tag = "🌟投信認養"
+            if is_long_term_trend and not (is_stable or is_aggressive): type_tag = "🚀長線飆股"
+            
             tw_today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
-            sheet_data = [tw_today, pure_id, name, type_tag, fs, ss, round(vol_ratio, 2), status_label, round(rsi_val, 1), round(k_val, 1), cp]
+            sheet_data = [tw_today, pure_id, name, type_tag, fs_streak, ss_streak, round(vol_ratio, 2), status_label, round(rsi_val, 1), round(k_val, 1), cp]
 
             recommendation = None
-            is_stable = ((ss >= 2 or fs >= 3) and (vol_ratio > 1.2) and (50 <= rsi_val <= 75) and (k_val <= 80))
-            is_aggressive = ((ss >= 1 or fs >= 2) and (vol_ratio > 2.5) and (rsi_val > 60) and (cp > ma5))
-
             if is_stable:
                 reason = f"🛡️AI穩健: {type_tag} (量{vol_ratio:.1f}x/RSI{rsi_val:.0f})"
                 recommendation = {'id': pure_id, 'name': name, 'reason': reason}
             elif is_aggressive:
-                reason = f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs}投{ss})"
+                reason = f"🚀AI飆股: 爆量攻擊 (量{vol_ratio:.1f}x/外{fs_streak}投{ss_streak})"
                 recommendation = {'id': pure_id, 'name': name, 'reason': reason}
+            elif is_long_term_trend:
+                reason = f"🌊AI長線飆股: 主力大週期鎖籌碼 (量{vol_ratio:.1f}x/季線上揚)"
+                recommendation = {'id': pure_id, 'name': name, 'reason': reason}
+                
             return None, sheet_data, recommendation
     except: return None, None, None
     return None, None, None
 
 # ==========================================
-# 4. 主程式執行區塊 (全面融合 LINE 額度動態回報)
+# 4. 主程式執行區塊 (已解除 .head(1000) 全市場解封版)
 # ==========================================
 def main():
     dl = DataLoader()
@@ -289,10 +314,12 @@ def main():
 
     name_map = dict(zip(stock_df['stock_id'], stock_df['stock_name']))
     m_col = 'market_type' if 'market_type' in stock_df.columns else 'type'
-    targets = stock_df[stock_df['stock_id'].str.len() == 4].head(1000) 
+    
+    # ✨ 核心修改：移除 .head(1000)，無盲區全面掃描台股全市場
+    targets = stock_df[stock_df['stock_id'].str.len() == 4] 
     
     sheet_results, watch_list_candidates, seen_ids = [], [], set()
-    print(f"啟動雙軌策略掃描 (1000檔)...")
+    print(f"🚀 啟動全市場雙軌＋長線飆股策略全面大掃描 (共 {len(targets)} 檔)...")
     
     for _, row in targets.iterrows():
         sid = row['stock_id']
@@ -315,21 +342,18 @@ def main():
     real_watch_url = update_watch_list_sheet(watch_list_candidates, name_map)
     if real_watch_url: watch_list_url = real_watch_url
 
-    # 🚀 動態撈取當前 LINE BOT 免費額度狀態
     line_quota_report = get_line_quota_report()
-
-    # 3. 簡化 LINE 推播 (完美結合：自動連結 + 本月剩餘額度)
     tw_date = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
 
-    msg = (f"🔍 【{tw_date} 法人雙軌策略掃描完成】\n\n"
-           f"今日 1000 檔股票篩選已順利結束！\n"
-           f"📈 共篩選出 {len(sheet_results)} 檔符合法人多頭標的，並已自動過濾更新潛力股至您的雲端觀察名單。\n\n"
+    msg = (f"🔍 【{tw_date} 全市場量化選股雷達掃描完成】\n\n"
+           f"今日台股全市場 1700+ 檔篩選已順利結束！\n"
+           f"📈 共篩選出 {len(sheet_results)} 檔符合法人多頭/長線飆股標的，並已自動過濾更新潛力股至您的雲端觀察名單。\n\n"
            f"🔗 點擊查看法人精選監測：\n{monitor_sheet_url}\n\n"
            f"📋 點擊查看最新 WATCH_LIST：\n{watch_list_url}\n\n"
-           f"{line_quota_report}")  # ✨ 自動貼上額度診斷報告
+           f"{line_quota_report}")
     
     send_line(msg)
-    print("✅ 雙報表自動化控制 + LINE 額度回報版推播成功！")
+    print("✅ 雙報表自動化控制 + 全市場長線飆股監測部署成功！")
 
 if __name__ == "__main__":
     main()
