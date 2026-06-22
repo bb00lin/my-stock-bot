@@ -58,59 +58,6 @@ def calculate_next_filename(latest_title):
     friday = today + timedelta(days=(4 - today.weekday()))
     return friday.strftime("%Y%m%d")
 
-def shift_all_dates(content):
-    """
-    將內容中所有日期格式字串增加 7 天，並盡量保留原始格式 (單/雙碼、分隔符)
-    支援格式: YYYY-M-D, YYYY/M/D, YYYY.M.D
-    """
-    print("正在執行全域日期推移 (+7 days)...")
-    
-    # Regex 說明:
-    # (\d{4}) : 年
-    # ([-/.]) : 分隔符 (記住這一個，後面要用同一個)
-    # (\d{1,2}): 月
-    # \2      : 引用第 2 組的分隔符 (確保前後一致)
-    # (\d{1,2}): 日
-    pattern = re.compile(r'(\d{4})([-/.])(\d{1,2})\2(\d{1,2})')
-    
-    def replace_callback(match):
-        year_str, sep, month_str, day_str = match.groups()
-        full_str = match.group(0)
-        
-        try:
-            # 解析日期
-            current_date = date(int(year_str), int(month_str), int(day_str))
-            # 加 7 天
-            new_date = current_date + timedelta(days=7)
-            
-            # --- 格式還原邏輯 ---
-            # 檢查原本的月/日是否有補 0 (透過字串長度判斷)
-            # 如果原字串長度是 2 (例如 '01')，新日期也要補 0
-            # 如果原字串長度是 1 (例如 '1')，新日期不要補 0
-            
-            # 處理月份
-            if len(month_str) == 2:
-                new_month_str = f"{new_date.month:02d}"
-            else:
-                new_month_str = f"{new_date.month}"
-                
-            # 處理日期
-            if len(day_str) == 2:
-                new_day_str = f"{new_date.day:02d}"
-            else:
-                new_day_str = f"{new_date.day}"
-            
-            # 組合成新字串，使用原本的分隔符
-            new_date_str = f"{new_date.year}{sep}{new_month_str}{sep}{new_day_str}"
-            
-            # print(f"  Debug: {full_str} -> {new_date_str}") 
-            return new_date_str
-            
-        except ValueError:
-            return full_str # 如果日期不合法 (例如 2026-02-30)，就不動它
-
-    return pattern.sub(replace_callback, content)
-
 def create_new_report(latest_page):
     # 1. 計算新檔名
     next_filename = calculate_next_filename(latest_page['title'])
@@ -125,9 +72,9 @@ def create_new_report(latest_page):
         print(f"⚠️ 跳過：頁面 '{new_title}' 已經存在！")
         return
 
-    # 3. 處理內容 (全域日期 +7)
-    original_body = latest_page['body']['storage']['value']
-    new_body = shift_all_dates(original_body)
+    # 3. 處理內容 (✅ 取消日期推移，直接原封不動複製舊版內容)
+    # 💡 提示：如果未來連舊內容都不想要，想產出完全空白的一頁，可以將這行改成 new_body = ""
+    new_body = latest_page['body']['storage']['value']
     
     # 4. 建立頁面
     ancestors = []
@@ -159,7 +106,7 @@ def create_new_report(latest_page):
         webui = data['_links']['webui']
         link = f"{BASE_URL}/wiki{webui}" if not webui.startswith('/wiki') else f"{BASE_URL}{webui}"
         
-        print(f"🎉 成功建立！所有日期已推移 7 天。")
+        print(f"🎉 成功建立新週報！(保留原排版，無日期推移)")
         print(f"連結: {link}")
         
     except requests.exceptions.HTTPError as e:
@@ -168,7 +115,7 @@ def create_new_report(latest_page):
         sys.exit(1) # 讓 GitHub Actions 知道失敗了
 
 def main():
-    print(f"=== Confluence API 自動週報 (v8.0 日期推移版) ===")
+    print(f"=== Confluence API 自動週報 (純複製與標題更新版) ===")
     try:
         latest_page = find_latest_report()
         create_new_report(latest_page)
