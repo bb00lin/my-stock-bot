@@ -3,6 +3,15 @@ name: DailyStockPush
 on:
   # ⚡ [已暫時取消] 移除 cron 定時排程，全面改由 DailyStockBot 串接執行，防範重複觸發浪費 Token
   workflow_dispatch: # 🚀 保留手動觸發功能，方便您隨時在 GitHub 網頁上手動測試執行
+    inputs:
+      enable_ai:
+        description: '🤖 啟動 AI 診斷服務 (消耗 Gemini Token)'
+        type: boolean
+        required: true
+        default: false
+  # 💡 總監額外加上：如果您未來改用 repository_dispatch 讓機器人觸發，這可以當作另一條專用通道
+  repository_dispatch: 
+    types: [trigger-push]
 
 permissions:
   contents: read
@@ -28,6 +37,9 @@ jobs:
 
       - name: Run DailyStockPush
         env:
+          # 核心魔法：只要不是您「手動點擊 (workflow_dispatch)」，系統一律視為「自動排程/遠端觸發」並強制開啟 AI
+          # 若是手動點擊，則以您勾選的狀態 (inputs.enable_ai) 為準，預設為 false
+          ENABLE_AI: ${{ github.event_name != 'workflow_dispatch' && 'true' || github.event.inputs.enable_ai }}
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
