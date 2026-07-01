@@ -555,9 +555,9 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
             if SETTINGS.get("hide_status_only") and not SETTINGS.get("style_weekly"):
                 if not day_logs and user_changed_status: continue 
 
-            if day_logs or (user_changed_status and is_assignee):
-                if not day_logs:
-                    day_logs.append({"comment": "(僅狀態改變)", "duration": "-", "duration_mins": 0, "started_date": target_date_str})
+            if day_logs:
+                for uwl in day_logs:
+                    confluence_links = get_remote_links(key) if SETTINGS.get("show_confluence_links") else []
                 
                 confluence_links = get_remote_links(key) if SETTINGS.get("show_confluence_links") else []
 
