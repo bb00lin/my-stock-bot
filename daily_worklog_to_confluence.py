@@ -135,6 +135,7 @@ def parse_jira_date_to_tz8(jira_time_str):
     except Exception:
         return jira_time_str[:10]
 
+# ✅ 強效時間解析器
 def parse_jira_date_to_dt(jira_time_str):
     if not jira_time_str: return None
     try:
@@ -555,9 +556,9 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
             if SETTINGS.get("hide_status_only") and not SETTINGS.get("style_weekly"):
                 if not day_logs and user_changed_status: continue 
 
-            if day_logs:
-                for uwl in day_logs:
-                    confluence_links = get_remote_links(key) if SETTINGS.get("show_confluence_links") else []
+            if day_logs or (user_changed_status and is_assignee):
+                if not day_logs:
+                    day_logs.append({"comment": "(僅狀態改變)", "duration": "-", "duration_mins": 0, "started_date": target_date_str})
                 
                 confluence_links = get_remote_links(key) if SETTINGS.get("show_confluence_links") else []
 
@@ -1344,7 +1345,7 @@ def run_clear_logic():
     try:
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
         selected_dates = get_selected_dates()
-        if not selected_dates: return print("⚠️ 未選擇任何要更新的日期(無法判斷目標頁面)。")
+        if not selected_dates: return print("⚠️ 未選擇 any 要更新的日期(無法判斷目標頁面)。")
 
         target_title = get_target_report_title(selected_dates[0])
         print(f"\n=========================================\n🎯 目標週報頁面: {target_title} (區間清除模式)\n=========================================\n")
@@ -1478,7 +1479,7 @@ def run_sync_logic():
         days_to_process = [week_start + timedelta(days=i) for i in range(7)]
         
         # ====================================================
-        # 🌟 核心修正：在填入新資料前，先把 #Worklog 區間「無差別掃乾淨」
+        # 🌟 核心防線一：在填入新資料前，先把 #Worklog 區間「無差別掃乾淨」
         # ====================================================
         print("\n🧹 執行清潔防呆：正在精準清洗 #Worklog 區間的所有歷史進度...")
         start_marker = soup.find(string=re.compile(r'#Worklog\s*$'))
@@ -1509,11 +1510,11 @@ def run_sync_logic():
         target_date_tags = [d.strftime("[%Y/%m/%d]") for d in days_to_process]
 
         # ====================================================
-        # 🌟 核心修改：定義您要求的團隊嚴格指定順序
+        # 🌟 核心防線二：強制定向排序 (符合您要求的指定順序)
         # ====================================================
         STRICT_ORDER = ["sam.chang", "Vic Wu", "SF Hsieh", "shannonchang", "Bob Lin"]
         
-        # 建立一個虛擬的暫存湯匙，用來依序收集所有人的排版結果
+        # 建立暫存湯匙容器，用來依序收集所有人的排版結果
         combined_soup = BeautifulSoup("", "html.parser")
 
         print("\n=========================================")
@@ -1575,12 +1576,13 @@ def run_sync_logic():
         if SETTINGS.get("inherit_parent_due"):
             for iss in all_issues_pool: ensure_project_rank_mapped(iss.get('fields', {}).get('project', {}).get('key'))
 
-        # 🌟 依照您指定的嚴格順序，依序將各個同仁的進度封裝進 combined_soup 裡
+        # 🌟 核心防線三：日期強制過濾白名單（只認 selected_dates 裡的日期）
+        allowed_dates = [d.strftime("%Y-%m-%d") for d in selected_dates]
+
+        # 依照您指定的嚴格順序，依序將各個同仁的進度封裝進 combined_soup 裡
         for target_user_key in STRICT_ORDER:
-            # 從原有的 ACCOUNT_DICT 找出對應的真實名稱與 Email
             name = next((k for k in ACCOUNT_DICT.keys() if k == target_user_key or (target_user_key == "Bob Lin" and k == "Bob Lin") or (target_user_key == "Vic Wu" and k == "Vic Wu") or (target_user_key == "SF Hsieh" and k == "SF Hsieh")), None)
             if not name:
-                # 容錯處理：若是 key 對應不上下方的 Dict 鍵名，則做模糊比對
                 name = next((k for k in ACCOUNT_DICT.keys() if target_user_key.lower() in k.lower()), None)
             if not name: continue
                 
@@ -1588,7 +1590,10 @@ def run_sync_logic():
             acc_id = get_account_id(email, name)
             user_bg_color = USER_BG_COLORS.get(name, "#ffffff")
             
-            logs = extract_logs_from_issues(name, email, acc_id, days_to_process, all_issues_pool)
+            raw_logs = extract_logs_from_issues(name, email, acc_id, days_to_process, all_issues_pool)
+            
+            # 🛡️ 實施日期強制過濾：排除任何不屬於白名單中的多餘日期
+            logs = [l for l in raw_logs if l['started_date'] in allowed_dates]
             
             if SETTINGS.get("inherit_parent_due"):
                 for log in logs:
@@ -1605,6 +1610,13 @@ def run_sync_logic():
 
             if SETTINGS.get("style_weekly") and logs:
                 daily_aggregated_logs = enrich_with_weekly_data(logs, name, email, acc_id, days_to_process, all_issues_pool)
+                
+                # 🛡️ 同步修剪 Style 3 風格內的日誌子項目，直接剔除不符日期的項目
+                if daily_aggregated_logs:
+                    for alog in daily_aggregated_logs:
+                        alog['daily_days'] = [d for d in alog['daily_days'] if d['date'].strftime("%Y-%m-%d") in allowed_dates]
+                    daily_aggregated_logs = [alog for alog in daily_aggregated_logs if alog['daily_days']]
+                
                 total_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].date() in [sd.date() for sd in selected_dates])
                 weekend_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].weekday() >= 5 and d['date'].date() in [sd.date() for sd in selected_dates])
             else:
