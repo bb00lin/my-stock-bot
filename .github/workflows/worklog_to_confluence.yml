@@ -12,28 +12,31 @@ on:
         required: false
         default: ''
   schedule:
+    # 台灣時間週一至週五 03:00 = UTC 時間週日至週四 19:00
     - cron: '0 19 * * 0-4'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
+    # 1. 下載程式碼
     - name: Checkout code
       uses: actions/checkout@v4
 
+    # 2. 設定 Python 環境
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.9'
 
+    # 3. 安裝套件
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install requests beautifulsoup4 python-dotenv lxml line-bot-sdk
 
+    # 4. 執行自動化腳本 (✅ 修正：防止假成功 Bug，確保能確實觸發錯誤信件並保留 Log)
     - name: Run Confluence Script
       id: run_script
       env:
@@ -44,16 +47,18 @@ jobs:
         SAM_EMAIL: ${{ secrets.SAM_EMAIL }}
         VIC_EMAIL: ${{ secrets.VIC_EMAIL }}
         SF_EMAIL: ${{ secrets.SF_EMAIL }}
-        # 🌟 同步接收 LINE ID 與 顯示名稱
+        # 同步接收 LINE ID 與 顯示名稱
         LINE_USER_ID: ${{ github.event.inputs.line_user_id }}
         LINE_DISPLAY_NAME: ${{ github.event.inputs.line_display_name }}
         LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
       run: |
-        python daily_worklog_to_confluence.py 2>&1 | tee output.txt
+        python daily_worklog_to_confluence.py > output.txt 2>&1 || { cat output.txt; exit 1; }
+        cat output.txt
 
+    # 5. 發送成功信件 [Done] (✅ 升級：改用 v4 完美對齊 Node 24 環境)
     - name: Send Success Email
       if: success()
-      uses: dawidd6/action-send-mail@v3
+      uses: dawidd6/action-send-mail@v4
       with:
         server_address: smtp.gmail.com
         server_port: 465   
@@ -65,9 +70,10 @@ jobs:
         from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
         body: file://output.txt
 
+    # 6. 發送失敗信件 [Fail] (✅ 升級：改用 v4，並自動附上出錯的 Python 原始 Log)
     - name: Send Failure Email
       if: failure()
-      uses: dawidd6/action-send-mail@v3
+      uses: dawidd6/action-send-mail@v4
       with:
         server_address: smtp.gmail.com
         server_port: 465
@@ -77,7 +83,4 @@ jobs:
         subject: Confluence automation script [Fail]
         to: bb00lin@gmail.com
         from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
-        body: |
-          Confluence 自動日誌寫入執行失敗。
-          
-          請檢查 GitHub Actions Log 了解詳情。
+        body: file://output.txt
