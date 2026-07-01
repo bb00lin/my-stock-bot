@@ -67,7 +67,6 @@ TW_MAKEUP_WORKDAYS = set()
 class SettingsManager:
     def __init__(self, filepath="settings_daily.json"):
         self.filepath = filepath
-        # 預設值 (對齊本地端 V50.15)
         self.config = {
             "filter_comment": True, "filter_started": True, "day_yesterday": False,
             "exclude_keywords": "DailyMeeting", "auto_clear_first": False,
@@ -555,10 +554,8 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
             if SETTINGS.get("hide_status_only") and not SETTINGS.get("style_weekly"):
                 if not day_logs and user_changed_status: continue 
 
-            if day_logs or (user_changed_status and is_assignee):
-                if not day_logs:
-                    day_logs.append({"comment": "(僅狀態改變)", "duration": "-", "duration_mins": 0, "started_date": target_date_str})
-                
+            # 🌟 核心防線一：過濾掉沒有工時的純狀態變更紀錄，避免跑出空日報
+            if day_logs:
                 confluence_links = get_remote_links(key) if SETTINGS.get("show_confluence_links") else []
 
                 for uwl in day_logs:
@@ -1344,7 +1341,7 @@ def run_clear_logic():
     try:
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
         selected_dates = get_selected_dates()
-        if not selected_dates: return print("⚠️ 未選擇任何要更新的日期(無法判斷目標頁面)。")
+        if not selected_dates: return print("⚠️ 未選擇 any 要更新的日期(無法判斷目標頁面)。")
 
         target_title = get_target_report_title(selected_dates[0])
         print(f"\n=========================================\n🎯 目標週報頁面: {target_title} (區間清除模式)\n=========================================\n")
@@ -1359,51 +1356,92 @@ def run_clear_logic():
         soup = BeautifulSoup(html_content, 'html.parser')
         
         page_needs_update = False
+        cleaned_count = 0
 
-        # 🌟 定位 `#Worklog` 與 `#Worklog End` 的文字錨點
-        start_marker = soup.find(string=re.compile(r'#Worklog\s*$'))
-        end_marker = soup.find(string=re.compile(r'#Worklog End\s*$'))
+        for element in soup.find_all(lambda tag: tag.has_attr('class') and any(c.startswith('daily-worklog-') for c in tag['class'])):
+            element.extract()
+            page_needs_update = True
+            cleaned_count += 1
+        
+        for name, email in ACCOUNT_DICT.items():
+            acc_id = get_account_id(email, name)
+            target_mention = None
+            if acc_id:
+                ri_user = soup.find('ri:user', attrs={'ri:account-id': acc_id})
+                if ri_user: target_mention = ri_user.find_parent('ac:link')
+            if not target_mention:
+                all_links = soup.find_all('ac:link')
+                for link in all_links:
+                    if name.lower() in str(link).lower() or (email and email.split('@')[0].lower() in str(link).lower()):
+                        target_mention = link; break
+            if not target_mention:
+                target_mention = soup.find(string=re.compile(f"@{name}", re.I))
+                if not target_mention and email:
+                    target_mention = soup.find(string=re.compile(f"@{email.split('@')[0]}", re.I))
+            if not target_mention: continue
 
-        if start_marker and end_marker:
-            start_element = start_marker.parent
-            end_element = end_marker.parent
-            
-            # 搜集區間內所有舊日誌標籤與文字
-            elements_to_remove = []
-            current_element = start_element.next_sibling
-            while current_element and current_element != end_element:
-                elements_to_remove.append(current_element)
-                current_element = current_element.next_sibling
-                
-            if elements_to_remove:
-                print(f"🧹 偵測到 #Worklog 區間內有舊日誌，正在執行安全清洗...")
-                for element in elements_to_remove:
-                    if hasattr(element, 'decompose'): element.decompose()
-                    else: element.extract()
+            mention_container = target_mention.find_parent(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div'])
+            if not mention_container: mention_container = target_mention
+
+            if isinstance(mention_container, Tag) and mention_container.name in ['p', 'div', 'li', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                mention_container.name = 'h1'
                 page_needs_update = True
-        else:
-            print("⚠️ 網頁中找不到 #Worklog 或 #Worklog End 標記，跳過區間清洗。")
+
+            user_nodes = []
+            current_node = mention_container.next_sibling
+            while current_node:
+                if isinstance(current_node, NavigableString) and str(current_node).strip().startswith('@'): break 
+                if isinstance(current_node, Tag):
+                    if current_node.name == 'ac:link' or current_node.find('ac:link'): break 
+                    if current_node.name in ['h1', 'h2', 'hr']: break 
+                    if str(current_node.get_text()).strip().startswith('@'): break
+                user_nodes.append(current_node)
+                current_node = current_node.next_sibling
+
+            nodes_to_remove = []
+            i = 0
+            while i < len(user_nodes):
+                node = user_nodes[i]
+                text = node.get_text(strip=True) if isinstance(node, Tag) else str(node).strip()
+                if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', text):
+                    nodes_to_remove.append(node)
+                    i += 1
+                    while i < len(user_nodes):
+                        next_node = user_nodes[i]
+                        next_text = next_node.get_text(strip=True) if isinstance(next_node, Tag) else str(next_node).strip()
+                        if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', next_text): break
+                        nodes_to_remove.append(next_node)
+                        i += 1
+                else:
+                    i += 1
+
+        for node in nodes_to_remove:
+            node.extract()
+            page_needs_update = True
+            cleaned_count += 1
         
         if page_needs_update:
+            print(f"🧹 發現 {cleaned_count} 個日誌區塊/殘留，正在更新至 Confluence...")
             url = f"{api_endpoint}/{page_id}"
+            
             payload = {
-                "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
-                "title": page_data['title'],
-                "type": "page",
-                "body": {"storage": {"value": str(soup), "representation": "storage"}},
-                "metadata": {
-                    "properties": {
-                        "content-appearance-published": {"value": "full-width"},
-                        "content-appearance-draft": {"value": "full-width"}
+                    "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
+                    "title": page_data['title'],
+                    "type": "page",
+                    "body": {"storage": {"value": str(soup), "representation": "storage"}},
+                    "metadata": {
+                        "properties": {
+                            "content-appearance-published": {"value": "full-width"},
+                            "content-appearance-draft": {"value": "full-width"}
+                        }
                     }
                 }
-            }
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
-                print("🎉 大功告成！已成功清空 #Worklog 區間內的所有舊日誌。")
+                print("🎉 大功告成！已成功清除本頁所有舊日誌。")
             else: print(f"❌ 儲存至 Confluence 失敗: {update_res.text}")
         else:
-            print("📭 區間內本來就是空的，無需清除。")
+            print("📭 頁面乾淨無殘留，無需清除。")
 
     except Exception as e: print(f"\n❌ 程式發生意外錯誤: {e}")
 
@@ -1411,12 +1449,10 @@ def run_clear_logic():
 def run_sync_logic():
     start_time = time.time()
     
-    # 用來記錄最終要推播給 LINE 的結果
     sync_status = "success"
     sync_message = ""
     total_logs_written = 0
     
-    # ✅ 動態判斷 GitHub 執行環境並決定標籤
     is_github_actions = os.environ.get("GITHUB_ACTIONS") == "true"
     github_event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     
@@ -1478,7 +1514,7 @@ def run_sync_logic():
         days_to_process = [week_start + timedelta(days=i) for i in range(7)]
         
         # ====================================================
-        # 🌟 核心修正：在填入新資料前，先把 #Worklog 區間「無差別掃乾淨」
+        # 🌟 核心防線一：在填入新資料前，先把 #Worklog 區間「無差別掃乾淨」
         # ====================================================
         print("\n🧹 執行清潔防呆：正在精準清洗 #Worklog 區間的所有歷史進度...")
         start_marker = soup.find(string=re.compile(r'#Worklog\s*$'))
@@ -1509,11 +1545,11 @@ def run_sync_logic():
         target_date_tags = [d.strftime("[%Y/%m/%d]") for d in days_to_process]
 
         # ====================================================
-        # 🌟 核心修改：定義您要求的團隊嚴格指定順序
+        # 🌟 核心防線二：強制定向排序 (符合您要求的指定順序)
         # ====================================================
         STRICT_ORDER = ["sam.chang", "Vic Wu", "SF Hsieh", "shannonchang", "Bob Lin"]
         
-        # 建立一個虛擬的暫存湯匙，用來依序收集所有人的排版結果
+        # 建立暫存湯匙容器，用來依序收集所有人的排版結果
         combined_soup = BeautifulSoup("", "html.parser")
 
         print("\n=========================================")
@@ -1575,12 +1611,13 @@ def run_sync_logic():
         if SETTINGS.get("inherit_parent_due"):
             for iss in all_issues_pool: ensure_project_rank_mapped(iss.get('fields', {}).get('project', {}).get('key'))
 
-        # 🌟 依照您指定的嚴格順序，依序將各個同仁的進度封裝進 combined_soup 裡
+        # 🌟 核心防線三：今日日期黑名單攔截 (今天是 7/2，故黑名單包含 7/2 及之後的日期)
+        today_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
+        # 依照您指定的嚴格順序，依序將各個同仁的進度封裝進 combined_soup 裡
         for target_user_key in STRICT_ORDER:
-            # 從原有的 ACCOUNT_DICT 找出對應的真實名稱與 Email
             name = next((k for k in ACCOUNT_DICT.keys() if k == target_user_key or (target_user_key == "Bob Lin" and k == "Bob Lin") or (target_user_key == "Vic Wu" and k == "Vic Wu") or (target_user_key == "SF Hsieh" and k == "SF Hsieh")), None)
             if not name:
-                # 容錯處理：若是 key 對應不上下方的 Dict 鍵名，則做模糊比對
                 name = next((k for k in ACCOUNT_DICT.keys() if target_user_key.lower() in k.lower()), None)
             if not name: continue
                 
@@ -1588,7 +1625,11 @@ def run_sync_logic():
             acc_id = get_account_id(email, name)
             user_bg_color = USER_BG_COLORS.get(name, "#ffffff")
             
-            logs = extract_logs_from_issues(name, email, acc_id, days_to_process, all_issues_pool)
+            raw_logs = extract_logs_from_issues(name, email, acc_id, days_to_process, all_issues_pool)
+            
+            # 🛡️ 實施未來黑名單過濾：只要日期大於等於今天(7/2)，就一律攔截丟棄！
+            # 這樣週一、週二、週三的歷史數據都能完美保留，但今天(7/2)的任何變動絕不會跑出來
+            logs = [l for l in raw_logs if l['started_date'] < today_str]
             
             if SETTINGS.get("inherit_parent_due"):
                 for log in logs:
@@ -1605,6 +1646,13 @@ def run_sync_logic():
 
             if SETTINGS.get("style_weekly") and logs:
                 daily_aggregated_logs = enrich_with_weekly_data(logs, name, email, acc_id, days_to_process, all_issues_pool)
+                
+                # 🛡️ 同步修剪 Style 3 風格內的日誌子項目，剔除今天(7/2)及之後的項目
+                if daily_aggregated_logs:
+                    for alog in daily_aggregated_logs:
+                        alog['daily_days'] = [d for d in alog['daily_days'] if d['date'].strftime("%Y-%m-%d") < today_str]
+                    daily_aggregated_logs = [alog for alog in daily_aggregated_logs if alog['daily_days']]
+                
                 total_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].date() in [sd.date() for sd in selected_dates])
                 weekend_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].weekday() >= 5 and d['date'].date() in [sd.date() for sd in selected_dates])
             else:
@@ -1650,7 +1698,7 @@ def run_sync_logic():
                 else:
                     new_html_block = generate_style_2_html(soup, target_date, logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, bg_color=user_bg_color, update_source_tag=update_source_tag)
                 
-                # 🌟 正序疊加進臨時的 combined_soup 容器中
+                # 正序疊加進臨時的 combined_soup 容器中
                 combined_soup.append(p_user)
                 combined_soup.append(new_html_block)
                 
@@ -1658,7 +1706,7 @@ def run_sync_logic():
                 page_needs_update = True
                 print(f"  ☑️ 成功處理 {name} 進度封裝。")
 
-        # 🌟 最後將排好順序的整包 combined_soup 一次性安插在 #Worklog 正下方
+        # 最後將排好順序的整包 combined_soup 一次性安插在 #Worklog 正下方
         if page_needs_update and start_marker:
             start_element.insert_after(combined_soup)
 
@@ -1698,7 +1746,7 @@ def run_sync_logic():
                                         del_resp = requests.delete(f"{remote_link_url}/{link_id}", auth=ADMIN_AUTH, timeout=10)
                                         if del_resp.status_code in [200, 204]: cleared_count += 1
                         except: pass
-                    print(f"✅ 歷史大清洗完畢！共成功拔除了 {cleared_count} 筆殘留的 Jira 週報連動紀錄。")
+                    print(f"✅ 歷史大清洗完畢！共成功拔成了 {cleared_count} 筆殘留的 Jira 週報連動紀錄。")
             else:
                 sync_status = "error"
                 sync_message = f"❌ 儲存至 Confluence 失敗。"
