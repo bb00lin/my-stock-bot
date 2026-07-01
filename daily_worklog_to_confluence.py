@@ -1340,7 +1340,7 @@ def _append_pending_tasks(soup, container, pending_in_progress, pending_waiting,
     p_spacer.append(soup.new_tag("br"))
     container.append(p_spacer)
 
-ddef run_clear_logic():
+def run_clear_logic():
     try:
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
         selected_dates = get_selected_dates()
